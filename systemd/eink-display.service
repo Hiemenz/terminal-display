@@ -1,0 +1,30 @@
+[Unit]
+Description=E-ink Display (terminal or stats dashboard)
+After=network.target graphical-session.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/terminal-display
+
+# Reads startup_mode from config and launches the right script.
+ExecStart=/home/pi/terminal-display/systemd/launcher.sh
+
+# Restart on crash, but not on clean exit (e.g. mode-switch spawns new process)
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=10
+
+# Give the process a real TTY so raw-mode keyboard input works
+StandardInput=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+
+# Ensure SPI and GPIO are accessible (Pi-specific)
+SupplementaryGroups=spi gpio video
+
+[Install]
+WantedBy=multi-user.target

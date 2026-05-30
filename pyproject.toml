@@ -12,6 +12,7 @@ pillow = "^11.1.0"
 pyyaml = "^6.0.0"
 psutil = "^5.9.0"
 pyte = "^0.8"
+qrcode = "^8.2"
 
 [build-system]
 requires = ["poetry-core"]

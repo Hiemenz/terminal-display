@@ -6,6 +6,12 @@ Entry point: render(stats, config) -> PIL.Image
 import os
 from PIL import Image, ImageDraw, ImageFont
 
+try:
+    import qrcode as _qrcode
+    _HAS_QRCODE = True
+except ImportError:
+    _HAS_QRCODE = False
+
 # Display dimensions
 W, H = 800, 480
 
@@ -194,6 +200,20 @@ def render(stats: dict, config: dict) -> Image.Image:
             d.text((rx, ry), line, font=f_small, fill=fg)
             ry += ROW_H - 4
 
+    # QR code (SSH address) — bottom-right of right column, before dark inversion
+    primary_ip = stats.get('primary_ip', '')
+    qr_size = 100
+    if primary_ip and _HAS_QRCODE and config.get('show_qr_code', True):
+        try:
+            qr_img = _qrcode.make(primary_ip).convert('L')
+            qr_img = qr_img.resize((qr_size, qr_size), Image.NEAREST)
+            # Place just above bottom bar in the right column
+            qr_x = W - PAD - qr_size
+            qr_y = H - PAD - 14 - qr_size - 4
+            img.paste(qr_img, (qr_x, qr_y))
+        except Exception:
+            pass
+
     # -----------------------------------------------------------------------
     # Bottom status bar
     # -----------------------------------------------------------------------
@@ -201,7 +221,8 @@ def render(stats: dict, config: dict) -> Image.Image:
     d.line([(PAD, bar_y), (W - PAD, bar_y)], fill=fg, width=1)
     bar_y += 4
     platform_str = stats.get('platform', '')
-    d.text((PAD, bar_y), f"platform: {platform_str}", font=f_small, fill=fg)
+    ip_label = f'  |  {primary_ip}' if primary_ip else ''
+    d.text((PAD, bar_y), f"platform: {platform_str}{ip_label}", font=f_small, fill=fg)
 
     # -----------------------------------------------------------------------
     # Dark mode inversion

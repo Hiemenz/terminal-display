@@ -1,50 +1,64 @@
 """
 E-ink terminal emulator core.
 
-Forks a shell subprocess over a PTY, reads keyboard input in raw mode,
-renders the terminal buffer via pyte, and pushes frames to the e-ink display.
-
-Refresh strategy:
-  - Partial refresh (fast, no flash) for every normal update.
-  - Full refresh (slow, flash) every terminal_full_refresh_every updates to clear ghosting.
-  - Immediate full refresh on font-size change or explicit F10 press.
+Features:
+  - tmux auto-session: attaches to or creates a named tmux session so shell
+    state survives app restarts (config: terminal_use_tmux, terminal_tmux_session)
+  - Scrollback: PgUp/PgDn scroll through pyte history (without tmux)
+  - Idle screensaver: switches to stats after N seconds of no input
+  - Status bar extras: shows current time, working directory, and git branch
+  - Alert overlays: system alerts (high CPU, low disk, SSH logins) appear in
+    the status bar without covering terminal content
+  - Split view: 600px terminal + 200px live stats sidebar
 
 Hotkeys:
   F9        — decrease font size (−2 pt)
   F12       — increase font size (+2 pt)
-  F10       — force full display refresh
-  F11       — switch to stats dashboard (launches main.py, exits terminal)
-  Ctrl+C    — kill foreground process (forwarded to PTY as normal)
+  F10       — force full display refresh (clear ghosting)
+  F11       — switch to stats dashboard
+  PgUp      — scroll up through history (no-tmux mode only)
+  PgDn      — scroll down / return to live
+  Ctrl+C    — kill foreground process (forwarded normally)
 """
 import fcntl
 import logging
 import os
 import pty
 import select
+import shutil
 import signal
 import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 import tty
 
 import pyte
 
-from terminal_renderer import render_screen, terminal_dimensions, TERMINAL_H
+from alert_monitor import AlertMonitor
+from terminal_renderer import (
+    render_screen, render_mini_stats, terminal_dimensions,
+    TERMINAL_H, SPLIT_TERMINAL_W,
+)
 from display_eink import EinkDriver
 
 logger = logging.getLogger(__name__)
 
-_RENDER_DEBOUNCE = 0.05   # seconds to wait for more PTY output before rendering
+_RENDER_DEBOUNCE   = 0.05   # seconds
+_STATUS_CACHE_TTL  = 5.0    # seconds between CWD/branch re-reads
+_STATS_UPDATE_SEC  = 30     # seconds between split-view stats refreshes
 _MIN_FONT = 8
 _MAX_FONT = 32
 
-# Escape sequences for function keys (xterm/VT220)
-_F9  = b'\x1b[20~'
-_F10 = b'\x1b[21~'
-_F11 = b'\x1b[23~'
-_F12 = b'\x1b[24~'
+# Function key escape sequences (xterm/VT220)
+_F9   = b'\x1b[20~'
+_F10  = b'\x1b[21~'
+_F11  = b'\x1b[23~'
+_F12  = b'\x1b[24~'
+_PGUP = b'\x1b[5~'
+_PGDN = b'\x1b[6~'
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -53,44 +67,81 @@ class EinkTerminal:
     """Runs a shell in a PTY and mirrors output to the e-ink display."""
 
     def __init__(self, config: dict, local: bool = False):
-        self._config = config
-        self._font_size: int = config.get('terminal_font_size', 14)
-        self._font_path: str = config.get('terminal_font_path', '')
-        self._dark_mode: bool = config.get('terminal_dark_mode', True)
-        self._full_every: int = config.get('terminal_full_refresh_every', 20)
+        self._config    = config
+        self._font_size = config.get('terminal_font_size', 14)
+        self._font_path = config.get('terminal_font_path', '')
+        self._dark_mode = config.get('terminal_dark_mode', True)
+        self._full_every  = config.get('terminal_full_refresh_every', 20)
+        self._idle_timeout = config.get('terminal_idle_timeout', 0)
+        self._split_view  = config.get('terminal_split_view', False)
+        self._status_extras = config.get('terminal_status_bar_extras', True)
 
-        self._driver = EinkDriver(local=local)
-        self._screen: pyte.Screen = None
-        self._stream: pyte.ByteStream = None
-        self._pty_master: int = None
-        self._child_pid: int = None
-        self._running = False
+        # tmux
+        self._use_tmux     = config.get('terminal_use_tmux', False) and bool(shutil.which('tmux'))
+        self._tmux_session = config.get('terminal_tmux_session', 'eink')
+
+        self._driver      = EinkDriver(local=local)
+        self._screen      = None
+        self._stream      = None
+        self._pty_master  = None
+        self._child_pid   = None
+        self._running     = False
         self._partial_count = 0
-        self._last_image = None
-        self._stdin_fd = sys.stdin.fileno()
-        self._old_tty: list = None
+        self._last_image  = None
+        self._stdin_fd    = sys.stdin.fileno()
+        self._old_tty     = None
+
+        # Scrollback state (only when not using tmux)
+        self._scroll_pages = 0
+
+        # Idle tracking
+        self._last_activity = time.monotonic()
+
+        # Status bar extras cache
+        self._status_cache: tuple = None   # (timestamp, time_str, cwd, branch)
+
+        # Alerts
+        self._alert_monitor = AlertMonitor(config)
+
+        # Split-view stats
+        self._stats_data: dict = None
+        self._stats_dirty  = False
+        self._stats_lock   = threading.Lock()
 
         self._init_screen()
 
-    # ─── Screen / PTY ────────────────────────────────────────────────────────
+    # ─── Screen ──────────────────────────────────────────────────────────────
 
     def _init_screen(self):
-        cols, rows, _, _ = terminal_dimensions(self._font_size, self._font_path)
-        self._screen = pyte.Screen(cols, rows)
+        tw = SPLIT_TERMINAL_W if self._split_view else 800
+        cols, rows, _, _ = terminal_dimensions(self._font_size, self._font_path, tw)
+        if self._use_tmux:
+            self._screen = pyte.Screen(cols, rows)
+        else:
+            history = self._config.get('terminal_scrollback', 500)
+            self._screen = pyte.HistoryScreen(cols, rows, history=history)
         self._stream = pyte.ByteStream(self._screen)
+        self._scroll_pages = 0
+
+    # ─── PTY ─────────────────────────────────────────────────────────────────
 
     def _spawn_shell(self):
-        shell = os.environ.get('SHELL', '/bin/bash')
         pid, master_fd = pty.fork()
         if pid == 0:
-            os.execvp(shell, [shell])
+            os.environ['TERM'] = 'xterm-256color'
+            if self._use_tmux:
+                os.execvp('tmux', ['tmux', 'new-session', '-A', '-s', self._tmux_session])
+            else:
+                shell = os.environ.get('SHELL', '/bin/bash')
+                os.execvp(shell, [shell])
             os._exit(1)
         self._child_pid = pid
         self._pty_master = master_fd
         self._sync_pty_winsize()
 
     def _sync_pty_winsize(self):
-        cols, rows, _, _ = terminal_dimensions(self._font_size, self._font_path)
+        tw = SPLIT_TERMINAL_W if self._split_view else 800
+        cols, rows, _, _ = terminal_dimensions(self._font_size, self._font_path, tw)
         winsize = struct.pack('HHHH', rows, cols, 0, 0)
         try:
             fcntl.ioctl(self._pty_master, termios.TIOCSWINSZ, winsize)
@@ -110,10 +161,32 @@ class EinkTerminal:
             except Exception:
                 pass
 
+    # ─── Scrollback ───────────────────────────────────────────────────────────
+
+    def _scroll_up(self):
+        if self._use_tmux or not hasattr(self._screen, 'prev_page'):
+            return
+        self._screen.prev_page()
+        self._scroll_pages += 1
+        self._render(force_full=True)
+
+    def _scroll_down(self):
+        if self._use_tmux or not hasattr(self._screen, 'next_page'):
+            return
+        if self._scroll_pages > 0:
+            self._screen.next_page()
+            self._scroll_pages -= 1
+            self._render(force_full=True)
+
+    def _snap_to_live(self):
+        """Snap back to live view if currently scrolled up."""
+        while self._scroll_pages > 0 and hasattr(self._screen, 'next_page'):
+            self._screen.next_page()
+            self._scroll_pages -= 1
+
     # ─── Hotkeys ─────────────────────────────────────────────────────────────
 
     def _handle_hotkeys(self, data: bytes) -> bytes:
-        """Strip hotkey sequences from data, act on them. Return remaining bytes."""
         if _F11 in data:
             self._switch_to_stats()
             data = data.replace(_F11, b'')
@@ -126,6 +199,12 @@ class EinkTerminal:
         if _F9 in data:
             self._change_font(-2)
             data = data.replace(_F9, b'')
+        if _PGUP in data:
+            self._scroll_up()
+            data = data.replace(_PGUP, b'')
+        if _PGDN in data:
+            self._scroll_down()
+            data = data.replace(_PGDN, b'')
         return data
 
     def _change_font(self, delta: int):
@@ -161,15 +240,94 @@ class EinkTerminal:
             start_new_session=True,
         )
 
+    # ─── Status bar info ──────────────────────────────────────────────────────
+
+    def _get_status_info(self) -> tuple:
+        """Return (time_str, cwd, git_branch), cached for _STATUS_CACHE_TTL seconds."""
+        if not self._status_extras:
+            return None
+        now = time.monotonic()
+        if self._status_cache and now - self._status_cache[0] < _STATUS_CACHE_TTL:
+            return self._status_cache[1:]
+
+        import datetime
+        time_str = datetime.datetime.now().strftime('%H:%M')
+        cwd = self._get_cwd()
+        branch = self._get_git_branch(cwd) if cwd else ''
+        self._status_cache = (now, time_str, cwd, branch)
+        return time_str, cwd, branch
+
+    def _get_cwd(self) -> str:
+        try:
+            if self._use_tmux:
+                r = subprocess.run(
+                    ['tmux', 'display-message', '-p', '-t', self._tmux_session,
+                     '#{pane_current_path}'],
+                    capture_output=True, text=True, timeout=0.5,
+                )
+                cwd = r.stdout.strip()
+            elif self._child_pid:
+                cwd = os.readlink(f'/proc/{self._child_pid}/cwd')
+            else:
+                return ''
+        except Exception:
+            return ''
+        home = os.path.expanduser('~')
+        return ('~' + cwd[len(home):]) if cwd.startswith(home) else cwd
+
+    def _get_git_branch(self, cwd: str) -> str:
+        try:
+            r = subprocess.run(
+                ['git', '-C', cwd, 'branch', '--show-current'],
+                capture_output=True, text=True, timeout=0.5,
+            )
+            return r.stdout.strip()
+        except Exception:
+            return ''
+
+    # ─── Split-view stats thread ──────────────────────────────────────────────
+
+    def _start_stats_thread(self):
+        def _loop():
+            sys.path.insert(0, os.path.join(_REPO_ROOT, 'src'))
+            from system_stats import collect as _collect
+            while self._running:
+                try:
+                    data = _collect(self._config)
+                    with self._stats_lock:
+                        self._stats_data = data
+                        self._stats_dirty = True
+                except Exception as e:
+                    logger.warning('Stats update error: %s', e)
+                time.sleep(_STATS_UPDATE_SEC)
+
+        t = threading.Thread(target=_loop, daemon=True)
+        t.start()
+
     # ─── Rendering ───────────────────────────────────────────────────────────
 
     def _render(self, force_full: bool = False):
+        tw = SPLIT_TERMINAL_W if self._split_view else 800
+        status_info = self._get_status_info()
+        alerts = self._alert_monitor.active()
+
         img = render_screen(
             self._screen,
             self._font_size,
             dark_mode=self._dark_mode,
             font_path=self._font_path,
+            terminal_width=tw,
+            status_info=status_info,
+            alerts=alerts if alerts else None,
         )
+
+        # Overlay split-view sidebar
+        if self._split_view:
+            with self._stats_lock:
+                stats = self._stats_data
+                self._stats_dirty = False
+            render_mini_stats(img, stats, dark_mode=self._dark_mode)
+
         self._last_image = img
         do_full = force_full or (self._partial_count >= self._full_every)
 
@@ -181,27 +339,31 @@ class EinkTerminal:
             if dirty_pixel_rows:
                 self._driver.partial_refresh_rows(img, dirty_pixel_rows)
                 self._partial_count += 1
-            # No dirty rows = nothing visible changed; skip the display push entirely
 
     def _dirty_pixel_rows(self) -> set:
-        """Convert pyte's dirty terminal-row set to a set of pixel rows."""
-        _, _, _, ch = terminal_dimensions(self._font_size, self._font_path)
+        """Convert pyte's dirty terminal-row set to pixel rows."""
+        _, _, _, ch = terminal_dimensions(
+            self._font_size, self._font_path,
+            SPLIT_TERMINAL_W if self._split_view else 800,
+        )
         pixel_rows = set()
         for term_row in self._screen.dirty:
             y_start = term_row * ch
             y_end = min(y_start + ch, TERMINAL_H)
-            for py in range(y_start, y_end):
-                pixel_rows.add(py)
+            pixel_rows.update(range(y_start, y_end))
         return pixel_rows
 
-
-
-    # ─── Main loop ───────────────────────────────────────────────────────────
+    # ─── Main entry point ─────────────────────────────────────────────────────
 
     def run(self):
         self._spawn_shell()
         self._enter_raw()
         self._running = True
+        self._last_activity = time.monotonic()
+
+        if self._split_view:
+            self._start_stats_thread()
+
         self._render(force_full=True)
 
         try:
@@ -218,16 +380,24 @@ class EinkTerminal:
     def _loop(self):
         last_render = 0.0
         has_pending = False
+        last_alert_tick = 0.0
 
         while self._running:
             try:
-                r, _, _ = select.select(
-                    [self._stdin_fd, self._pty_master], [], [], _RENDER_DEBOUNCE
-                )
+                fds = [self._stdin_fd]
+                if self._pty_master is not None:
+                    fds.append(self._pty_master)
+                r, _, _ = select.select(fds, [], [], _RENDER_DEBOUNCE)
             except (ValueError, OSError):
                 break
 
             now = time.monotonic()
+
+            # ── Idle screensaver check ────────────────────────────────────────
+            if self._idle_timeout > 0:
+                if now - self._last_activity > self._idle_timeout:
+                    self._switch_to_stats()
+                    break
 
             # ── Keyboard input ────────────────────────────────────────────────
             if self._stdin_fd in r:
@@ -235,6 +405,11 @@ class EinkTerminal:
                     data = os.read(self._stdin_fd, 256)
                 except OSError:
                     break
+                self._last_activity = now
+                # Snap to live before passing any key to the shell
+                if self._scroll_pages > 0:
+                    self._snap_to_live()
+                    has_pending = True
                 data = self._handle_hotkeys(data)
                 if data and self._pty_master is not None:
                     try:
@@ -247,12 +422,27 @@ class EinkTerminal:
                 try:
                     chunk = os.read(self._pty_master, 4096)
                     if chunk:
+                        # New output snaps back to live view
+                        if self._scroll_pages > 0:
+                            self._snap_to_live()
                         self._stream.feed(chunk)
                         has_pending = True
                 except OSError:
-                    # Shell exited
                     if not self._shell_exited_handler():
                         break
+                    has_pending = True
+
+            # ── Alert tick ────────────────────────────────────────────────────
+            if now - last_alert_tick >= 1.0:
+                if self._alert_monitor.tick():
+                    has_pending = True  # alert changed — re-render status bar
+                last_alert_tick = now
+
+            # ── Split-view stats update ───────────────────────────────────────
+            if self._split_view:
+                with self._stats_lock:
+                    stats_dirty = self._stats_dirty
+                if stats_dirty:
                     has_pending = True
 
             # ── Debounced render ──────────────────────────────────────────────
@@ -263,11 +453,6 @@ class EinkTerminal:
                 last_render = now
 
     def _shell_exited_handler(self) -> bool:
-        """
-        Shell process has exited. Show a message and wait for Enter (restart)
-        or Ctrl+C (quit). Returns True to continue the main loop (restarted),
-        False to exit.
-        """
         msg = (
             b'\r\n\x1b[7m  Shell exited. '
             b'Press Enter to restart or Ctrl+C to quit.  \x1b[0m\r\n'
@@ -276,7 +461,6 @@ class EinkTerminal:
         self._render(force_full=True)
         self._screen.dirty.clear()
 
-        # Close old PTY
         try:
             os.close(self._pty_master)
         except OSError:
@@ -292,12 +476,11 @@ class EinkTerminal:
                 key = os.read(self._stdin_fd, 10)
             except OSError:
                 return False
-
             if b'\r' in key or b'\n' in key:
                 self._init_screen()
                 self._spawn_shell()
                 self._render(force_full=True)
                 return True
-            if b'\x03' in key:  # Ctrl+C
+            if b'\x03' in key:
                 self._running = False
                 return False

@@ -55,3 +55,36 @@ terminal_dark_mode: true
 # How many partial (no-flash) refreshes between full (flash) refreshes.
 # Higher = less flashing, more ghosting. Lower = cleaner screen, more flashing.
 terminal_full_refresh_every: 20
+
+# tmux: attach to (or create) a named tmux session so shell state survives
+# app restarts. Sessions do NOT survive reboots without tmux-resurrect.
+terminal_use_tmux: true
+terminal_tmux_session: eink
+
+# Scrollback history (lines). PgUp/PgDn to scroll (no-tmux mode only;
+# with tmux, use Ctrl+B [ to enter copy mode).
+terminal_scrollback: 500
+
+# Idle screensaver: switch to stats after N seconds of no keyboard activity.
+# Set to 0 to disable.
+terminal_idle_timeout: 300
+
+# Status bar extras: show current time, working directory, and git branch.
+terminal_status_bar_extras: true
+
+# Split view: 600px terminal on the left, 200px live stats on the right.
+terminal_split_view: false
+
+# Alert thresholds (0 = disabled)
+terminal_alert_cpu_threshold: 90         # % CPU — alert if above this
+terminal_alert_disk_free_threshold: 10   # % free disk — alert if below this
+terminal_alert_ssh_logins: true          # notify on new SSH connections
+
+# ── Stats dashboard settings ─────────────────────────────────────────────────
+# Show QR code for primary IP address in the bottom-right of the stats screen.
+show_qr_code: true
+
+# ── Startup mode (used by systemd service) ───────────────────────────────────
+# 'terminal' = launch eink_terminal.py on boot
+# 'stats'    = launch main.py (stats dashboard) on boot
+startup_mode: terminal
