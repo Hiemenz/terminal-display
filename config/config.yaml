@@ -1,0 +1,38 @@
+# Terminal Display Configuration
+# 800x480 Waveshare 7.5" V2 e-ink display
+
+# Dark mode: black background, white text (recommended for terminal aesthetic)
+dark_mode: true
+
+# How often to refresh (seconds)
+update_interval: 30
+
+# Night mode: skip refreshes between night_start and night_end (24-hour format)
+night_mode: true
+night_start: 2   # 2am
+night_end: 7     # 7am
+
+# Timezone for time display (IANA string)
+timezone: America/Chicago
+
+# Which panels to show (set to false to hide)
+show_time: true
+show_cpu: true
+show_memory: true
+show_disk: true
+show_network: true
+show_top_processes: true
+show_load: true
+
+# Disk path to monitor
+disk_path: "/"
+
+# Network interface to monitor (empty = auto-detect)
+network_interface: ""
+
+# Number of top processes to show
+top_process_count: 5
+
+# Font paths (falls back to PIL default if not found)
+# Leave empty to use auto-detected system monospace font
+font_path: ""

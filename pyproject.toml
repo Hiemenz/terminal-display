@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "terminal-display"
+version = "0.1.0"
+description = "System stats dashboard for a 800x480 Waveshare e-ink display"
+authors = ["hiemenz <kevinhiemenz1@gmail.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.9"
+pillow = "^11.1.0"
+pyyaml = "^6.0.0"
+psutil = "^5.9.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
