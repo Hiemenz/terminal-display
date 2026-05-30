@@ -14,6 +14,9 @@ Flags:
 import sys
 import os
 import argparse
+import select
+import subprocess
+import threading
 import time
 import platform
 from datetime import datetime
@@ -29,6 +32,38 @@ from util import output_path
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _OUTPUT_IMAGE = os.path.join(_REPO_ROOT, 'output', 'terminal.bmp')
+
+_F11 = b'\x1b[23~'  # F11 escape sequence — switch to terminal mode
+
+
+def _keyboard_watcher(switch_event: threading.Event, stop_event: threading.Event):
+    """
+    Background thread: watch stdin for F11 to switch to terminal mode.
+    Silently exits if stdin is not a terminal (e.g. systemd service).
+    """
+    try:
+        import tty
+        import termios
+        fd = sys.stdin.fileno()
+        if not os.isatty(fd):
+            return
+        old = termios.tcgetattr(fd)
+        tty.setraw(fd)
+        try:
+            while not stop_event.is_set():
+                r, _, _ = select.select([sys.stdin], [], [], 0.5)
+                if r:
+                    data = os.read(fd, 16)
+                    if _F11 in data:
+                        switch_event.set()
+                        return
+                    if b'\x03' in data:  # Ctrl+C — let main loop handle it
+                        stop_event.set()
+                        return
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    except Exception:
+        pass
 
 
 def _is_night(config: dict) -> bool:
@@ -91,7 +126,32 @@ Examples:
         return
 
     print(f"Terminal Display starting — refresh every {interval}s")
+    print("Press F11 to switch to terminal mode.")
+
+    switch_event = threading.Event()
+    stop_event = threading.Event()
+    kb_thread = threading.Thread(
+        target=_keyboard_watcher,
+        args=(switch_event, stop_event),
+        daemon=True,
+    )
+    kb_thread.start()
+
     while True:
+        if switch_event.is_set():
+            print("Switching to terminal mode…")
+            term_py = os.path.join(_REPO_ROOT, 'eink_terminal.py')
+            subprocess.Popen(
+                [sys.executable, term_py] + (['--local'] if local else []),
+                close_fds=True,
+                start_new_session=True,
+            )
+            break
+
+        if stop_event.is_set():
+            print("\nStopped.")
+            break
+
         try:
             if _is_night(config):
                 print("Night mode — sleeping 5 min…")
@@ -100,12 +160,19 @@ Examples:
 
             run_once(config, local=local)
         except KeyboardInterrupt:
+            stop_event.set()
             print("\nStopped.")
             break
         except Exception as e:
             print(f"Error: {e}")
 
-        time.sleep(interval)
+        # Responsive sleep: check events every 0.5 s so Ctrl+C and F11 react quickly
+        end_time = time.monotonic() + interval
+        while not stop_event.is_set() and not switch_event.is_set():
+            remaining = end_time - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(0.5, remaining))
 
 
 if __name__ == '__main__':

@@ -155,6 +155,21 @@ files = [
 test = ["enum34 ; python_version <= \"3.4\"", "ipaddress ; python_version < \"3.0\"", "mock ; python_version < \"3.0\"", "pywin32 ; sys_platform == \"win32\"", "wmi ; sys_platform == \"win32\""]
 
 [[package]]
+name = "pyte"
+version = "0.8.2"
+description = "Simple VTXXX-compatible terminal emulator."
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "pyte-0.8.2-py3-none-any.whl", hash = "sha256:85db42a35798a5aafa96ac4d8da78b090b2c933248819157fc0e6f78876a0135"},
+    {file = "pyte-0.8.2.tar.gz", hash = "sha256:5af970e843fa96a97149d64e170c984721f20e52227a2f57f0a54207f08f083f"},
+]
+
+[package.dependencies]
+wcwidth = "*"
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 description = "YAML parser and emitter for Python"
@@ -237,7 +252,19 @@ files = [
     {file = "pyyaml-6.0.3.tar.gz", hash = "sha256:d76623373421df22fb4cf8817020cbb7ef15c725b9d5e45f17e189bfc384190f"},
 ]
 
+[[package]]
+name = "wcwidth"
+version = "0.7.0"
+description = "Measures the displayed width of unicode strings in a terminal"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "wcwidth-0.7.0-py3-none-any.whl", hash = "sha256:5d69154c429a82910e241c738cd0e2976fac8a2dd47a1a805f4afed1c0f136f2"},
+    {file = "wcwidth-0.7.0.tar.gz", hash = "sha256:90e3a7ea092341c44b99562e75d09e4d5160fe7a3974c6fb842a101a95e7eed0"},
+]
+
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.9"
-content-hash = "551599a33779459739be1a8ebbff1aa2becb2045c8e1dc488ee9966e6534cacf"
+content-hash = "83a2319c5776d5e57271675a82983fe56467ab2a87b875aa70821b0eeb5d1b74"

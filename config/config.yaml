@@ -36,3 +36,22 @@ top_process_count: 5
 # Font paths (falls back to PIL default if not found)
 # Leave empty to use auto-detected system monospace font
 font_path: ""
+
+# ── Terminal emulator settings ──────────────────────────────────────────────
+# Font size for terminal text (pt). Determines cols×rows that fit on screen.
+#   8pt  → ~133 cols × 40 rows  (very small)
+#   12pt → ~114 cols × 34 rows  (small)
+#   14pt → ~100 cols × 28 rows  (default — good balance)
+#   16pt →  ~88 cols × 24 rows  (comfortable)
+#   20pt →  ~66 cols × 20 rows  (large, easy to read from a distance)
+terminal_font_size: 14
+
+# Path to a monospace TTF for the terminal (empty = auto-detect)
+terminal_font_path: ""
+
+# Dark mode for the terminal (black bg, white text)
+terminal_dark_mode: true
+
+# How many partial (no-flash) refreshes between full (flash) refreshes.
+# Higher = less flashing, more ghosting. Lower = cleaner screen, more flashing.
+terminal_full_refresh_every: 20
