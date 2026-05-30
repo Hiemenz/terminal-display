@@ -1,11 +1,12 @@
 """
 Renders a pyte terminal screen buffer to an 800×480 PIL Image for the e-ink display.
 
-Supports:
-  - Configurable terminal width (600px in split-view mode, 800px otherwise)
-  - Two-line status bar: info line (time/cwd/branch) + hotkey line
-  - Alert overlay in the info line when alerts are active
-  - Mini stats sidebar rendered into the right 200px in split-view mode
+HQ rendering (hq=True, default):
+  Draws at 2× resolution then downsamples with LANCZOS + hard threshold.
+  The supersampling step gives sub-pixel precision; the threshold step converts
+  the soft anti-aliased result to clean 1-bit-ready black/white.  On e-ink
+  (which is inherently 1-bit) this produces significantly sharper text than
+  drawing directly at 800×480, especially at small font sizes.
 """
 import os
 from datetime import datetime
@@ -13,10 +14,10 @@ from PIL import Image, ImageDraw, ImageFont
 import pyte
 
 W, H = 800, 480
-SPLIT_TERMINAL_W = 600   # terminal area width in split-view mode
-SPLIT_SIDEBAR_W  = W - SPLIT_TERMINAL_W  # 200px stats sidebar
-STATUS_H = 34            # two-line status bar height in pixels
-TERMINAL_H = H - STATUS_H  # pixel height available for terminal text (446)
+SPLIT_TERMINAL_W = 600
+SPLIT_SIDEBAR_W  = W - SPLIT_TERMINAL_W  # 200
+STATUS_H         = 34    # two-line status bar (17px per line)
+TERMINAL_H       = H - STATUS_H  # 446
 
 _font_cache: dict = {}
 
@@ -27,7 +28,6 @@ def _find_mono_font(font_path: str, size: int) -> ImageFont.ImageFont:
     key = (font_path, size)
     if key in _font_cache:
         return _font_cache[key]
-
     candidates = []
     if font_path:
         candidates.append(font_path)
@@ -47,14 +47,12 @@ def _find_mono_font(font_path: str, size: int) -> ImageFont.ImageFont:
                 return font
             except Exception:
                 pass
-
     font = ImageFont.load_default()
     _font_cache[key] = font
     return font
 
 
 def _char_size(font: ImageFont.ImageFont) -> tuple:
-    """Return (char_width, char_height) for a monospace font."""
     try:
         cw = int(font.getlength('M'))
     except AttributeError:
@@ -77,12 +75,10 @@ def terminal_dimensions(
     font_path: str = '',
     terminal_width: int = W,
 ) -> tuple:
-    """Return (cols, rows, char_w, char_h) for the given font size and width."""
+    """Return (cols, rows, char_w, char_h) using the 1× font (logical dimensions)."""
     font = _find_mono_font(font_path, font_size)
     cw, ch = _char_size(font)
-    cols = terminal_width // cw
-    rows = TERMINAL_H // ch
-    return cols, rows, cw, ch
+    return terminal_width // cw, TERMINAL_H // ch, cw, ch
 
 
 def render_screen(
@@ -91,62 +87,73 @@ def render_screen(
     dark_mode: bool = True,
     font_path: str = '',
     terminal_width: int = W,
-    status_info: tuple = None,   # (time_str, cwd, git_branch) or None
-    alerts: list = None,         # list of alert message strings
+    status_info: tuple = None,
+    alerts: list = None,
+    hq: bool = True,
 ) -> Image.Image:
     """
     Render pyte.Screen to an 800×480 grayscale PIL Image.
 
-    terminal_width: 800 for full-screen terminal, 600 for split-view.
-    status_info:    (time_str, cwd, git_branch) shown in the info line.
-    alerts:         alert messages; first one replaces the info line.
+    hq=True (default): render at 2× then downsample — crisper text on e-ink.
+    hq=False: render directly at 800×480 (faster, slightly softer edges).
     """
+    scale = 2 if hq else 1
+    W_s  = W * scale
+    H_s  = H * scale
+    TH_s = TERMINAL_H * scale
+    tw_s = terminal_width * scale
+
     bg = 0 if dark_mode else 255
     fg = 255 if dark_mode else 0
 
-    font = _find_mono_font(font_path, font_size)
+    # Draw at scaled font size so glyphs are 2× larger
+    font = _find_mono_font(font_path, font_size * scale)
     cw, ch = _char_size(font)
 
-    img = Image.new('L', (W, H), bg)
+    img = Image.new('L', (W_s, H_s), bg)
     draw = ImageDraw.Draw(img)
 
     # ── Terminal cell grid ────────────────────────────────────────────────────
     for row_idx in range(screen.lines):
         y = row_idx * ch
-        if y >= TERMINAL_H:
+        if y >= TH_s:
             break
         row = screen.buffer[row_idx]
         for col_idx in range(screen.columns):
             x = col_idx * cw
-            if x >= terminal_width:
+            if x >= tw_s:
                 break
             char = row[col_idx]
-            is_cursor = (row_idx == screen.cursor.y and col_idx == screen.cursor.x)
+            is_cursor    = (row_idx == screen.cursor.y and col_idx == screen.cursor.x)
             cell_inverted = bool(char.reverse) or is_cursor
             cell_fg = bg if cell_inverted else fg
             cell_bg = fg if cell_inverted else bg
-
             if cell_bg != bg:
                 draw.rectangle([x, y, x + cw - 1, y + ch - 1], fill=cell_bg)
             glyph = char.data
             if glyph and glyph != ' ':
                 draw.text((x, y), glyph, font=font, fill=cell_fg)
 
-    # ── Two-line status bar ───────────────────────────────────────────────────
+    # ── Status bar ───────────────────────────────────────────────────────────
     _draw_status_bar(
-        draw, font_size, fg, bg, terminal_width,
+        draw, font_size, fg, bg, tw_s,
         status_info=status_info,
         alerts=alerts,
+        scale=scale,
     )
+
+    # ── HQ downsample + hard threshold ───────────────────────────────────────
+    if hq:
+        img = img.resize((W, H), Image.LANCZOS)
+        # Hard threshold: push anti-aliased gray edges to clean black or white.
+        # 128 is neutral; nudge slightly toward white to preserve thin strokes.
+        img = img.point(lambda p: 255 if p > 112 else 0)
 
     return img
 
 
 def render_mini_stats(img: Image.Image, stats: dict, dark_mode: bool = True):
-    """
-    Render a compact stats sidebar into the right 200px of an existing 800×480 image.
-    Draws in-place. Call after render_screen() so the sidebar overlays the right side.
-    """
+    """Render a compact stats sidebar into the right 200px of an 800×480 image."""
     if stats is None:
         return
 
@@ -155,68 +162,47 @@ def render_mini_stats(img: Image.Image, stats: dict, dark_mode: bool = True):
     x0 = SPLIT_TERMINAL_W
 
     draw = ImageDraw.Draw(img)
-
-    # Sidebar background
     draw.rectangle([x0, 0, W, H], fill=bg)
-    # Left border separator
     draw.line([(x0, 0), (x0, H)], fill=fg, width=1)
 
     pad = 6
-    x = x0 + pad
-    y = pad
+    x   = x0 + pad
+    y   = pad
 
-    f_time = _find_mono_font('', 20)
-    f_body = _find_mono_font('', 11)
+    f_time  = _find_mono_font('', 20)
+    f_body  = _find_mono_font('', 11)
     f_small = _find_mono_font('', 10)
 
-    # Time
-    time_str = stats.get('time', '--:--')
-    draw.text((x, y), time_str, font=f_time, fill=fg)
-    y += _find_mono_font('', 20).getbbox('0')[3] + 4
+    def lh(font): return font.getbbox('0')[3] + 4
 
-    # Date (small)
-    date_str = stats.get('date', '')
-    draw.text((x, y), date_str, font=f_small, fill=fg)
-    y += _find_mono_font('', 10).getbbox('0')[3] + 6
+    draw.text((x, y), stats.get('time', '--:--'), font=f_time, fill=fg)
+    y += lh(f_time)
 
-    # Divider
+    draw.text((x, y), stats.get('date', ''), font=f_small, fill=fg)
+    y += lh(f_small) + 2
+
     draw.line([(x, y), (W - pad, y)], fill=fg, width=1)
     y += 4
 
     bar_w = SPLIT_SIDEBAR_W - pad * 2 - 2
 
-    # CPU
-    cpu_pct = stats.get('cpu_percent', 0)
-    draw.text((x, y), f'CPU {cpu_pct:.0f}%', font=f_body, fill=fg)
-    y += _find_mono_font('', 11).getbbox('0')[3] + 2
-    _mini_bar(draw, x, y, bar_w, 8, cpu_pct, fg, bg)
-    y += 12
+    for label, pct in [
+        ('CPU',  stats.get('cpu_percent', 0)),
+        ('RAM',  stats.get('memory', {}).get('percent', 0)),
+        ('Disk', stats.get('disk', {}).get('percent', 0)),
+    ]:
+        draw.text((x, y), f'{label} {pct:.0f}%', font=f_body, fill=fg)
+        y += lh(f_body) - 2
+        _mini_bar(draw, x, y, bar_w, 8, pct, fg, bg)
+        y += 12
 
-    # RAM
-    mem = stats.get('memory', {})
-    mem_pct = mem.get('percent', 0)
-    draw.text((x, y), f'RAM {mem_pct:.0f}%', font=f_body, fill=fg)
-    y += _find_mono_font('', 11).getbbox('0')[3] + 2
-    _mini_bar(draw, x, y, bar_w, 8, mem_pct, fg, bg)
-    y += 12
-
-    # Disk
-    disk = stats.get('disk', {})
-    disk_pct = disk.get('percent', 0)
-    draw.text((x, y), f'Disk {disk_pct:.0f}%', font=f_body, fill=fg)
-    y += _find_mono_font('', 11).getbbox('0')[3] + 2
-    _mini_bar(draw, x, y, bar_w, 8, disk_pct, fg, bg)
-    y += 14
-
-    # IP address
     ip = stats.get('primary_ip', '')
     if ip:
         draw.line([(x, y), (W - pad, y)], fill=fg, width=1)
         y += 4
         draw.text((x, y), ip, font=f_small, fill=fg)
-        y += _find_mono_font('', 10).getbbox('0')[3] + 4
+        y += lh(f_small)
 
-    # Uptime
     uptime = stats.get('uptime', '')
     if uptime:
         draw.text((x, y), f'up {uptime}', font=f_small, fill=fg)
@@ -236,42 +222,39 @@ def _draw_status_bar(
     font_size: int,
     fg: int,
     bg: int,
-    terminal_width: int,
+    terminal_width: int,  # already scaled
     status_info: tuple = None,
     alerts: list = None,
+    scale: int = 1,
 ):
-    """Two-line status bar at the bottom of the terminal area."""
-    sfont = _find_mono_font('', 10)
-    line_h = STATUS_H // 2  # 17px per line
+    """Two-line status bar. All positions and fonts are scale-aware."""
+    y0      = TERMINAL_H * scale
+    H_s     = H * scale
+    line_h  = (STATUS_H // 2) * scale
+    sfont   = _find_mono_font('', 10 * scale)
+    pad     = 2 * scale
+    x_pad   = 4 * scale
 
-    # Full bar background (inverted)
-    draw.rectangle([0, TERMINAL_H, terminal_width, H], fill=fg)
+    draw.rectangle([0, y0, terminal_width, H_s], fill=fg)
 
-    # ── Line 1: info (or alert) ───────────────────────────────────────────────
-    y1 = TERMINAL_H + 2
-    active_alerts = alerts or []
-
-    if active_alerts:
-        # Show first alert with extra emphasis (double-inverted = normal bg)
-        draw.rectangle([0, TERMINAL_H, terminal_width, TERMINAL_H + line_h], fill=bg)
-        draw.text((4, y1), f'⚠ {active_alerts[0]}', font=sfont, fill=fg)
+    # ── Line 1: info or active alert ─────────────────────────────────────────
+    y1 = y0 + pad
+    active = alerts or []
+    if active:
+        # Alert: draw on a "un-inverted" background to stand out
+        draw.rectangle([0, y0, terminal_width, y0 + line_h], fill=bg)
+        draw.text((x_pad, y1), f'⚠ {active[0]}', font=sfont, fill=fg)
     elif status_info:
         time_str, cwd, branch = status_info
-        parts = []
-        if time_str:
-            parts.append(time_str)
-        if cwd:
-            parts.append(cwd)
-        if branch:
-            parts.append(f'⎇ {branch}')
-        draw.text((4, y1), '  '.join(parts), font=sfont, fill=bg)
+        parts = [p for p in (time_str, cwd, f'⎯ {branch}' if branch else '') if p]
+        draw.text((x_pad, y1), '  '.join(parts), font=sfont, fill=bg)
     else:
-        draw.text((4, y1), datetime.now().strftime('%H:%M'), font=sfont, fill=bg)
+        draw.text((x_pad, y1), datetime.now().strftime('%H:%M'), font=sfont, fill=bg)
 
     # ── Line 2: hotkeys ───────────────────────────────────────────────────────
-    y2 = TERMINAL_H + line_h + 2
+    y2 = y0 + line_h + pad
     keys = (
-        f'F9:Font-({font_size}pt)  F12:Font+  F10:Refresh  '
-        'F11:Stats  PgUp/Dn:Scroll'
+        f'F7:Dark/Light  F8:Paste  F9:Font-({font_size}pt)  F12:Font+  '
+        'F10:Refresh  F11:Stats  PgUp/Dn:Scroll'
     )
-    draw.text((4, y2), keys, font=sfont, fill=bg)
+    draw.text((x_pad, y2), keys, font=sfont, fill=bg)

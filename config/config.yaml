@@ -80,6 +80,20 @@ terminal_alert_cpu_threshold: 90         # % CPU — alert if above this
 terminal_alert_disk_free_threshold: 10   # % free disk — alert if below this
 terminal_alert_ssh_logins: true          # notify on new SSH connections
 
+# High-quality rendering: render at 2× then downsample (sharper text on e-ink).
+# Adds ~15ms to render time — negligible vs. display refresh time.
+terminal_hq_render: true
+
+# Paste file: F8 reads this file and types its contents into the terminal.
+# SSH in from another device, save text here, press F8 to paste.
+terminal_paste_file: ~/eink-paste.txt
+
+# ── HTTP preview server ──────────────────────────────────────────────────────
+# Serves the current display as PNG on the LAN. Open http://<pi-ip>:8080/
+# in any browser to see a live auto-refreshing view of the e-ink display.
+preview_server_enabled: false   # set to true to enable
+preview_server_port: 8080
+
 # ── Stats dashboard settings ─────────────────────────────────────────────────
 # Show QR code for primary IP address in the bottom-right of the stats screen.
 show_qr_code: true

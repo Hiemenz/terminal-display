@@ -29,6 +29,7 @@ from system_stats import collect
 from render import render
 from display import send_to_display
 from util import output_path
+from preview_server import start_if_enabled as _start_preview
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _OUTPUT_IMAGE = os.path.join(_REPO_ROOT, 'output', 'terminal.bmp')
@@ -127,6 +128,7 @@ Examples:
 
     print(f"Terminal Display starting — refresh every {interval}s")
     print("Press F11 to switch to terminal mode.")
+    _start_preview(config, _OUTPUT_IMAGE)
 
     switch_event = threading.Event()
     stop_event = threading.Event()

@@ -43,6 +43,7 @@ from terminal_renderer import (
     TERMINAL_H, SPLIT_TERMINAL_W,
 )
 from display_eink import EinkDriver
+from preview_server import start_if_enabled as _start_preview
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,8 @@ _MIN_FONT = 8
 _MAX_FONT = 32
 
 # Function key escape sequences (xterm/VT220)
+_F7   = b'\x1b[18~'   # dark/light mode toggle
+_F8   = b'\x1b[19~'   # paste from file
 _F9   = b'\x1b[20~'
 _F10  = b'\x1b[21~'
 _F11  = b'\x1b[23~'
@@ -101,6 +104,10 @@ class EinkTerminal:
         self._status_cache: tuple = None   # (timestamp, time_str, cwd, branch)
 
         # Alerts
+        self._hq_render    = config.get('terminal_hq_render', True)
+        self._paste_file   = os.path.expanduser(
+            config.get('terminal_paste_file', '~/eink-paste.txt')
+        )
         self._alert_monitor = AlertMonitor(config)
 
         # Split-view stats
@@ -187,18 +194,24 @@ class EinkTerminal:
     # ─── Hotkeys ─────────────────────────────────────────────────────────────
 
     def _handle_hotkeys(self, data: bytes) -> bytes:
-        if _F11 in data:
-            self._switch_to_stats()
-            data = data.replace(_F11, b'')
-        if _F10 in data:
-            self._force_full_refresh()
-            data = data.replace(_F10, b'')
-        if _F12 in data:
-            self._change_font(+2)
-            data = data.replace(_F12, b'')
+        if _F7 in data:
+            self._toggle_dark_mode()
+            data = data.replace(_F7, b'')
+        if _F8 in data:
+            self._paste_from_file()
+            data = data.replace(_F8, b'')
         if _F9 in data:
             self._change_font(-2)
             data = data.replace(_F9, b'')
+        if _F10 in data:
+            self._force_full_refresh()
+            data = data.replace(_F10, b'')
+        if _F11 in data:
+            self._switch_to_stats()
+            data = data.replace(_F11, b'')
+        if _F12 in data:
+            self._change_font(+2)
+            data = data.replace(_F12, b'')
         if _PGUP in data:
             self._scroll_up()
             data = data.replace(_PGUP, b'')
@@ -206,6 +219,24 @@ class EinkTerminal:
             self._scroll_down()
             data = data.replace(_PGDN, b'')
         return data
+
+    def _toggle_dark_mode(self):
+        self._dark_mode = not self._dark_mode
+        self._render(force_full=True)
+
+    def _paste_from_file(self):
+        try:
+            with open(self._paste_file, 'rb') as f:
+                content = f.read()
+            if self._pty_master is not None and content:
+                # Write in chunks to avoid overflowing PTY input buffer
+                chunk = 4096
+                for i in range(0, len(content), chunk):
+                    os.write(self._pty_master, content[i:i + chunk])
+                    if len(content) > chunk:
+                        import time as _t; _t.sleep(0.01)
+        except FileNotFoundError:
+            self._alert_monitor._push(f'Paste: {self._paste_file} not found')
 
     def _change_font(self, delta: int):
         new_size = max(_MIN_FONT, min(_MAX_FONT, self._font_size + delta))
@@ -319,6 +350,7 @@ class EinkTerminal:
             terminal_width=tw,
             status_info=status_info,
             alerts=alerts if alerts else None,
+            hq=self._hq_render,
         )
 
         # Overlay split-view sidebar
@@ -364,6 +396,7 @@ class EinkTerminal:
         if self._split_view:
             self._start_stats_thread()
 
+        _start_preview(self._config, os.path.join(_REPO_ROOT, 'output', 'terminal.bmp'))
         self._render(force_full=True)
 
         try:
