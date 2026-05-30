@@ -66,6 +66,23 @@ def display_image(image_to_display, output_filename=None):
             pass
 
 
+def _group_rows(rows: set) -> list:
+    """Convert a set of row indices into sorted contiguous spans [(ystart, yend), ...]."""
+    if not rows:
+        return []
+    sorted_r = sorted(rows)
+    groups = []
+    start = prev = sorted_r[0]
+    for r in sorted_r[1:]:
+        if r == prev + 1:
+            prev = r
+        else:
+            groups.append((start, prev + 1))
+            start = prev = r
+    groups.append((start, prev + 1))
+    return groups
+
+
 # ── Persistent driver for terminal mode ──────────────────────────────────────
 
 class EinkDriver:
@@ -119,7 +136,25 @@ class EinkDriver:
             logging.error('E-ink full refresh error: %s', e)
 
     def partial_refresh(self, image: Image.Image, output_path: str = None):
-        """Fast partial refresh — no flash. Accumulates ghosting over many calls."""
+        """Fast partial refresh of the full screen — no flash."""
+        self.partial_refresh_rows(image, None, output_path)
+
+    def partial_refresh_rows(
+        self,
+        image: Image.Image,
+        dirty_pixel_rows: set,
+        output_path: str = None,
+    ):
+        """
+        Refresh only the dirty pixel rows — the fastest possible update.
+
+        dirty_pixel_rows: set of pixel-row indices that changed.
+                          Pass None to refresh the entire screen.
+
+        How it works: display_Partial(buf, 0, ystart, 800, yend) accepts a
+        buffer offset so we slice buf[ystart * row_bytes:] which makes the
+        function read the correct rows from the full-image buffer.
+        """
         if output_path is None:
             output_path = _DEFAULT_OUTPUT
         os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
@@ -136,8 +171,21 @@ class EinkDriver:
             if not self._partial_ready:
                 epd.init_part()
                 self._partial_ready = True
+
             buf = epd.getbuffer(image)
-            epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+            row_bytes = epd.width // 8  # 100 for 800-px-wide display
+
+            if dirty_pixel_rows is None:
+                # Full-screen partial (no flash, updates everything)
+                epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+                return
+
+            for ystart, yend in _group_rows(dirty_pixel_rows):
+                # Slice the buffer so display_Partial reads the correct rows.
+                # display_Partial indexes Image[0..Width*Height-1], which maps
+                # to buf[ystart*row_bytes .. yend*row_bytes-1] via this slice.
+                epd.display_Partial(buf[ystart * row_bytes:], 0, ystart, epd.width, yend)
+
         except IOError as e:
             logging.error('E-ink partial refresh error: %s', e)
 

@@ -6,8 +6,8 @@ from PIL import Image, ImageDraw, ImageFont
 import pyte
 
 W, H = 800, 480
-_STATUS_H = 18        # reserved for the hotkey status bar at the bottom
-_TERMINAL_H = H - _STATUS_H
+STATUS_H = 18          # reserved for the hotkey status bar at the bottom
+TERMINAL_H = H - STATUS_H  # pixel height available for terminal text
 
 _font_cache: dict = {}
 
@@ -67,7 +67,7 @@ def terminal_dimensions(font_size: int, font_path: str = '') -> tuple:
     font = _find_mono_font(font_path, font_size)
     cw, ch = _char_size(font)
     cols = W // cw
-    rows = _TERMINAL_H // ch
+    rows = TERMINAL_H // ch
     return cols, rows, cw, ch
 
 
@@ -89,7 +89,7 @@ def render_screen(
 
     for row_idx in range(screen.lines):
         y = row_idx * ch
-        if y >= _TERMINAL_H:
+        if y >= TERMINAL_H:
             break
         row = screen.buffer[row_idx]
         for col_idx in range(screen.columns):
@@ -116,7 +116,7 @@ def render_screen(
 
 
 def _draw_status_bar(draw: ImageDraw.ImageDraw, font_size: int, fg: int, bg: int):
-    y = _TERMINAL_H
+    y = TERMINAL_H
     draw.rectangle([0, y, W, H], fill=fg)
     sfont = _find_mono_font('', 10)
     text = (

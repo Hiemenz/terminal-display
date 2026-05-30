@@ -31,7 +31,7 @@ import tty
 
 import pyte
 
-from terminal_renderer import render_screen, terminal_dimensions
+from terminal_renderer import render_screen, terminal_dimensions, TERMINAL_H
 from display_eink import EinkDriver
 
 logger = logging.getLogger(__name__)
@@ -172,12 +172,29 @@ class EinkTerminal:
         )
         self._last_image = img
         do_full = force_full or (self._partial_count >= self._full_every)
+
         if do_full:
             self._driver.full_refresh(img)
             self._partial_count = 0
         else:
-            self._driver.partial_refresh(img)
-            self._partial_count += 1
+            dirty_pixel_rows = self._dirty_pixel_rows()
+            if dirty_pixel_rows:
+                self._driver.partial_refresh_rows(img, dirty_pixel_rows)
+                self._partial_count += 1
+            # No dirty rows = nothing visible changed; skip the display push entirely
+
+    def _dirty_pixel_rows(self) -> set:
+        """Convert pyte's dirty terminal-row set to a set of pixel rows."""
+        _, _, _, ch = terminal_dimensions(self._font_size, self._font_path)
+        pixel_rows = set()
+        for term_row in self._screen.dirty:
+            y_start = term_row * ch
+            y_end = min(y_start + ch, TERMINAL_H)
+            for py in range(y_start, y_end):
+                pixel_rows.add(py)
+        return pixel_rows
+
+
 
     # ─── Main loop ───────────────────────────────────────────────────────────
 
