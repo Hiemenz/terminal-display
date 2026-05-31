@@ -31,7 +31,18 @@ def _find_mono_font(font_path: str, size: int) -> ImageFont.ImageFont:
     candidates = []
     if font_path:
         candidates.append(font_path)
+
+    home = os.path.expanduser('~')
     candidates += [
+        # JetBrains Mono Medium — best stroke weight for e-ink 1-bit rendering
+        f'{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Medium.ttf',   # macOS (Nerd Font)
+        f'{home}/Library/Fonts/JetBrainsMonoNLNerdFontMono-Medium.ttf', # macOS (NL variant)
+        '/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Medium.ttf',   # Pi (apt)
+        '/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf',  # Pi (apt fallback)
+        f'{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Regular.ttf',  # macOS fallback
+        # System monospace fallbacks
+        '/System/Library/Fonts/Menlo.ttc',
+        '/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf',  # bold for e-ink
         '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
         '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf',
         '/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf',

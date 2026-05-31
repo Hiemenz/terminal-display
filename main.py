@@ -14,6 +14,7 @@ Flags:
 import sys
 import os
 import argparse
+import queue as _queue
 import select
 import subprocess
 import threading
@@ -26,15 +27,35 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from config_loader import load_config, add_config_arg
 from system_stats import collect
-from render import render
+from render import render, render_output, render_screensaver
 from display import send_to_display
 from util import output_path
-from preview_server import start_if_enabled as _start_preview
+from preview_server import start_if_enabled as _start_preview, get_screensaver_path
+
+import socket
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _OUTPUT_IMAGE = os.path.join(_REPO_ROOT, 'output', 'terminal.bmp')
 
 _F11 = b'\x1b[23~'  # F11 escape sequence — switch to terminal mode
+
+
+def _primary_ip() -> str:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(('8.8.8.8', 80))
+            return s.getsockname()[0]
+    except Exception:
+        return ''
+
+
+def _has_active_sessions() -> bool:
+    """Return True if any users are currently logged in (SSH or local tty)."""
+    try:
+        result = subprocess.run(['who'], capture_output=True, text=True, timeout=3)
+        return bool(result.stdout.strip())
+    except Exception:
+        return False
 
 
 def _keyboard_watcher(switch_event: threading.Event, stop_event: threading.Event):
@@ -98,6 +119,40 @@ def run_once(config: dict, local: bool = False):
         print("--local: skipping e-ink push")
 
 
+def _dequeue(server):
+    """Non-blocking: return next queued web input string, or None."""
+    if server is None:
+        return None
+    try:
+        return server.input_queue.get_nowait()
+    except _queue.Empty:
+        return None
+
+
+def _run_and_render(cmd: str, config: dict, local: bool):
+    """Run a shell command, render its output to the display."""
+    print(f"[web] $ {cmd}")
+    try:
+        result = subprocess.run(
+            cmd, shell=True, capture_output=True, text=True, timeout=10,
+            cwd=os.path.expanduser('~'),
+        )
+        lines = (result.stdout + result.stderr).splitlines()
+        exit_code = result.returncode
+    except subprocess.TimeoutExpired:
+        lines = ['(timed out after 10s)']
+        exit_code = -1
+    except Exception as e:
+        lines = [str(e)]
+        exit_code = -1
+
+    img = render_output(cmd, lines, exit_code, config)
+    os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
+    img.save(_OUTPUT_IMAGE)
+    if not local:
+        send_to_display(_OUTPUT_IMAGE)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Terminal Display — system stats on e-ink',
@@ -128,7 +183,24 @@ Examples:
 
     print(f"Terminal Display starting — refresh every {interval}s")
     print("Press F11 to switch to terminal mode.")
-    _start_preview(config, _OUTPUT_IMAGE)
+    photos_dir = os.path.join(_REPO_ROOT, 'assets', 'gallery')
+    server = _start_preview(config, _OUTPUT_IMAGE, photos_dir)
+    cmd_display_secs = config.get('command_display_seconds', 15)
+    cmd_display_until = 0.0
+
+    # Screensaver settings
+    screensaver_enabled = config.get('screensaver_enabled', True)
+    screensaver_timeout = config.get('screensaver_idle_timeout', 3600)
+    _static_screensaver = config.get('screensaver_image_path', 'assets/screensaver.jpg')
+    if not os.path.isabs(_static_screensaver):
+        _static_screensaver = os.path.join(_REPO_ROOT, _static_screensaver)
+    preview_port = config.get('preview_server_port', 8080)
+
+    # Activity tracking
+    last_active = time.monotonic()   # start as active (just booted)
+    server_activity_seen = server.last_activity if server else 0.0
+    in_screensaver = False
+    screensaver_ip = None            # track IP for QR code refresh
 
     switch_event = threading.Event()
     stop_event = threading.Event()
@@ -154,6 +226,84 @@ Examples:
             print("\nStopped.")
             break
 
+        now = time.monotonic()
+
+        # --- Activity detection ---
+        if _has_active_sessions():
+            last_active = now
+        if server and server.last_activity != server_activity_seen:
+            server_activity_seen = server.last_activity
+            last_active = now
+
+        # Check for mobile input — run command and show output
+        cmd = _dequeue(server)
+        if cmd:
+            cmd = cmd.strip()
+            if cmd:
+                last_active = now
+                in_screensaver = False
+                _run_and_render(cmd, config, local)
+                cmd_display_until = time.monotonic() + cmd_display_secs
+                continue
+
+        # While showing command output, just sleep and keep checking for input
+        if now < cmd_display_until:
+            time.sleep(0.5)
+            continue
+
+        # --- Screensaver state machine ---
+        idle_secs = now - last_active
+        should_screensave = screensaver_enabled and (idle_secs > screensaver_timeout)
+
+        if should_screensave:
+            current_ip = _primary_ip()
+            if not in_screensaver or current_ip != screensaver_ip:
+                in_screensaver = True
+                screensaver_ip = current_ip
+                # QR points to gallery so anyone can scan to upload a new photo
+                qr_url = f'http://{current_ip}:{preview_port}/gallery' if current_ip else ''
+                # Use gallery-selected photo; fall back to static config path
+                active_image = get_screensaver_path(photos_dir) or _static_screensaver
+                print(f"Screensaver — idle {idle_secs:.0f}s  img={os.path.basename(active_image)}  QR→ {qr_url}")
+                try:
+                    img = render_screensaver(active_image, qr_url, config)
+                    os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
+                    img.save(_OUTPUT_IMAGE)
+                    if not local:
+                        send_to_display(_OUTPUT_IMAGE)
+                except Exception as e:
+                    print(f"Screensaver render error: {e}")
+
+            # Responsive idle sleep: wake quickly on activity
+            end_time = time.monotonic() + 10
+            while not stop_event.is_set() and not switch_event.is_set():
+                remaining = end_time - time.monotonic()
+                if remaining <= 0:
+                    break
+                if _has_active_sessions():
+                    last_active = time.monotonic()
+                    break
+                if server and server.last_activity != server_activity_seen:
+                    server_activity_seen = server.last_activity
+                    last_active = time.monotonic()
+                    break
+                cmd = _dequeue(server)
+                if cmd and cmd.strip():
+                    last_active = time.monotonic()
+                    in_screensaver = False
+                    _run_and_render(cmd.strip(), config, local)
+                    cmd_display_until = time.monotonic() + cmd_display_secs
+                    break
+                time.sleep(min(0.5, remaining))
+            continue
+
+        # Waking from screensaver
+        if in_screensaver:
+            in_screensaver = False
+            screensaver_ip = None
+            print("Activity detected — resuming stats display")
+
+        # Normal stats render
         try:
             if _is_night(config):
                 print("Night mode — sleeping 5 min…")
@@ -168,12 +318,25 @@ Examples:
         except Exception as e:
             print(f"Error: {e}")
 
-        # Responsive sleep: check events every 0.5 s so Ctrl+C and F11 react quickly
+        # Responsive sleep: react to Ctrl+C, F11, and incoming web commands
         end_time = time.monotonic() + interval
         while not stop_event.is_set() and not switch_event.is_set():
             remaining = end_time - time.monotonic()
             if remaining <= 0:
                 break
+            if _has_active_sessions():
+                last_active = time.monotonic()
+            if server and server.last_activity != server_activity_seen:
+                server_activity_seen = server.last_activity
+                last_active = time.monotonic()
+            cmd = _dequeue(server)
+            if cmd:
+                cmd = cmd.strip()
+                if cmd:
+                    last_active = time.monotonic()
+                    _run_and_render(cmd, config, local)
+                    cmd_display_until = time.monotonic() + cmd_display_secs
+                    break
             time.sleep(min(0.5, remaining))
 
 

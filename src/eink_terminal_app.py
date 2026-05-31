@@ -24,6 +24,7 @@ import fcntl
 import logging
 import os
 import pty
+import queue as _queue
 import select
 import shutil
 import signal
@@ -52,6 +53,83 @@ _STATUS_CACHE_TTL  = 5.0    # seconds between CWD/branch re-reads
 _STATS_UPDATE_SEC  = 30     # seconds between split-view stats refreshes
 _MIN_FONT = 8
 _MAX_FONT = 32
+
+
+def _filter_pty_output(data: bytes, pty_master_fd) -> bytes:
+    """
+    Strip DCS escape sequences before feeding output to pyte.
+
+    pyte doesn't fully handle Device Control String (DCS) sequences; instead
+    it renders their content as visible garbage text.  Fish shell sends two
+    DCS-based probes on startup:
+      - XTGETTCAP  (\\x1bP+q<hex-caps>\\x1b\\) — capability queries
+      - Primary/Secondary/Tertiary DA (\\x1b[c, \\x1b[>c, \\x1b[=c)
+
+    We strip DCS sequences entirely and write the expected (negative) responses
+    back to the PTY so the shell gets an answer immediately instead of printing
+    a timeout warning.
+    """
+    out = bytearray()
+    i, n = 0, len(data)
+
+    while i < n:
+        c = data[i]
+        nxt = data[i + 1] if i + 1 < n else -1
+
+        # ── DCS  ESC P ... ST  (ST = ESC \  or  C1 0x9C) ────────────────────
+        if c == 0x1B and nxt == 0x50:
+            end = -1
+            content_end = -1
+            for k in range(i + 2, n):
+                if data[k] == 0x9C:                                 # C1 ST
+                    content_end = k
+                    end = k + 1
+                    break
+                if data[k] == 0x1B and k + 1 < n and data[k + 1] == 0x5C:  # ESC \
+                    content_end = k
+                    end = k + 2
+                    break
+            if end < 0:
+                # Incomplete DCS at end of chunk — discard remainder
+                break
+            content = data[i + 2:content_end]
+            if content.startswith(b'+q') and pty_master_fd is not None:
+                # XTGETTCAP: respond "not supported" for every capability queried
+                try:
+                    os.write(pty_master_fd, b'\x1bP0+r\x1b\\')
+                except OSError:
+                    pass
+            i = end  # skip the entire DCS sequence
+
+        # ── CSI c  (Device Attributes request) ───────────────────────────────
+        elif c == 0x1B and nxt == 0x5B:   # ESC [
+            # Scan for CSI final byte (0x40–0x7E)
+            j = i + 2
+            while j < n and (0x20 <= data[j] <= 0x3F):
+                j += 1
+            if j < n and data[j] == 0x63:  # final byte 'c'
+                params = data[i + 2:j]
+                try:
+                    if params in (b'', b'0') and pty_master_fd is not None:
+                        os.write(pty_master_fd, b'\x1b[?62;c')      # Primary DA
+                    elif params == b'>' and pty_master_fd is not None:
+                        os.write(pty_master_fd, b'\x1b[>0;10;1c')   # Secondary DA
+                    elif params == b'=' and pty_master_fd is not None:
+                        os.write(pty_master_fd, b'\x1bP!|00000000\x1b\\')  # Tertiary DA
+                except OSError:
+                    pass
+                # Don't pass DA requests to pyte — they're queries, not display content
+                i = j + 1
+            else:
+                # Normal CSI — pass through to pyte unchanged
+                out.append(c)
+                i += 1
+
+        else:
+            out.append(c)
+            i += 1
+
+    return bytes(out)
 
 # Function key escape sequences (xterm/VT220)
 _F7   = b'\x1b[18~'   # dark/light mode toggle
@@ -99,6 +177,8 @@ class EinkTerminal:
 
         # Idle tracking
         self._last_activity = time.monotonic()
+        self._idle_refresh_interval = config.get('terminal_idle_refresh_interval', 900)
+        self._last_idle_refresh = time.monotonic()
 
         # Status bar extras cache
         self._status_cache: tuple = None   # (timestamp, time_str, cwd, branch)
@@ -109,6 +189,7 @@ class EinkTerminal:
             config.get('terminal_paste_file', '~/eink-paste.txt')
         )
         self._alert_monitor = AlertMonitor(config)
+        self._web_input_queue = None   # set in run() when preview server starts
 
         # Split-view stats
         self._stats_data: dict = None
@@ -370,7 +451,11 @@ class EinkTerminal:
             dirty_pixel_rows = self._dirty_pixel_rows()
             if dirty_pixel_rows:
                 self._driver.partial_refresh_rows(img, dirty_pixel_rows)
-                self._partial_count += 1
+            else:
+                # Fallback: no dirty rows tracked (e.g. screen-clear, pyte edge case)
+                # — do a full-screen partial so the display never freezes
+                self._driver.partial_refresh(img)
+            self._partial_count += 1
 
     def _dirty_pixel_rows(self) -> set:
         """Convert pyte's dirty terminal-row set to pixel rows."""
@@ -396,7 +481,9 @@ class EinkTerminal:
         if self._split_view:
             self._start_stats_thread()
 
-        _start_preview(self._config, os.path.join(_REPO_ROOT, 'output', 'terminal.bmp'))
+        server = _start_preview(self._config, os.path.join(_REPO_ROOT, 'output', 'terminal.bmp'))
+        if server is not None:
+            self._web_input_queue = server.input_queue
         self._render(force_full=True)
 
         try:
@@ -432,6 +519,14 @@ class EinkTerminal:
                     self._switch_to_stats()
                     break
 
+            # ── Idle periodic full refresh (clears e-ink ghosting) ────────────
+            if self._idle_refresh_interval > 0:
+                idle = now - self._last_activity
+                since_refresh = now - self._last_idle_refresh
+                if idle >= self._idle_refresh_interval and since_refresh >= self._idle_refresh_interval:
+                    self._force_full_refresh()
+                    self._last_idle_refresh = now
+
             # ── Keyboard input ────────────────────────────────────────────────
             if self._stdin_fd in r:
                 try:
@@ -439,6 +534,7 @@ class EinkTerminal:
                 except OSError:
                     break
                 self._last_activity = now
+                self._last_idle_refresh = now  # reset idle-refresh timer on activity
                 # Snap to live before passing any key to the shell
                 if self._scroll_pages > 0:
                     self._snap_to_live()
@@ -458,12 +554,26 @@ class EinkTerminal:
                         # New output snaps back to live view
                         if self._scroll_pages > 0:
                             self._snap_to_live()
-                        self._stream.feed(chunk)
+                        chunk = _filter_pty_output(chunk, self._pty_master)
+                        if chunk:
+                            self._stream.feed(chunk)
                         has_pending = True
                 except OSError:
                     if not self._shell_exited_handler():
                         break
                     has_pending = True
+
+            # ── Web input (phone keyboard via preview server) ─────────────────
+            if self._web_input_queue is not None:
+                try:
+                    while True:
+                        text = self._web_input_queue.get_nowait()
+                        if text and self._pty_master is not None:
+                            os.write(self._pty_master, text.encode('utf-8'))
+                            self._last_activity = now
+                            has_pending = True
+                except _queue.Empty:
+                    pass
 
             # ── Alert tick ────────────────────────────────────────────────────
             if now - last_alert_tick >= 1.0:

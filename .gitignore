@@ -2,3 +2,13 @@
 __pycache__/
 data/
 .env
+
+# Rendered output images (generated at runtime)
+output/*.bmp
+output/*.png
+
+# Gallery uploads (stored on device, not in repo)
+assets/gallery/
+
+# Poetry virtualenv if created inside project
+.venv/

@@ -69,6 +69,10 @@ terminal_scrollback: 500
 # Set to 0 to disable.
 terminal_idle_timeout: 300
 
+# Idle display refresh: do a full e-ink refresh every N seconds of inactivity
+# to clear ghosting. Resets whenever a key is pressed. Set to 0 to disable.
+terminal_idle_refresh_interval: 900
+
 # Status bar extras: show current time, working directory, and git branch.
 terminal_status_bar_extras: true
 
@@ -91,14 +95,31 @@ terminal_paste_file: ~/eink-paste.txt
 # ── HTTP preview server ──────────────────────────────────────────────────────
 # Serves the current display as PNG on the LAN. Open http://<pi-ip>:8080/
 # in any browser to see a live auto-refreshing view of the e-ink display.
-preview_server_enabled: false   # set to true to enable
+preview_server_enabled: true
 preview_server_port: 8080
 
 # ── Stats dashboard settings ─────────────────────────────────────────────────
 # Show QR code for primary IP address in the bottom-right of the stats screen.
 show_qr_code: true
 
+# ── Screensaver / idle mode ──────────────────────────────────────────────────
+# When no SSH session or web activity is detected for screensaver_idle_timeout
+# seconds, switch to the screensaver image with a QR code overlay.
+# Scanning the QR code opens the web UI and immediately wakes stats display.
+screensaver_enabled: true
+
+# Seconds of inactivity before switching to the screensaver (default 1 hour).
+screensaver_idle_timeout: 3600
+
+# Path to the screensaver background image (JPG, PNG, etc.).
+# Place your image here and it will be converted to grayscale for the e-ink panel.
+# Relative paths are resolved from the project root.
+screensaver_image_path: "assets/screensaver.jpg"
+
 # ── Startup mode (used by systemd service) ───────────────────────────────────
 # 'terminal' = launch eink_terminal.py on boot
 # 'stats'    = launch main.py (stats dashboard) on boot
-startup_mode: terminal
+startup_mode: stats
+
+# How many seconds to show command output before returning to stats dashboard
+command_display_seconds: 15
