@@ -24,7 +24,10 @@ import io
 import json
 import logging
 import os
+import platform
 import queue
+import re
+import subprocess
 import threading
 import time
 import urllib.parse
@@ -37,6 +40,27 @@ _SELECTION_FILE = '.selected'
 _DISPLAY_W, _DISPLAY_H = 800, 480
 
 _ALLOWED_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
+
+
+def _get_startup_mode(config_path: str) -> str:
+    try:
+        with open(config_path) as f:
+            for line in f:
+                if line.startswith('startup_mode:'):
+                    return line.split(':', 1)[1].strip().strip('"\'')
+    except Exception:
+        pass
+    return 'stats'
+
+
+def _set_startup_mode(config_path: str, mode: str):
+    with open(config_path) as f:
+        content = f.read()
+    content = re.sub(r'^startup_mode:.*$', f'startup_mode: {mode}', content, flags=re.MULTILINE)
+    with open(config_path, 'w') as f:
+        f.write(content)
+    if platform.system() == 'Linux':
+        subprocess.Popen(['sudo', 'systemctl', 'restart', 'eink-display'])
 
 
 def _parse_upload_field(body: bytes, content_type: str):
@@ -97,9 +121,14 @@ _PAGE_HTML = '''\
     * {{ box-sizing: border-box; margin: 0; padding: 0; }}
     body {{ background: #111; color: #ccc; font-family: monospace;
             display: flex; flex-direction: column; height: 100vh; }}
-    #top-bar {{ display: flex; justify-content: flex-end; padding: 6px 10px;
+    #top-bar {{ display: flex; justify-content: flex-end; align-items: center;
+                gap: 12px; padding: 6px 10px;
                 background: #1a1a1a; border-bottom: 1px solid #2a2a2a; }}
     #top-bar a {{ color: #7cf; text-decoration: none; font-size: 13px; }}
+    #mode-btn {{ background: #2a2a2a; color: #bbb; border: 1px solid #444;
+                 border-radius: 4px; padding: 4px 10px; font-family: monospace;
+                 font-size: 12px; cursor: pointer; }}
+    #mode-btn:active {{ background: #444; }}
     #display-wrap {{ flex: 1; overflow: hidden; display: flex;
                      align-items: center; justify-content: center; padding: 8px; }}
     img {{ width: 100%; max-width: 800px; image-rendering: pixelated;
@@ -119,7 +148,10 @@ _PAGE_HTML = '''\
   </style>
 </head>
 <body>
-  <div id="top-bar"><a href="/gallery">&#128247; Gallery</a></div>
+  <div id="top-bar">
+    <button id="mode-btn" onclick="toggleMode()">…</button>
+    <a href="/gallery">&#128247; Gallery</a>
+  </div>
   <div id="display-wrap">
     <img id="d" src="/display" alt="display">
   </div>
@@ -173,6 +205,28 @@ _PAGE_HTML = '''\
     }}
     setInterval(refreshDisplay, 3000);
     inp.focus();
+
+    var _currentMode = "";
+    function loadMode() {{
+      fetch("/mode").then(function(r) {{ return r.json(); }}).then(function(d) {{
+        _currentMode = d.mode;
+        var btn = document.getElementById("mode-btn");
+        btn.textContent = d.mode === "stats" ? "Switch to terminal" : "Switch to stats";
+      }}).catch(function() {{}});
+    }}
+    function toggleMode() {{
+      var next = _currentMode === "stats" ? "terminal" : "stats";
+      document.getElementById("mode-btn").textContent = "Switching…";
+      fetch("/mode", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify({{mode: next}})
+      }}).then(function(r) {{ return r.json(); }}).then(function(d) {{
+        if (d.ok) {{ _currentMode = next; loadMode(); }}
+        else {{ loadMode(); }}
+      }}).catch(function() {{ loadMode(); }});
+    }}
+    loadMode();
   </script>
 </body>
 </html>
@@ -358,7 +412,7 @@ def get_screensaver_path(photos_dir: str) -> str:
 
 
 def _make_handler(bmp_path: str, input_queue: queue.Queue,
-                  activity_ref: List[float], photos_dir: str):
+                  activity_ref: List[float], photos_dir: str, config_path: str = ''):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             activity_ref[0] = time.time()
@@ -375,6 +429,9 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._serve_photo(path[7:])
             elif path.startswith('/preview/'):
                 self._serve_preview(path[9:])
+            elif path == '/mode':
+                mode = _get_startup_mode(config_path) if config_path else 'stats'
+                self._respond(200, 'application/json', json.dumps({'mode': mode}).encode())
             else:
                 self._respond(404, 'text/plain', b'Not found')
 
@@ -387,6 +444,8 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._handle_upload()
             elif path == '/select':
                 self._handle_select()
+            elif path == '/mode':
+                self._handle_mode()
             else:
                 self._respond(404, 'text/plain', b'Not found')
 
@@ -508,6 +567,27 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             _set_selected(photos_dir, name)
             self._respond(200, 'application/json', b'{"ok":true}')
 
+        def _handle_mode(self):
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                mode = json.loads(raw).get('mode', '')
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+            if mode not in ('stats', 'terminal'):
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Invalid mode"}')
+                return
+            if not config_path:
+                self._respond(500, 'application/json', b'{"ok":false,"error":"No config path"}')
+                return
+            try:
+                _set_startup_mode(config_path, mode)
+                self._respond(200, 'application/json', b'{"ok":true}')
+            except Exception as e:
+                self._respond(500, 'application/json',
+                              json.dumps({'ok': False, 'error': str(e)}).encode())
+
         # ── Helpers ─────────────────────────────────────────────────────────
 
         def _respond(self, code, content_type, body):
@@ -526,10 +606,11 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
 
 
 class PreviewServer:
-    def __init__(self, port: int, bmp_path: str, photos_dir: str):
+    def __init__(self, port: int, bmp_path: str, photos_dir: str, config_path: str = ''):
         self._port = port
         self._bmp_path = bmp_path
         self._photos_dir = photos_dir
+        self._config_path = config_path
         self._server = None
         self.input_queue: queue.Queue = queue.Queue()
         self._activity_ref: List[float] = [time.time()]
@@ -542,7 +623,7 @@ class PreviewServer:
     def start(self):
         handler = _make_handler(
             self._bmp_path, self.input_queue,
-            self._activity_ref, self._photos_dir,
+            self._activity_ref, self._photos_dir, self._config_path,
         )
         self._server = HTTPServer(('', self._port), handler)
         self._server.allow_reuse_address = True
@@ -552,13 +633,13 @@ class PreviewServer:
         print(f'Preview: http://localhost:{self._port}/')
 
 
-def start_if_enabled(config: dict, bmp_path: str, photos_dir: str = ''):
+def start_if_enabled(config: dict, bmp_path: str, photos_dir: str = '', config_path: str = ''):
     """Start the preview server if enabled. Returns the PreviewServer or None."""
     if not config.get('preview_server_enabled', False):
         return None
     port = config.get('preview_server_port', 8080)
     try:
-        server = PreviewServer(port, bmp_path, photos_dir)
+        server = PreviewServer(port, bmp_path, photos_dir, config_path)
         server.start()
         return server
     except OSError as e:

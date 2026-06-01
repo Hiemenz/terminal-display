@@ -60,8 +60,8 @@ def _has_active_sessions() -> bool:
 
 def _keyboard_watcher(switch_event: threading.Event, stop_event: threading.Event):
     """
-    Background thread: watch stdin for F11 to switch to terminal mode.
-    Silently exits if stdin is not a terminal (e.g. systemd service).
+    Background thread: watch stdin for any keypress to switch to terminal mode.
+    Ctrl+C stops the program. Silently exits if stdin is not a tty (e.g. systemd).
     """
     try:
         import tty
@@ -76,11 +76,11 @@ def _keyboard_watcher(switch_event: threading.Event, stop_event: threading.Event
                 r, _, _ = select.select([sys.stdin], [], [], 0.5)
                 if r:
                     data = os.read(fd, 16)
-                    if _F11 in data:
-                        switch_event.set()
-                        return
-                    if b'\x03' in data:  # Ctrl+C — let main loop handle it
+                    if b'\x03' in data:  # Ctrl+C — stop
                         stop_event.set()
+                        return
+                    if data:  # any other key → switch to terminal
+                        switch_event.set()
                         return
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
@@ -184,7 +184,8 @@ Examples:
     print(f"Terminal Display starting — refresh every {interval}s")
     print("Press F11 to switch to terminal mode.")
     photos_dir = os.path.join(_REPO_ROOT, 'assets', 'gallery')
-    server = _start_preview(config, _OUTPUT_IMAGE, photos_dir)
+    _config_path = args.config or os.path.join(_REPO_ROOT, 'config', 'config.yaml')
+    server = _start_preview(config, _OUTPUT_IMAGE, photos_dir, _config_path)
     cmd_display_secs = config.get('command_display_seconds', 15)
     cmd_display_until = 0.0
 

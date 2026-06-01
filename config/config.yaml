@@ -67,7 +67,7 @@ terminal_scrollback: 500
 
 # Idle screensaver: switch to stats after N seconds of no keyboard activity.
 # Set to 0 to disable.
-terminal_idle_timeout: 300
+terminal_idle_timeout: 900
 
 # Idle display refresh: do a full e-ink refresh every N seconds of inactivity
 # to clear ghosting. Resets whenever a key is pressed. Set to 0 to disable.
@@ -114,7 +114,7 @@ screensaver_idle_timeout: 3600
 # Path to the screensaver background image (JPG, PNG, etc.).
 # Place your image here and it will be converted to grayscale for the e-ink panel.
 # Relative paths are resolved from the project root.
-screensaver_image_path: "assets/screensaver.jpg"
+screensaver_image_path: "assets/test.jpg"
 
 # ── Startup mode (used by systemd service) ───────────────────────────────────
 # 'terminal' = launch eink_terminal.py on boot

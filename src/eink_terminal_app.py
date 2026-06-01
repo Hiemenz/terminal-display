@@ -481,7 +481,9 @@ class EinkTerminal:
         if self._split_view:
             self._start_stats_thread()
 
-        server = _start_preview(self._config, os.path.join(_REPO_ROOT, 'output', 'terminal.bmp'))
+        _config_path = os.path.join(_REPO_ROOT, 'config', 'config.yaml')
+        server = _start_preview(self._config, os.path.join(_REPO_ROOT, 'output', 'terminal.bmp'),
+                                config_path=_config_path)
         if server is not None:
             self._web_input_queue = server.input_queue
         self._render(force_full=True)
