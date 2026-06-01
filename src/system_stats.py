@@ -48,6 +48,28 @@ def _get_network_interface(preferred: str = '') -> str:
     return 'lo'
 
 
+def _get_ip_addresses() -> dict:
+    """Return {interface: ip} for non-loopback IPv4 addresses, ordered by preference."""
+    import socket as _socket
+    result = {}
+    prefer = ['eth0', 'en0', 'wlan0', 'wlan1']
+    addrs = psutil.net_if_addrs()
+    # Preferred interfaces first
+    for iface in prefer:
+        if iface in addrs:
+            for snic in addrs[iface]:
+                if snic.family == _socket.AF_INET and not snic.address.startswith('127.'):
+                    result[iface] = snic.address
+    # Then any remaining non-loopback IPv4
+    for iface, snics in addrs.items():
+        if iface in result or iface == 'lo':
+            continue
+        for snic in snics:
+            if snic.family == _socket.AF_INET and not snic.address.startswith('127.'):
+                result[iface] = snic.address
+    return result
+
+
 def _format_bytes(n: float) -> str:
     """Format bytes into human-readable string."""
     for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
@@ -165,6 +187,9 @@ def collect(config: dict) -> dict:
     procs.sort(key=lambda p: p.get('cpu_percent') or 0, reverse=True)
     top_procs = procs[:n]
 
+    ip_addrs = _get_ip_addresses()
+    primary_ip = next(iter(ip_addrs.values()), '')
+
     return {
         'hostname': socket.gethostname().split('.')[0],
         'platform': platform.system(),
@@ -179,4 +204,6 @@ def collect(config: dict) -> dict:
         'network': net_info,
         'load': load,
         'top_processes': top_procs,
+        'ip_addresses': ip_addrs,
+        'primary_ip': primary_ip,
     }
