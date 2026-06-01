@@ -36,3 +36,10 @@ top_process_count: 5
 # Font paths (falls back to PIL default if not found)
 # Leave empty to use auto-detected system monospace font
 font_path: ""
+
+# Idle timeout in terminal: switch back to stats after N seconds of no typing.
+# 0 = disabled. 900 = 15 minutes (default).
+terminal_idle_timeout: 900
+
+# Screensaver image shown when stats display is idle.
+screensaver_image_path: assets/test.jpg
