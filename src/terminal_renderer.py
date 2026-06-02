@@ -13,11 +13,18 @@ from datetime import datetime
 from PIL import Image, ImageDraw, ImageFont
 import pyte
 
+try:
+    import qrcode as _qrcode
+    _HAS_QRCODE = True
+except ImportError:
+    _HAS_QRCODE = False
+
 W, H = 800, 480
 SPLIT_TERMINAL_W = 600
 SPLIT_SIDEBAR_W  = W - SPLIT_TERMINAL_W  # 200
 STATUS_H         = 34    # two-line status bar (17px per line)
-TERMINAL_H       = H - STATUS_H  # 446
+TAB_BAR_H        = 18    # tab bar strip at the very top
+TERMINAL_H       = H - STATUS_H - TAB_BAR_H  # 428
 
 _font_cache: dict = {}
 
@@ -101,6 +108,11 @@ def render_screen(
     status_info: tuple = None,
     alerts: list = None,
     hq: bool = True,
+    sys_stats: dict = None,
+    url_qr: str = None,
+    net_stats: dict = None,
+    overlay: tuple = None,
+    tab_bar: list = None,
 ) -> Image.Image:
     """
     Render pyte.Screen to an 800×480 grayscale PIL Image.
@@ -124,11 +136,25 @@ def render_screen(
     img = Image.new('L', (W_s, H_s), bg)
     draw = ImageDraw.Draw(img)
 
-    # ── Terminal cell grid ────────────────────────────────────────────────────
-    for row_idx in range(screen.lines):
-        y = row_idx * ch
-        if y >= TH_s:
+    # ── Terminal cell grid (offset by tab bar) ───────────────────────────────
+    tab_offset = TAB_BAR_H * scale
+
+    # How many rows actually fit at this render resolution. The scaled font's
+    # row height may not divide evenly into the available height, so this can be
+    # one less than what pyte was sized for — clipping the bottom (cursor) row.
+    visible_rows = max(1, TH_s // ch)
+
+    # Auto-scroll the viewport so the cursor row is always on screen. If the
+    # cursor sits below the visible window, start drawing further down the
+    # buffer so the newest output (where the user is typing) stays in view.
+    start_row = 0
+    if screen.cursor.y >= visible_rows:
+        start_row = screen.cursor.y - visible_rows + 1
+
+    for draw_i, row_idx in enumerate(range(start_row, screen.lines)):
+        if draw_i >= visible_rows:
             break
+        y = draw_i * ch + tab_offset
         row = screen.buffer[row_idx]
         for col_idx in range(screen.columns):
             x = col_idx * cw
@@ -151,6 +177,8 @@ def render_screen(
         status_info=status_info,
         alerts=alerts,
         scale=scale,
+        sys_stats=sys_stats,
+        net_stats=net_stats,
     )
 
     # ── HQ downsample + hard threshold ───────────────────────────────────────
@@ -160,7 +188,71 @@ def render_screen(
         # 128 is neutral; nudge slightly toward white to preserve thin strokes.
         img = img.point(lambda p: 255 if p > 112 else 0)
 
+    # ── URL QR overlay (after HQ downsample — drawn at 1× for crispness) ─────
+    if url_qr:
+        _draw_url_qr(img, url_qr, terminal_width)
+
+    if overlay is not None:
+        items, idx, title = overlay
+        if items:
+            _draw_palette(ImageDraw.Draw(img), img, items, idx, title, 1, bg, fg)
+
+    if tab_bar:
+        render_tab_bar(img, tab_bar, dark_mode)
+
     return img
+
+
+def render_tab_bar(img: Image.Image, tabs_info: list, dark_mode: bool = True):
+    """Draw a tab bar strip at y=0..TAB_BAR_H on the given image."""
+    bg = 0 if dark_mode else 255
+    fg = 255 if dark_mode else 0
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([0, 0, W - 1, TAB_BAR_H - 1], fill=fg)
+    font  = _find_mono_font('', 10)
+    pad_y = 2
+    x     = 0
+    for i, (title, is_active) in enumerate(tabs_info):
+        label = f'  {i+1} {title}  ' if title else f'  {i+1}  '
+        max_w = W // max(len(tabs_info), 1)
+        while len(label) > 4:
+            try:    lw = int(font.getlength(label))
+            except: lw = len(label) * 7
+            if lw <= max_w: break
+            label = label[:-3] + '  '
+        try:    chip_w = int(font.getlength(label))
+        except: chip_w = len(label) * 7
+        if is_active:
+            draw.rectangle([x, 0, x + chip_w - 1, TAB_BAR_H - 1], fill=fg)
+            draw.rectangle([x + 1, 1, x + chip_w - 2, TAB_BAR_H - 2], fill=bg)
+            draw.text((x, pad_y), label, font=font, fill=fg)
+        else:
+            draw.text((x, pad_y), label, font=font, fill=160 if dark_mode else 96)
+        x += chip_w
+        if i < len(tabs_info) - 1:
+            draw.text((x, pad_y), '│', font=font, fill=fg)
+            try:    x += int(font.getlength('│'))
+            except: x += 7
+
+
+def _draw_url_qr(img: Image.Image, url: str, terminal_width: int = W):
+    """Overlay a QR code for *url* in the bottom-right of the terminal area."""
+    if not _HAS_QRCODE:
+        return
+    try:
+        qr_size = 90
+        border  = 4
+        qr_img = _qrcode.make(url).resize((qr_size, qr_size), Image.NEAREST).convert('L')
+        x0 = terminal_width - qr_size - border
+        y0 = TAB_BAR_H + TERMINAL_H - qr_size - border
+        draw = ImageDraw.Draw(img)
+        draw.rectangle(
+            [x0 - border, y0 - border, x0 + qr_size + border, y0 + qr_size + border],
+            fill=255,
+        )
+        img.paste(qr_img, (x0, y0))
+    except Exception:
+        pass
 
 
 def render_mini_stats(img: Image.Image, stats: dict, dark_mode: bool = True):
@@ -226,6 +318,32 @@ def _mini_bar(draw, x, y, w, h, pct, fg, bg):
         draw.rectangle([x, y, x + fill_w, y + h], fill=fg)
 
 
+def _draw_palette(draw, img, items, idx, title, scale, bg, fg):
+    """Draw command palette / clipboard picker overlay on the terminal image."""
+    if not items:
+        return
+    PAL_H = 160 * scale
+    PAL_Y = (TAB_BAR_H + TERMINAL_H - PAL_H) * scale
+    PAL_X = 4 * scale
+    PAL_W = (W - 8) * scale
+    font  = _find_mono_font('', 11 * scale)
+    lh    = 16 * scale
+    draw.rectangle([PAL_X, PAL_Y, PAL_X + PAL_W, PAL_Y + PAL_H], fill=fg)
+    draw.text((PAL_X + 4 * scale, PAL_Y + 2 * scale), f'  {title}', font=font, fill=bg)
+    visible = 8
+    start = max(0, min(idx - visible // 2, len(items) - visible))
+    y = PAL_Y + lh + 2 * scale
+    for i, item in enumerate(items[start:start + visible]):
+        row_idx  = start + i
+        is_sel   = (row_idx == idx)
+        row_bg   = bg if is_sel else fg
+        row_fg   = fg if is_sel else bg
+        draw.rectangle([PAL_X, y, PAL_X + PAL_W, y + lh], fill=row_bg)
+        draw.text((PAL_X + 4 * scale, y + 1 * scale),
+                  ('> ' if is_sel else '  ') + item[:95], font=font, fill=row_fg)
+        y += lh
+
+
 # ── Status bar ────────────────────────────────────────────────────────────────
 
 def _draw_status_bar(
@@ -237,9 +355,11 @@ def _draw_status_bar(
     status_info: tuple = None,
     alerts: list = None,
     scale: int = 1,
+    sys_stats: dict = None,
+    net_stats: dict = None,
 ):
     """Two-line status bar. All positions and fonts are scale-aware."""
-    y0      = TERMINAL_H * scale
+    y0      = (TAB_BAR_H + TERMINAL_H) * scale
     H_s     = H * scale
     line_h  = (STATUS_H // 2) * scale
     sfont   = _find_mono_font('', 10 * scale)
@@ -258,14 +378,41 @@ def _draw_status_bar(
     elif status_info:
         time_str, cwd, branch = status_info
         parts = [p for p in (time_str, cwd, f'⎯ {branch}' if branch else '') if p]
-        draw.text((x_pad, y1), '  '.join(parts), font=sfont, fill=bg)
+        line1 = '  '.join(parts)
+        if net_stats:
+            ip, up, dn = net_stats.get('ip',''), net_stats.get('up',''), net_stats.get('down','')
+            if ip or up or dn:
+                line1 += '  |' + (f'  {ip}' if ip else '') + (f'  ↑{up}' if up else '') + (f'  ↓{dn}' if dn else '')
+        draw.text((x_pad, y1), line1, font=sfont, fill=bg)
     else:
-        draw.text((x_pad, y1), datetime.now().strftime('%H:%M'), font=sfont, fill=bg)
+        line1 = datetime.now().strftime('%H:%M')
+        if net_stats:
+            ip, up, dn = net_stats.get('ip',''), net_stats.get('up',''), net_stats.get('down','')
+            if ip or up or dn:
+                line1 += '  |' + (f'  {ip}' if ip else '') + (f'  ↑{up}' if up else '') + (f'  ↓{dn}' if dn else '')
+        draw.text((x_pad, y1), line1, font=sfont, fill=bg)
 
-    # ── Line 2: hotkeys ───────────────────────────────────────────────────────
+    # ── Line 2: system stats (if available) or hotkeys ───────────────────────
     y2 = y0 + line_h + pad
-    keys = (
-        f'F7:Dark/Light  F8:Paste  F9:Font-({font_size}pt)  F12:Font+  '
-        'F10:Refresh  F11:Stats  PgUp/Dn:Scroll'
-    )
-    draw.text((x_pad, y2), keys, font=sfont, fill=bg)
+    if sys_stats:
+        cpu  = sys_stats.get('cpu_percent', 0)
+        mem  = sys_stats.get('memory', {})
+        disk = sys_stats.get('disk', {})
+        load = sys_stats.get('load')
+        uptime = sys_stats.get('uptime', '')
+        parts = [f'CPU {cpu:.0f}%']
+        if mem:
+            parts.append(f"MEM {mem.get('used_str', '')} {mem.get('percent', 0):.0f}%")
+        if disk:
+            parts.append(f"Disk {disk.get('used_str', '')}/{disk.get('total_str', '')} {disk.get('percent', 0):.0f}%")
+        if load:
+            parts.append(f"Load {load[0]:.2f}")
+        if uptime:
+            parts.append(f"Up {uptime}")
+        draw.text((x_pad, y2), '  '.join(parts), font=sfont, fill=bg)
+    else:
+        keys = (
+            f'F3:Kill  F4:Svc  F5:Pwr  F6:Cmd  F7:Dark  F8:Clip  '
+            f'F9:Font-({font_size}pt)  F12:Font+  F10:Refresh  F11:Stats'
+        )
+        draw.text((x_pad, y2), keys, font=sfont, fill=bg)

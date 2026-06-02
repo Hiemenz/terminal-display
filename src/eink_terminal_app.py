@@ -21,13 +21,17 @@ Hotkeys:
   Ctrl+C    — kill foreground process (forwarded normally)
 """
 import fcntl
+import json
 import logging
 import os
+from dataclasses import dataclass
 import pty
 import queue as _queue
+import re
 import select
 import shutil
 import signal
+import socket
 import struct
 import subprocess
 import sys
@@ -45,14 +49,36 @@ from terminal_renderer import (
 )
 from display_eink import EinkDriver
 from preview_server import start_if_enabled as _start_preview
+from evdev_input import EvdevKeyboard, find_keyboard
 
 logger = logging.getLogger(__name__)
 
-_RENDER_DEBOUNCE   = 0.05   # seconds
-_STATUS_CACHE_TTL  = 5.0    # seconds between CWD/branch re-reads
-_STATS_UPDATE_SEC  = 30     # seconds between split-view stats refreshes
+@dataclass
+class _Tab:
+    screen: 'pyte.Screen'
+    stream: 'pyte.ByteStream'
+    pty_master: int
+    child_pid: int
+    title: str = ''
+    scroll_pages: int = 0
+
+
+_RENDER_DEBOUNCE        = 0.02   # seconds — lower now that hw writes are async
+_STATUS_CACHE_TTL       = 5.0    # seconds between CWD/branch re-reads
+_STATS_UPDATE_SEC       = 30     # seconds between split-view stats refreshes
+_STATUSBAR_STATS_UPDATE = 120    # seconds between status bar stats refresh
 _MIN_FONT = 8
 _MAX_FONT = 32
+
+_URL_RE = re.compile(r'https?://[^\s\x00-\x1f"\'<>]{6,}')
+
+
+def _fmt_speed(bps: float) -> str:
+    if bps < 1024:
+        return f'{bps:.0f} B/s'
+    elif bps < 1024 ** 2:
+        return f'{bps / 1024:.1f} KB/s'
+    return f'{bps / 1024 ** 2:.1f} MB/s'
 
 
 def _filter_pty_output(data: bytes, pty_master_fd) -> bytes:
@@ -136,12 +162,32 @@ _F7   = b'\x1b[18~'   # dark/light mode toggle
 _F8   = b'\x1b[19~'   # paste from file
 _F9   = b'\x1b[20~'
 _F10  = b'\x1b[21~'
+_F1   = b'\x1bOP'     # new tab / SSH picker
+_F2   = b'\x1bOQ'     # close tab
+_F3   = b'\x1bOR'     # process kill overlay
+_F4   = b'\x1bOS'     # service manager overlay
+_F5   = b'\x1b[15~'  # power menu
+_F6   = b'\x1b[17~'   # command palette
 _F11  = b'\x1b[23~'
+
+_POWER_ITEMS = ['  Shutdown', '  Reboot', '  Cancel']
 _F12  = b'\x1b[24~'
+_CTRL_LEFT  = b'\x1b[1;5D'   # cycle tabs
+_CTRL_RIGHT = b'\x1b[1;5C'
 _PGUP = b'\x1b[5~'
 _PGDN = b'\x1b[6~'
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _get_local_ip() -> str:
+    """Return the Pi's primary LAN IP address, or '' on failure."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(('8.8.8.8', 80))
+            return s.getsockname()[0]
+    except Exception:
+        return ''
 
 
 class EinkTerminal:
@@ -152,7 +198,7 @@ class EinkTerminal:
         self._font_size = config.get('terminal_font_size', 14)
         self._font_path = config.get('terminal_font_path', '')
         self._dark_mode = config.get('terminal_dark_mode', True)
-        self._full_every  = config.get('terminal_full_refresh_every', 20)
+        self._full_refresh_interval = config.get('terminal_full_refresh_interval', 60)
         self._idle_timeout = config.get('terminal_idle_timeout', 0)
         self._split_view  = config.get('terminal_split_view', False)
         self._status_extras = config.get('terminal_status_bar_extras', True)
@@ -167,18 +213,25 @@ class EinkTerminal:
         self._pty_master  = None
         self._child_pid   = None
         self._running     = False
-        self._partial_count = 0
         self._last_image  = None
         self._stdin_fd    = sys.stdin.fileno()
         self._old_tty     = None
+
+        # evdev keyboard (preferred over stdin when a desktop is running)
+        kbd_path = config.get('terminal_keyboard_device', 'auto')
+        _dev = find_keyboard(kbd_path if kbd_path != 'auto' else '')
+        self._evdev_kb: EvdevKeyboard | None = EvdevKeyboard(_dev) if _dev else None
+        if self._evdev_kb:
+            logger.info('Using evdev keyboard: %s', _dev.path)
+        else:
+            logger.info('evdev keyboard not found — using stdin')
 
         # Scrollback state (only when not using tmux)
         self._scroll_pages = 0
 
         # Idle tracking
         self._last_activity = time.monotonic()
-        self._idle_refresh_interval = config.get('terminal_idle_refresh_interval', 900)
-        self._last_idle_refresh = time.monotonic()
+        self._last_full_refresh_mono = time.monotonic()
 
         # Status bar extras cache
         self._status_cache: tuple = None   # (timestamp, time_str, cwd, branch)
@@ -195,6 +248,61 @@ class EinkTerminal:
         self._stats_data: dict = None
         self._stats_dirty  = False
         self._stats_lock   = threading.Lock()
+
+        # Status bar system stats (CPU/RAM/Disk)
+        self._statusbar_stats: dict = None
+        self._statusbar_stats_dirty = False
+        self._statusbar_stats_lock  = threading.Lock()
+
+        # Screensaver cycle state
+        self._screensaver_cycle_idx  = 0
+        self._screensaver_last_cycle = 0.0
+
+        # Tab management
+        self._tabs: list = []
+        self._active_tab: int = 0
+
+        # SSH bookmarks picker
+        self._sshpick_active = False
+        self._sshpick_items: list = []
+        self._sshpick_hosts: list = []
+        self._sshpick_idx: int = 0
+
+        # Process kill overlay (F3)
+        self._prockill_active = False
+        self._prockill_items: list = []
+        self._prockill_pids: list = []
+        self._prockill_idx: int = 0
+
+        # Service manager overlay (F4)
+        self._svcmgr_active = False
+        self._svcmgr_items: list = []
+        self._svcmgr_names: list = []
+        self._svcmgr_idx: int = 0
+
+        # Power menu (F5)
+        self._power_active = False
+        self._power_idx: int = 2  # Cancel selected by default
+
+        # Command palette
+        self._palette_active = False
+        self._palette_items: list = []
+        self._palette_idx: int = 0
+
+        # Clipboard picker
+        self._clipboard: list = []
+        self._clipboard_idx: int = 0
+        self._clipboard_active: bool = False
+        self._clipboard_path = os.path.join(_REPO_ROOT, 'data', 'clipboard.json')
+        self._clipboard = self._load_clipboard()
+
+        # URL QR overlay
+        self._last_url: str = ''
+        self._show_url_qr: bool = True
+
+        # Network stats (IP + speeds), updated by background thread
+        self._net_stats: dict = {}
+        self._net_stats_lock = threading.Lock()
 
         self._init_screen()
 
@@ -239,8 +347,13 @@ class EinkTerminal:
     # ─── TTY raw mode ─────────────────────────────────────────────────────────
 
     def _enter_raw(self):
-        self._old_tty = termios.tcgetattr(self._stdin_fd)
-        tty.setraw(self._stdin_fd)
+        if self._evdev_kb:
+            return  # evdev handles input; stdin raw mode not needed
+        try:
+            self._old_tty = termios.tcgetattr(self._stdin_fd)
+            tty.setraw(self._stdin_fd)
+        except termios.error:
+            pass  # not a real TTY (e.g. systemd without StandardInput=tty)
 
     def _exit_raw(self):
         if self._old_tty is not None:
@@ -275,11 +388,35 @@ class EinkTerminal:
     # ─── Hotkeys ─────────────────────────────────────────────────────────────
 
     def _handle_hotkeys(self, data: bytes) -> bytes:
+        if _F1 in data:
+            self._toggle_sshpick()
+            data = data.replace(_F1, b'')
+        if _F2 in data:
+            self._close_tab()
+            data = data.replace(_F2, b'')
+        if _CTRL_RIGHT in data:
+            self._switch_tab(+1)
+            data = data.replace(_CTRL_RIGHT, b'')
+        if _CTRL_LEFT in data:
+            self._switch_tab(-1)
+            data = data.replace(_CTRL_LEFT, b'')
+        if _F3 in data:
+            self._toggle_prockill()
+            data = data.replace(_F3, b'')
+        if _F4 in data:
+            self._toggle_svcmgr()
+            data = data.replace(_F4, b'')
+        if _F5 in data:
+            self._toggle_power()
+            data = data.replace(_F5, b'')
+        if _F6 in data:
+            self._toggle_palette()
+            data = data.replace(_F6, b'')
         if _F7 in data:
             self._toggle_dark_mode()
             data = data.replace(_F7, b'')
         if _F8 in data:
-            self._paste_from_file()
+            self._toggle_clipboard()
             data = data.replace(_F8, b'')
         if _F9 in data:
             self._change_font(-2)
@@ -333,10 +470,438 @@ class EinkTerminal:
                 pass
         self._render(force_full=True)
 
+    # ─── Tab management ──────────────────────────────────────────────────────
+
+    def _current_tab(self):
+        if self._tabs and 0 <= self._active_tab < len(self._tabs):
+            return self._tabs[self._active_tab]
+        return None
+
+    def _tab_title(self, tab) -> str:
+        if tab.title:
+            return tab.title
+        if tab.child_pid and tab.child_pid > 0:
+            try:
+                p = f'/proc/{tab.child_pid}/cwd'
+                if os.path.exists(p):
+                    return os.path.basename(os.readlink(p)) or 'shell'
+            except Exception:
+                pass
+        return 'shell'
+
+    def _sync_active_tab(self):
+        if self._tabs and 0 <= self._active_tab < len(self._tabs):
+            self._tabs[self._active_tab].scroll_pages = self._scroll_pages
+
+    def _new_tab(self, cmd: str = None):
+        self._sync_active_tab()
+        if self._tabs and 0 <= self._active_tab < len(self._tabs):
+            t = self._tabs[self._active_tab]
+            t.screen = self._screen; t.stream = self._stream
+            t.pty_master = self._pty_master; t.child_pid = self._child_pid
+        self._init_screen()
+        self._spawn_shell()
+        self._tabs.append(_Tab(screen=self._screen, stream=self._stream,
+                               pty_master=self._pty_master, child_pid=self._child_pid))
+        self._active_tab = len(self._tabs) - 1
+        self._scroll_pages = 0
+        if cmd:
+            try:
+                os.write(self._pty_master, (cmd + '\n').encode())
+            except OSError:
+                pass
+        self._render(force_full=True)
+
+    def _close_tab(self):
+        if len(self._tabs) <= 1:
+            return
+        t = self._tabs[self._active_tab]
+        if t.child_pid:
+            try: os.kill(t.child_pid, signal.SIGTERM)
+            except (ProcessLookupError, OSError): pass
+        if t.pty_master is not None and t.pty_master >= 0:
+            try: os.close(t.pty_master)
+            except OSError: pass
+        del self._tabs[self._active_tab]
+        self._active_tab = min(self._active_tab, len(self._tabs) - 1)
+        t2 = self._tabs[self._active_tab]
+        self._screen = t2.screen; self._stream = t2.stream
+        self._pty_master = t2.pty_master; self._child_pid = t2.child_pid
+        self._scroll_pages = t2.scroll_pages
+        self._sync_pty_winsize()
+        try: os.kill(self._child_pid, signal.SIGWINCH)
+        except (ProcessLookupError, OSError): pass
+        self._render(force_full=True)
+
+    def _switch_tab(self, delta: int):
+        if not self._tabs: return
+        self._goto_tab((self._active_tab + delta) % len(self._tabs))
+
+    def _goto_tab(self, idx: int):
+        if idx == self._active_tab or not self._tabs: return
+        self._sync_active_tab()
+        t = self._tabs[self._active_tab]
+        t.screen = self._screen; t.stream = self._stream
+        t.pty_master = self._pty_master; t.child_pid = self._child_pid
+        t.scroll_pages = self._scroll_pages
+        self._active_tab = idx
+        t2 = self._tabs[idx]
+        self._screen = t2.screen; self._stream = t2.stream
+        self._pty_master = t2.pty_master; self._child_pid = t2.child_pid
+        self._scroll_pages = t2.scroll_pages
+        self._sync_pty_winsize()
+        try: os.kill(self._child_pid, signal.SIGWINCH)
+        except (ProcessLookupError, OSError): pass
+        self._render(force_full=True)
+
+    # ─── SSH bookmarks picker ─────────────────────────────────────────────────
+
+    def _load_ssh_bookmarks(self) -> tuple:
+        bookmarks = self._config.get('terminal_ssh_bookmarks', [])
+        strings, hosts = [], []
+        for b in bookmarks:
+            name = b.get('name', b.get('host', '?'))
+            user = b.get('user', '')
+            host = b.get('host', '')
+            strings.append(f"  {name:<20}  {user+'@'+host if user else host}")
+            hosts.append(b)
+        return strings, hosts
+
+    def _toggle_sshpick(self):
+        if self._sshpick_active:
+            self._sshpick_active = False
+            self._render(); return
+        items, hosts = self._load_ssh_bookmarks()
+        if not items:
+            self._new_tab(); return
+        self._sshpick_items = items
+        self._sshpick_hosts = hosts
+        self._sshpick_idx = 0
+        self._sshpick_active = True
+        self._palette_active = self._clipboard_active = False
+        self._prockill_active = self._svcmgr_active = self._power_active = False
+        self._render()
+
+    def _handle_sshpick_key(self, data: bytes) -> bytes:
+        if not self._sshpick_active: return data
+        if b'\x1b[A' in data:
+            self._sshpick_idx = max(0, self._sshpick_idx - 1)
+            self._render(); return b''
+        if b'\x1b[B' in data:
+            self._sshpick_idx = min(len(self._sshpick_items) - 1, self._sshpick_idx + 1)
+            self._render(); return b''
+        if b'\r' in data or b'\n' in data:
+            if self._sshpick_hosts:
+                b = self._sshpick_hosts[self._sshpick_idx]
+                parts = ['ssh']
+                port = b.get('port', 22)
+                if port and port != 22:
+                    parts += ['-p', str(port)]
+                user = b.get('user', '')
+                host = b.get('host', '')
+                parts.append(f"{user}@{host}" if user else host)
+                self._sshpick_active = False
+                self._new_tab(cmd=' '.join(parts))
+            return b''
+        if b'\x1b' in data:
+            self._sshpick_active = False; self._render(); return b''
+        return b''
+
+    # ─── Process kill overlay (F3) ───────────────────────────────────────────
+
+    def _load_process_list(self) -> tuple:
+        import psutil
+        procs = []
+        for p in psutil.process_iter(['pid', 'name', 'cpu_percent', 'memory_percent']):
+            try:
+                procs.append(p.info)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        procs.sort(key=lambda p: p.get('cpu_percent') or 0, reverse=True)
+        strings, pids = [], []
+        for p in procs[:15]:
+            strings.append(f"{p.get('pid',0):>6}  {p.get('cpu_percent') or 0:>5.1f}%  {p.get('memory_percent') or 0:>4.1f}%  {(p.get('name') or '')[:22]}")
+            pids.append(p.get('pid', 0))
+        return strings, pids
+
+    def _toggle_prockill(self):
+        if self._prockill_active:
+            self._prockill_active = False
+        else:
+            self._prockill_items, self._prockill_pids = self._load_process_list()
+            self._prockill_idx = 0
+            self._prockill_active = True
+            self._palette_active = self._clipboard_active = False
+            self._svcmgr_active = self._power_active = False
+        self._render()
+
+    def _handle_prockill_key(self, data: bytes) -> bytes:
+        if not self._prockill_active:
+            return data
+        if b'\x1b[A' in data:
+            self._prockill_idx = max(0, self._prockill_idx - 1)
+            self._render(); return b''
+        if b'\x1b[B' in data:
+            self._prockill_idx = min(len(self._prockill_items) - 1, self._prockill_idx + 1)
+            self._render(); return b''
+        if b'\r' in data or b'\n' in data:
+            if self._prockill_pids:
+                try:
+                    import psutil
+                    psutil.Process(self._prockill_pids[self._prockill_idx]).send_signal(signal.SIGTERM)
+                except (ProcessLookupError, PermissionError, Exception):
+                    pass
+                self._prockill_items, self._prockill_pids = self._load_process_list()
+                self._prockill_idx = min(self._prockill_idx, max(0, len(self._prockill_items) - 1))
+                self._render()
+            return b''
+        if b'\x1b' in data:
+            self._prockill_active = False; self._render(); return b''
+        return b''
+
+    # ─── Service manager overlay (F4) ────────────────────────────────────────
+
+    def _load_service_list(self) -> tuple:
+        names = self._config.get('terminal_services', [])
+        strings = []
+        for name in names:
+            try:
+                r = subprocess.run(['systemctl', 'is-active', name],
+                                   capture_output=True, text=True, timeout=1)
+                status = r.stdout.strip() or 'unknown'
+            except Exception:
+                status = 'unknown'
+            strings.append(f"{'●' if status == 'active' else '○'}  {name:<30}  {status}")
+        return strings, list(names)
+
+    def _toggle_svcmgr(self):
+        if self._svcmgr_active:
+            self._svcmgr_active = False
+        else:
+            self._svcmgr_items, self._svcmgr_names = self._load_service_list()
+            self._svcmgr_idx = 0
+            self._svcmgr_active = True
+            self._palette_active = self._clipboard_active = False
+            self._prockill_active = self._power_active = False
+        self._render()
+
+    def _handle_svcmgr_key(self, data: bytes) -> bytes:
+        if not self._svcmgr_active:
+            return data
+        if b'\x1b[A' in data:
+            self._svcmgr_idx = max(0, self._svcmgr_idx - 1)
+            self._render(); return b''
+        if b'\x1b[B' in data:
+            self._svcmgr_idx = min(len(self._svcmgr_items) - 1, self._svcmgr_idx + 1)
+            self._render(); return b''
+        if data in (b'r', b'R'): self._svcmgr_action('restart'); return b''
+        if data in (b's', b'S'): self._svcmgr_action('stop');    return b''
+        if data in (b'a', b'A'): self._svcmgr_action('start');   return b''
+        if b'\x1b' in data:
+            self._svcmgr_active = False; self._render(); return b''
+        return b''
+
+    def _svcmgr_action(self, action: str):
+        if not self._svcmgr_names:
+            return
+        name = self._svcmgr_names[self._svcmgr_idx]
+        try:
+            subprocess.Popen(['sudo', 'systemctl', action, name])
+        except Exception as e:
+            logger.warning('svcmgr %s %s: %s', action, name, e)
+        def _reload():
+            time.sleep(1.0)
+            self._svcmgr_items, self._svcmgr_names = self._load_service_list()
+            if self._svcmgr_active:
+                self._render()
+        threading.Thread(target=_reload, daemon=True).start()
+
+    # ─── Power menu (F5) ─────────────────────────────────────────────────────
+
+    def _toggle_power(self):
+        if self._power_active:
+            self._power_active = False
+        else:
+            self._power_active = True
+            self._power_idx = 2  # Cancel default — safest
+            self._palette_active = self._clipboard_active = False
+            self._prockill_active = self._svcmgr_active = False
+        self._render()
+
+    def _handle_power_key(self, data: bytes) -> bytes:
+        if not self._power_active:
+            return data
+        if b'\x1b[A' in data:
+            self._power_idx = max(0, self._power_idx - 1)
+            self._render(); return b''
+        if b'\x1b[B' in data:
+            self._power_idx = min(len(_POWER_ITEMS) - 1, self._power_idx + 1)
+            self._render(); return b''
+        if b'\r' in data or b'\n' in data:
+            if self._power_idx == 0:
+                subprocess.Popen(['sudo', 'shutdown', '-h', 'now'])
+                self._running = False
+            elif self._power_idx == 1:
+                subprocess.Popen(['sudo', 'reboot'])
+                self._running = False
+            else:
+                self._power_active = False
+                self._render()
+            return b''
+        if b'\x1b' in data:
+            self._power_active = False; self._render(); return b''
+        return b''
+
+    # ─── Command palette ─────────────────────────────────────────────────────
+
+    def _load_palette_items(self) -> list:
+        items = []
+        saved = os.path.join(_REPO_ROOT, 'config', 'saved_commands.txt')
+        if os.path.exists(saved):
+            try:
+                for line in open(saved):
+                    cmd = line.strip()
+                    if cmd and not cmd.startswith('#') and cmd not in items:
+                        items.append(cmd)
+            except Exception:
+                pass
+        _ZSH_META = re.compile(r'^: \d+:\d+;')
+        for hpath in [os.path.expanduser('~/.bash_history'), os.path.expanduser('~/.zsh_history')]:
+            if os.path.exists(hpath):
+                try:
+                    hist = []
+                    for line in reversed(open(hpath, errors='replace').readlines()):
+                        cmd = _ZSH_META.sub('', line.strip()).strip()
+                        if cmd and cmd not in hist:
+                            hist.append(cmd)
+                        if len(hist) >= 30:
+                            break
+                    for cmd in hist:
+                        if cmd not in items:
+                            items.append(cmd)
+                    break
+                except Exception:
+                    pass
+        return items[:50]
+
+    def _toggle_palette(self):
+        if self._palette_active:
+            self._palette_active = False
+        else:
+            self._palette_items = self._load_palette_items()
+            self._palette_idx = 0
+            self._palette_active = True
+            self._clipboard_active = False
+        self._render()
+
+    def _handle_palette_key(self, data: bytes) -> bytes:
+        if not self._palette_active:
+            return data
+        if b'\x1b[A' in data:
+            self._palette_idx = max(0, self._palette_idx - 1)
+            self._render(); return b''
+        if b'\x1b[B' in data:
+            self._palette_idx = min(len(self._palette_items) - 1, self._palette_idx + 1)
+            self._render(); return b''
+        if b'\r' in data or b'\n' in data:
+            if self._palette_items:
+                cmd = self._palette_items[self._palette_idx]
+                self._palette_active = False
+                self._render()
+                if self._pty_master is not None:
+                    os.write(self._pty_master, (cmd + '\n').encode())
+            return b''
+        if b'\x1b' in data:
+            self._palette_active = False; self._render(); return b''
+        self._palette_active = False; self._render()
+        return data
+
+    # ─── Clipboard ───────────────────────────────────────────────────────────
+
+    def _load_clipboard(self) -> list:
+        try:
+            items = json.load(open(self._clipboard_path))
+            return [i for i in items if isinstance(i, dict) and 'text' in i][:20]
+        except Exception:
+            return []
+
+    def _toggle_clipboard(self):
+        if self._clipboard_active:
+            self._clipboard_active = False
+        elif self._clipboard:
+            self._clipboard_idx = 0
+            self._clipboard_active = True
+            self._palette_active = False
+        else:
+            self._paste_from_file()
+        self._render()
+
+    def _handle_clipboard_key(self, data: bytes) -> bytes:
+        if not self._clipboard_active:
+            return data
+        if b'\x1b[A' in data:
+            self._clipboard_idx = max(0, self._clipboard_idx - 1)
+            self._render(); return b''
+        if b'\x1b[B' in data:
+            self._clipboard_idx = min(len(self._clipboard) - 1, self._clipboard_idx + 1)
+            self._render(); return b''
+        if b'\r' in data or b'\n' in data:
+            if self._clipboard:
+                text = self._clipboard[self._clipboard_idx].get('text', '')
+                self._clipboard_active = False
+                self._render()
+                if self._pty_master is not None and text:
+                    os.write(self._pty_master, (text + '\n').encode())
+            return b''
+        if b'\x1b' in data:
+            self._clipboard_active = False; self._render(); return b''
+        self._clipboard_active = False; self._render()
+        return data
+
+    def _toggle_url_qr(self):
+        self._show_url_qr = not self._show_url_qr
+        if not self._show_url_qr:
+            self._last_url = ''
+        self._render(force_full=False)
+
+    def _scan_for_url(self) -> str:
+        """Scan visible screen buffer bottom-to-top, return first URL found."""
+        for row_idx in range(self._screen.lines - 1, -1, -1):
+            row = self._screen.buffer[row_idx]
+            line = ''.join(row[c].data for c in range(self._screen.columns))
+            m = _URL_RE.search(line)
+            if m:
+                return m.group(0)
+        return ''
+
+    def _start_network_monitor_thread(self):
+        """Measure IP + upload/download rates every 15 min, only when idle."""
+        def _loop():
+            while self._running:
+                idle = time.monotonic() - self._last_activity
+                if idle >= 300:
+                    try:
+                        import psutil
+                        c1 = psutil.net_io_counters()
+                        time.sleep(5)
+                        c2 = psutil.net_io_counters()
+                        up   = (c2.bytes_sent - c1.bytes_sent) / 5.0
+                        down = (c2.bytes_recv - c1.bytes_recv) / 5.0
+                        ip   = _get_local_ip()
+                        with self._net_stats_lock:
+                            self._net_stats = {
+                                'ip': ip, 'up': _fmt_speed(up),
+                                'down': _fmt_speed(down), 'dirty': True,
+                            }
+                    except Exception as e:
+                        logger.debug('net monitor: %s', e)
+                time.sleep(max(60, 900 - 5))
+        threading.Thread(target=_loop, daemon=True, name='net-monitor').start()
+
     def _force_full_refresh(self):
         if self._last_image is not None:
             self._driver.full_refresh(self._last_image)
-            self._partial_count = 0
+            self._last_full_refresh_mono = time.monotonic()
 
     def _switch_to_stats(self):
         self._running = False
@@ -351,6 +916,49 @@ class EinkTerminal:
             close_fds=True,
             start_new_session=True,
         )
+
+    def _show_screensaver(self):
+        """Render the screensaver to the display.
+
+        In 'cycle' mode, advances through gallery photos every N minutes.
+        In 'static' mode (default), always shows the gallery-selected image.
+        Always shows a QR code overlay pointing to the preview server.
+        """
+        try:
+            from render import render_screensaver
+            from preview_server import get_screensaver_path, _list_photos
+
+            mode = self._config.get('screensaver_mode', 'static')
+            static_path = self._config.get('screensaver_image_path', 'assets/test.jpg')
+            if not os.path.isabs(static_path):
+                static_path = os.path.join(_REPO_ROOT, static_path)
+            photos_dir = os.path.join(_REPO_ROOT, 'assets', 'gallery')
+
+            if mode == 'cycle':
+                photos = _list_photos(photos_dir)
+                if photos:
+                    cycle_secs = self._config.get('screensaver_cycle_interval', 5) * 60
+                    now = time.monotonic()
+                    if self._screensaver_last_cycle == 0.0 or \
+                            (now - self._screensaver_last_cycle) >= cycle_secs:
+                        self._screensaver_cycle_idx = (self._screensaver_cycle_idx + 1) % len(photos)
+                        self._screensaver_last_cycle = now
+                    image_path = os.path.join(photos_dir, photos[self._screensaver_cycle_idx])
+                else:
+                    image_path = static_path
+            else:
+                image_path = get_screensaver_path(photos_dir) or static_path
+
+            port = self._config.get('preview_server_port', 8080)
+            ip = _get_local_ip()
+            qr_url = f'http://{ip}:{port}/' if ip else ''
+
+            img = render_screensaver(image_path, qr_url, self._config)
+            self._driver.full_refresh(img)
+            self._last_image = img
+            logger.info('Screensaver activated — img=%s mode=%s', os.path.basename(image_path), mode)
+        except Exception as e:
+            logger.warning('Screensaver render error: %s', e)
 
     # ─── Status bar info ──────────────────────────────────────────────────────
 
@@ -416,12 +1024,64 @@ class EinkTerminal:
         t = threading.Thread(target=_loop, daemon=True)
         t.start()
 
+    def _start_statusbar_stats_thread(self):
+        def _loop():
+            sys.path.insert(0, os.path.join(_REPO_ROOT, 'src'))
+            from system_stats import collect as _collect
+            while self._running:
+                try:
+                    data = _collect(self._config)
+                    with self._statusbar_stats_lock:
+                        self._statusbar_stats = data
+                        self._statusbar_stats_dirty = True
+                except Exception as e:
+                    logger.warning('Statusbar stats error: %s', e)
+                time.sleep(_STATUSBAR_STATS_UPDATE)
+
+        threading.Thread(target=_loop, daemon=True).start()
+
     # ─── Rendering ───────────────────────────────────────────────────────────
 
     def _render(self, force_full: bool = False):
         tw = SPLIT_TERMINAL_W if self._split_view else 800
         status_info = self._get_status_info()
         alerts = self._alert_monitor.active()
+
+        with self._statusbar_stats_lock:
+            sys_stats = self._statusbar_stats
+            self._statusbar_stats_dirty = False
+
+        found = self._scan_for_url()
+        if found:
+            self._last_url = found
+        url_qr = self._last_url if self._show_url_qr else None
+
+        with self._net_stats_lock:
+            net_stats = dict(self._net_stats) if self._net_stats else None
+
+        if self._palette_active and self._palette_items:
+            overlay = (self._palette_items, self._palette_idx, 'Commands')
+        elif self._clipboard_active and self._clipboard:
+            overlay = (
+                [c.get('label', c.get('text', '')) for c in self._clipboard],
+                self._clipboard_idx, 'Clipboard',
+            )
+        elif self._prockill_active and self._prockill_items:
+            overlay = (self._prockill_items, self._prockill_idx,
+                       'Kill Process  [Enter=SIGTERM  Esc=cancel]')
+        elif self._svcmgr_active and self._svcmgr_items:
+            overlay = (self._svcmgr_items, self._svcmgr_idx,
+                       'Services  [R=restart  S=stop  A=start  Esc=close]')
+        elif self._power_active:
+            overlay = (_POWER_ITEMS, self._power_idx, 'Power  [Enter to confirm]')
+        elif self._sshpick_active and self._sshpick_items:
+            overlay = (self._sshpick_items, self._sshpick_idx,
+                       'SSH Bookmarks  [Enter=connect  Esc=cancel]')
+        else:
+            overlay = None
+
+        tab_bar = [(self._tab_title(t), i == self._active_tab)
+                   for i, t in enumerate(self._tabs)] if self._tabs else None
 
         img = render_screen(
             self._screen,
@@ -432,6 +1092,11 @@ class EinkTerminal:
             status_info=status_info,
             alerts=alerts if alerts else None,
             hq=self._hq_render,
+            sys_stats=sys_stats,
+            url_qr=url_qr,
+            net_stats=net_stats,
+            overlay=overlay,
+            tab_bar=tab_bar,
         )
 
         # Overlay split-view sidebar
@@ -442,48 +1107,49 @@ class EinkTerminal:
             render_mini_stats(img, stats, dark_mode=self._dark_mode)
 
         self._last_image = img
-        do_full = force_full or (self._partial_count >= self._full_every)
+        time_full = (self._full_refresh_interval > 0 and
+                     (time.monotonic() - self._last_full_refresh_mono) >= self._full_refresh_interval)
+        do_full = force_full or time_full
 
         if do_full:
             self._driver.full_refresh(img)
-            self._partial_count = 0
+            self._last_full_refresh_mono = time.monotonic()
         else:
-            dirty_pixel_rows = self._dirty_pixel_rows()
-            if dirty_pixel_rows:
-                self._driver.partial_refresh_rows(img, dirty_pixel_rows)
-            else:
-                # Fallback: no dirty rows tracked (e.g. screen-clear, pyte edge case)
-                # — do a full-screen partial so the display never freezes
-                self._driver.partial_refresh(img)
-            self._partial_count += 1
-
-    def _dirty_pixel_rows(self) -> set:
-        """Convert pyte's dirty terminal-row set to pixel rows."""
-        _, _, _, ch = terminal_dimensions(
-            self._font_size, self._font_path,
-            SPLIT_TERMINAL_W if self._split_view else 800,
-        )
-        pixel_rows = set()
-        for term_row in self._screen.dirty:
-            y_start = term_row * ch
-            y_end = min(y_start + ch, TERMINAL_H)
-            pixel_rows.update(range(y_start, y_end))
-        return pixel_rows
+            self._driver.partial_refresh_diff(img)
 
     # ─── Main entry point ─────────────────────────────────────────────────────
 
     def run(self):
+        try:
+            with open('/tmp/eink-terminal-active', 'w') as f:
+                f.write(str(os.getpid()))
+        except Exception:
+            pass
+
         self._spawn_shell()
         self._enter_raw()
+        if self._evdev_kb:
+            self._evdev_kb.grab()
         self._running = True
         self._last_activity = time.monotonic()
+
+        # Wrap initial shell in a Tab
+        self._tabs = [_Tab(screen=self._screen, stream=self._stream,
+                           pty_master=self._pty_master, child_pid=self._child_pid)]
+        self._active_tab = 0
 
         if self._split_view:
             self._start_stats_thread()
 
+        if self._status_extras:
+            self._start_statusbar_stats_thread()
+
+        self._start_network_monitor_thread()
+
         _config_path = os.path.join(_REPO_ROOT, 'config', 'config.yaml')
         server = _start_preview(self._config, os.path.join(_REPO_ROOT, 'output', 'terminal.bmp'),
-                                config_path=_config_path)
+                                config_path=_config_path,
+                                clipboard_path=self._clipboard_path)
         if server is not None:
             self._web_input_queue = server.input_queue
         self._render(force_full=True)
@@ -491,7 +1157,13 @@ class EinkTerminal:
         try:
             self._loop()
         finally:
+            try:
+                os.unlink('/tmp/eink-terminal-active')
+            except Exception:
+                pass
             self._exit_raw()
+            if self._evdev_kb:
+                self._evdev_kb.ungrab()
             self._driver.sleep()
             if self._child_pid:
                 try:
@@ -503,12 +1175,19 @@ class EinkTerminal:
         last_render = 0.0
         has_pending = False
         last_alert_tick = 0.0
+        in_screensaver = False
 
         while self._running:
             try:
-                fds = [self._stdin_fd]
-                if self._pty_master is not None:
-                    fds.append(self._pty_master)
+                fds = []
+                if self._evdev_kb is None:
+                    fds.append(self._stdin_fd)
+                else:
+                    fds.append(self._evdev_kb.fileno())
+                # Monitor ALL tab PTYs so background tabs stay current
+                for tab in self._tabs:
+                    if tab.pty_master is not None and tab.pty_master >= 0:
+                        fds.append(tab.pty_master)
                 r, _, _ = select.select(fds, [], [], _RENDER_DEBOUNCE)
             except (ValueError, OSError):
                 break
@@ -517,53 +1196,93 @@ class EinkTerminal:
 
             # ── Idle screensaver check ────────────────────────────────────────
             if self._idle_timeout > 0:
-                if now - self._last_activity > self._idle_timeout:
-                    self._switch_to_stats()
-                    break
-
-            # ── Idle periodic full refresh (clears e-ink ghosting) ────────────
-            if self._idle_refresh_interval > 0:
                 idle = now - self._last_activity
-                since_refresh = now - self._last_idle_refresh
-                if idle >= self._idle_refresh_interval and since_refresh >= self._idle_refresh_interval:
-                    self._force_full_refresh()
-                    self._last_idle_refresh = now
+                if idle > self._idle_timeout and not in_screensaver:
+                    in_screensaver = True
+                    self._show_screensaver()
+                    continue  # skip stale r — next iteration runs a fresh select
 
-            # ── Keyboard input ────────────────────────────────────────────────
-            if self._stdin_fd in r:
+            # ── Keyboard input (evdev path) ───────────────────────────────────
+            if self._evdev_kb is not None and self._evdev_kb.fileno() in r:
+                data = self._evdev_kb.read()
+                if data:
+                    self._last_activity = now
+                    if in_screensaver:
+                        in_screensaver = False
+                        self._render(force_full=True)
+                        self._last_full_refresh_mono = time.monotonic()
+                        # swallow the wake key
+                    else:
+                        if self._scroll_pages > 0:
+                            self._snap_to_live()
+                            has_pending = True
+                        data = self._handle_hotkeys(data)
+                        data = self._handle_prockill_key(data)
+                        data = self._handle_svcmgr_key(data)
+                        data = self._handle_power_key(data)
+                        data = self._handle_palette_key(data)
+                        data = self._handle_clipboard_key(data)
+                        data = self._handle_sshpick_key(data)
+                        if data and self._pty_master is not None:
+                            try:
+                                os.write(self._pty_master, data)
+                            except OSError:
+                                pass
+
+            # ── Keyboard input (stdin / TTY path) ────────────────────────────
+            elif self._evdev_kb is None and self._stdin_fd in r:
                 try:
                     data = os.read(self._stdin_fd, 256)
                 except OSError:
                     break
                 self._last_activity = now
-                self._last_idle_refresh = now  # reset idle-refresh timer on activity
-                # Snap to live before passing any key to the shell
-                if self._scroll_pages > 0:
-                    self._snap_to_live()
-                    has_pending = True
-                data = self._handle_hotkeys(data)
-                if data and self._pty_master is not None:
-                    try:
-                        os.write(self._pty_master, data)
-                    except OSError:
-                        pass
-
-            # ── PTY output ───────────────────────────────────────────────────
-            if self._pty_master is not None and self._pty_master in r:
-                try:
-                    chunk = os.read(self._pty_master, 4096)
-                    if chunk:
-                        # New output snaps back to live view
-                        if self._scroll_pages > 0:
-                            self._snap_to_live()
-                        chunk = _filter_pty_output(chunk, self._pty_master)
-                        if chunk:
-                            self._stream.feed(chunk)
+                if in_screensaver:
+                    in_screensaver = False
+                    self._render(force_full=True)
+                    self._last_full_refresh_mono = time.monotonic()
+                    # swallow the wake key
+                else:
+                    if self._scroll_pages > 0:
+                        self._snap_to_live()
                         has_pending = True
+                    data = self._handle_hotkeys(data)
+                    data = self._handle_prockill_key(data)
+                    data = self._handle_svcmgr_key(data)
+                    data = self._handle_power_key(data)
+                    data = self._handle_palette_key(data)
+                    data = self._handle_clipboard_key(data)
+                    data = self._handle_sshpick_key(data)
+                    if data and self._pty_master is not None:
+                        try:
+                            os.write(self._pty_master, data)
+                        except OSError:
+                            pass
+
+            # ── PTY output (all tabs) ─────────────────────────────────────────
+            for tab_i, tab in enumerate(self._tabs):
+                if tab.pty_master is None or tab.pty_master < 0:
+                    continue
+                if tab.pty_master not in r:
+                    continue
+                try:
+                    chunk = os.read(tab.pty_master, 4096)
+                    if chunk:
+                        chunk = _filter_pty_output(chunk, tab.pty_master)
+                        if chunk:
+                            if tab_i == self._active_tab and self._scroll_pages > 0 and not in_screensaver:
+                                self._snap_to_live()
+                            tab.stream.feed(chunk)
+                        if tab_i == self._active_tab and not in_screensaver:
+                            has_pending = True
                 except OSError:
-                    if not self._shell_exited_handler():
-                        break
-                    has_pending = True
+                    if tab_i == self._active_tab:
+                        if not self._shell_exited_handler():
+                            break
+                        has_pending = True
+                    else:
+                        try: os.close(tab.pty_master)
+                        except OSError: pass
+                        tab.pty_master = -1
 
             # ── Web input (phone keyboard via preview server) ─────────────────
             if self._web_input_queue is not None:
@@ -573,25 +1292,50 @@ class EinkTerminal:
                         if text and self._pty_master is not None:
                             os.write(self._pty_master, text.encode('utf-8'))
                             self._last_activity = now
-                            has_pending = True
+                            if in_screensaver:
+                                in_screensaver = False
+                                self._render(force_full=True)
+                                self._last_full_refresh_mono = time.monotonic()
+                            else:
+                                has_pending = True
                 except _queue.Empty:
                     pass
 
             # ── Alert tick ────────────────────────────────────────────────────
             if now - last_alert_tick >= 1.0:
-                if self._alert_monitor.tick():
+                if self._alert_monitor.tick() and not in_screensaver:
                     has_pending = True  # alert changed — re-render status bar
                 last_alert_tick = now
 
             # ── Split-view stats update ───────────────────────────────────────
-            if self._split_view:
+            if self._split_view and not in_screensaver:
                 with self._stats_lock:
                     stats_dirty = self._stats_dirty
                 if stats_dirty:
                     has_pending = True
 
+            # ── Status bar stats update ───────────────────────────────────────
+            if self._status_extras and not in_screensaver:
+                with self._statusbar_stats_lock:
+                    statusbar_dirty = self._statusbar_stats_dirty
+                if statusbar_dirty:
+                    has_pending = True
+
+            # ── Network stats update ──────────────────────────────────────────
+            if not in_screensaver:
+                with self._net_stats_lock:
+                    if self._net_stats.get('dirty'):
+                        self._net_stats['dirty'] = False
+                        has_pending = True
+
+            # ── Cycle screensaver: swap image when interval elapses ───────────
+            if in_screensaver and self._config.get('screensaver_mode', 'static') == 'cycle':
+                cycle_secs = self._config.get('screensaver_cycle_interval', 5) * 60
+                if self._screensaver_last_cycle > 0.0 and (now - self._screensaver_last_cycle) >= cycle_secs:
+                    self._show_screensaver()
+
             # ── Debounced render ──────────────────────────────────────────────
-            if has_pending and (now - last_render) >= _RENDER_DEBOUNCE:
+            if has_pending and not in_screensaver and (now - last_render) >= _RENDER_DEBOUNCE:
                 self._render()
                 self._screen.dirty.clear()
                 has_pending = False
@@ -612,18 +1356,26 @@ class EinkTerminal:
             pass
         self._pty_master = None
         self._child_pid = None
+        if self._tabs and 0 <= self._active_tab < len(self._tabs):
+            self._tabs[self._active_tab].pty_master = None
+            self._tabs[self._active_tab].child_pid = None
 
+        input_fd = self._evdev_kb.fileno() if self._evdev_kb else self._stdin_fd
         while True:
-            r, _, _ = select.select([self._stdin_fd], [], [], 1.0)
+            r, _, _ = select.select([input_fd], [], [], 1.0)
             if not r:
                 continue
             try:
-                key = os.read(self._stdin_fd, 10)
+                key = os.read(input_fd, 10)
             except OSError:
                 return False
             if b'\r' in key or b'\n' in key:
                 self._init_screen()
                 self._spawn_shell()
+                if self._tabs and 0 <= self._active_tab < len(self._tabs):
+                    t = self._tabs[self._active_tab]
+                    t.screen = self._screen; t.stream = self._stream
+                    t.pty_master = self._pty_master; t.child_pid = self._child_pid
                 self._render(force_full=True)
                 return True
             if b'\x03' in key:

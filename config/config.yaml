@@ -50,11 +50,11 @@ terminal_font_size: 14
 terminal_font_path: ""
 
 # Dark mode for the terminal (black bg, white text)
-terminal_dark_mode: true
+terminal_dark_mode: false
 
-# How many partial (no-flash) refreshes between full (flash) refreshes.
-# Higher = less flashing, more ghosting. Lower = cleaner screen, more flashing.
-terminal_full_refresh_every: 20
+# Seconds of active use between full (flash) refreshes that clear ghosting.
+# Partial (no-flash) updates are used in between. 0 = disabled.
+terminal_full_refresh_interval: 60
 
 # tmux: attach to (or create) a named tmux session so shell state survives
 # app restarts. Sessions do NOT survive reboots without tmux-resurrect.
@@ -67,11 +67,9 @@ terminal_scrollback: 500
 
 # Idle screensaver: switch to stats after N seconds of no keyboard activity.
 # Set to 0 to disable.
-terminal_idle_timeout: 900
+terminal_idle_timeout: 900  # 15 minutes
 
-# Idle display refresh: do a full e-ink refresh every N seconds of inactivity
-# to clear ghosting. Resets whenever a key is pressed. Set to 0 to disable.
-terminal_idle_refresh_interval: 900
+# (removed — idle refreshes are no longer done; the display sleeps on screensaver instead)
 
 # Status bar extras: show current time, working directory, and git branch.
 terminal_status_bar_extras: true
@@ -116,10 +114,30 @@ screensaver_idle_timeout: 3600
 # Relative paths are resolved from the project root.
 screensaver_image_path: "assets/test.jpg"
 
+# 'static' = one image, 'cycle' = rotate through gallery, 'mlb' = MLB scores & standings
+screensaver_mode: static
+screensaver_cycle_interval: 5  # minutes between image changes in cycle mode
+
+# MLB screensaver: favorite team abbreviation to highlight (e.g. 'CHC', 'NYY', 'LAD')
+screensaver_mlb_team: ""
+
+# ── System overlay services (F4 service manager) ─────────────────────────────
+terminal_services:
+  - eink-display
+  - ssh
+  - nginx
+
+# ── SSH bookmarks for F1 quick-connect (opens new tab) ───────────────────────
+# terminal_ssh_bookmarks:
+#   - name: "homelab"
+#     host: "192.168.1.100"
+#     user: "pi"
+#     port: 22
+
 # ── Startup mode (used by systemd service) ───────────────────────────────────
 # 'terminal' = launch eink_terminal.py on boot
 # 'stats'    = launch main.py (stats dashboard) on boot
-startup_mode: stats
+startup_mode: terminal
 
 # How many seconds to show command output before returning to stats dashboard
 command_display_seconds: 15

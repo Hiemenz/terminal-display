@@ -216,7 +216,7 @@ def render(stats: dict, config: dict) -> Image.Image:
             qr_img = qr_img.resize((qr_size, qr_size), Image.NEAREST)
             # Place just above bottom bar in the right column
             qr_x = W - PAD - qr_size
-            qr_y = H - PAD - 14 - qr_size - 4
+            qr_y = H - 18 - qr_size - 4
             img.paste(qr_img, (qr_x, qr_y))
         except Exception:
             pass
@@ -224,7 +224,7 @@ def render(stats: dict, config: dict) -> Image.Image:
     # -----------------------------------------------------------------------
     # Bottom status bar
     # -----------------------------------------------------------------------
-    bar_y = H - PAD - 14
+    bar_y = H - 18
     d.line([(PAD, bar_y), (W - PAD, bar_y)], fill=fg, width=1)
     bar_y += 4
     platform_str = stats.get('platform', '')

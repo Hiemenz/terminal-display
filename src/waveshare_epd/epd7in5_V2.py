@@ -200,6 +200,13 @@ class EPD:
             buf[i] ^= 0xFF
         return buf
 
+    def getbuffer_partial(self, image):
+        """Convert an arbitrarily-sized PIL image to e-paper format bytes for display_Partial."""
+        buf = bytearray(image.convert('1').tobytes('raw'))
+        for i in range(len(buf)):
+            buf[i] ^= 0xFF
+        return buf
+
     def display(self, image):
         if(self.width % 8 == 0):
             Width = self.width // 8
@@ -240,10 +247,7 @@ class EPD:
                 Xend = Xend // 8 * 8
             else:
                 Xend = Xend // 8 * 8 + 1
-                
-        Width = (Xend - Xstart) // 8
-        Height = Yend - Ystart
-	
+
         self.send_command(0x50)
         self.send_data(0xA9)
         self.send_data(0x07)
@@ -251,25 +255,22 @@ class EPD:
         self.send_command(0x91)		#This command makes the display enter partial mode
         self.send_command(0x90)		#resolution setting
         self.send_data (Xstart//256)
-        self.send_data (Xstart%256)   #x-start    
+        self.send_data (Xstart%256)   #x-start
 
-        self.send_data ((Xend-1)//256)		
-        self.send_data ((Xend-1)%256)  #x-end	
+        self.send_data ((Xend-1)//256)
+        self.send_data ((Xend-1)%256)  #x-end
 
         self.send_data (Ystart//256)  #
-        self.send_data (Ystart%256)   #y-start    
+        self.send_data (Ystart%256)   #y-start
 
-        self.send_data ((Yend-1)//256)		
+        self.send_data ((Yend-1)//256)
         self.send_data ((Yend-1)%256)  #y-end
         self.send_data (0x01)
 
-        image1 = [0xFF] * int(self.width * self.height / 8)
-        for j in range(Height):
-                for i in range(Width):
-                    image1[i + j * Width] = ~Image[i + j * Width]
-
-        self.send_command(0x13)   #Write Black and White image to RAM
-        self.send_data2(image1)
+        # Image is expected in e-paper format (1=black, 0=white) as returned by
+        # getbuffer_partial(). Send directly — no polarity inversion needed here.
+        self.send_command(0x13)
+        self.send_data2(Image)
 
         self.send_command(0x12)
         epdconfig.delay_ms(100)

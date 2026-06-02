@@ -17,14 +17,8 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=10
 
-# Give the process a real TTY so raw-mode keyboard input works
-StandardInput=tty
-TTYPath=/dev/tty1
-TTYReset=yes
-TTYVHangup=yes
-
-# Ensure SPI and GPIO are accessible (Pi-specific)
-SupplementaryGroups=spi gpio video
+# Ensure SPI, GPIO, and raw keyboard input are accessible (Pi-specific)
+SupplementaryGroups=spi gpio video input
 
 [Install]
 WantedBy=multi-user.target
