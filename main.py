@@ -29,6 +29,8 @@ from config_loader import load_config, add_config_arg
 from system_stats import collect
 from render import render, render_output, render_screensaver
 from display import send_to_display
+from display_eink import EinkDriver
+from refresh_tracker import needs_full_refresh
 from util import output_path
 from preview_server import start_if_enabled as _start_preview, get_screensaver_path
 
@@ -88,6 +90,34 @@ def _keyboard_watcher(switch_event: threading.Event, stop_event: threading.Event
         pass
 
 
+def _evdev_watcher(switch_event: threading.Event, stop_event: threading.Event, config: dict):
+    """
+    Background thread: watch the evdev keyboard for any keypress.
+    Handles the case where stdin is not a tty (e.g. systemd service).
+    Does NOT grab the device — terminal mode will grab it later.
+    """
+    try:
+        from evdev_input import find_keyboard
+        import evdev
+        kbd_path = config.get('terminal_keyboard_device', 'auto')
+        dev = find_keyboard(kbd_path if kbd_path != 'auto' else '')
+        if dev is None:
+            return
+        while not stop_event.is_set():
+            r, _, _ = select.select([dev.fileno()], [], [], 0.5)
+            if not r:
+                continue
+            try:
+                for event in dev.read():
+                    if event.type == evdev.ecodes.EV_KEY and event.value == 1:
+                        switch_event.set()
+                        return
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def _is_night(config: dict) -> bool:
     """Return True if we're in the night window and should skip."""
     if not config.get('night_mode', False):
@@ -129,7 +159,7 @@ def _dequeue(server):
         return None
 
 
-def _run_and_render(cmd: str, config: dict, local: bool):
+def _run_and_render(cmd: str, config: dict, local: bool, driver=None):
     """Run a shell command, render its output to the display."""
     print(f"[web] $ {cmd}")
     try:
@@ -147,10 +177,33 @@ def _run_and_render(cmd: str, config: dict, local: bool):
         exit_code = -1
 
     img = render_output(cmd, lines, exit_code, config)
-    os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
-    img.save(_OUTPUT_IMAGE)
     if not local:
-        send_to_display(_OUTPUT_IMAGE)
+        if driver is not None:
+            driver.full_refresh(img, _OUTPUT_IMAGE)
+        else:
+            os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
+            img.save(_OUTPUT_IMAGE)
+            send_to_display(_OUTPUT_IMAGE)
+    else:
+        os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
+        img.save(_OUTPUT_IMAGE)
+
+
+def _loop_cycle(config: dict, local: bool, driver: EinkDriver):
+    """Stats fetch → render → partial (or periodic full) display cycle."""
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Collecting stats…")
+    stats = collect(config)
+    print("Rendering image…")
+    img = render(stats, config)
+    if local:
+        os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
+        img.save(_OUTPUT_IMAGE)
+        print(f"Saved → {_OUTPUT_IMAGE}")
+        return
+    if needs_full_refresh():
+        driver.full_refresh(img, _OUTPUT_IMAGE)
+    else:
+        driver.partial_refresh_diff(img, _OUTPUT_IMAGE)
 
 
 def main():
@@ -181,6 +234,8 @@ Examples:
         run_once(config, local=local)
         return
 
+    driver = EinkDriver(local=local)
+
     print(f"Terminal Display starting — refresh every {interval}s")
     print("Press F11 to switch to terminal mode.")
     photos_dir = os.path.join(_REPO_ROOT, 'assets', 'gallery')
@@ -196,6 +251,8 @@ Examples:
     if not os.path.isabs(_static_screensaver):
         _static_screensaver = os.path.join(_REPO_ROOT, _static_screensaver)
     preview_port = config.get('preview_server_port', 8080)
+    screensaver_mode = config.get('screensaver_mode', 'static')
+    mlb_last_render = 0.0
 
     # Activity tracking
     last_active = time.monotonic()   # start as active (just booted)
@@ -211,6 +268,12 @@ Examples:
         daemon=True,
     )
     kb_thread.start()
+    evdev_thread = threading.Thread(
+        target=_evdev_watcher,
+        args=(switch_event, stop_event, config),
+        daemon=True,
+    )
+    evdev_thread.start()
 
     while True:
         if switch_event.is_set():
@@ -243,7 +306,7 @@ Examples:
             if cmd:
                 last_active = now
                 in_screensaver = False
-                _run_and_render(cmd, config, local)
+                _run_and_render(cmd, config, local, driver)
                 cmd_display_until = time.monotonic() + cmd_display_secs
                 continue
 
@@ -258,20 +321,31 @@ Examples:
 
         if should_screensave:
             current_ip = _primary_ip()
-            if not in_screensaver or current_ip != screensaver_ip:
+            mlb_refresh_due = (screensaver_mode == 'mlb' and (now - mlb_last_render) > 900)
+            if not in_screensaver or current_ip != screensaver_ip or mlb_refresh_due:
                 in_screensaver = True
                 screensaver_ip = current_ip
-                # QR points to gallery so anyone can scan to upload a new photo
-                qr_url = f'http://{current_ip}:{preview_port}/gallery' if current_ip else ''
-                # Use gallery-selected photo; fall back to static config path
-                active_image = get_screensaver_path(photos_dir) or _static_screensaver
-                print(f"Screensaver — idle {idle_secs:.0f}s  img={os.path.basename(active_image)}  QR→ {qr_url}")
+                qr_url = f'http://{current_ip}:{preview_port}/' if current_ip else ''
                 try:
-                    img = render_screensaver(active_image, qr_url, config)
-                    os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
-                    img.save(_OUTPUT_IMAGE)
+                    if screensaver_mode == 'mlb':
+                        from mlb_screensaver import render_mlb_screensaver
+                        img = render_mlb_screensaver(config)
+                        if img is None:
+                            print("MLB fetch failed — falling back to static screensaver")
+                            active_image = get_screensaver_path(photos_dir) or _static_screensaver
+                            img = render_screensaver(active_image, qr_url, config)
+                        else:
+                            mlb_last_render = now
+                            print(f"Screensaver (MLB) — idle {idle_secs:.0f}s")
+                    else:
+                        active_image = get_screensaver_path(photos_dir) or _static_screensaver
+                        print(f"Screensaver — idle {idle_secs:.0f}s  img={os.path.basename(active_image)}  QR→ {qr_url}")
+                        img = render_screensaver(active_image, qr_url, config)
                     if not local:
-                        send_to_display(_OUTPUT_IMAGE)
+                        driver.full_refresh(img, _OUTPUT_IMAGE)
+                    else:
+                        os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
+                        img.save(_OUTPUT_IMAGE)
                 except Exception as e:
                     print(f"Screensaver render error: {e}")
 
@@ -292,7 +366,7 @@ Examples:
                 if cmd and cmd.strip():
                     last_active = time.monotonic()
                     in_screensaver = False
-                    _run_and_render(cmd.strip(), config, local)
+                    _run_and_render(cmd.strip(), config, local, driver)
                     cmd_display_until = time.monotonic() + cmd_display_secs
                     break
                 time.sleep(min(0.5, remaining))
@@ -302,6 +376,7 @@ Examples:
         if in_screensaver:
             in_screensaver = False
             screensaver_ip = None
+            mlb_last_render = 0.0
             print("Activity detected — resuming stats display")
 
         # Normal stats render
@@ -311,7 +386,7 @@ Examples:
                 time.sleep(300)
                 continue
 
-            run_once(config, local=local)
+            _loop_cycle(config, local, driver)
         except KeyboardInterrupt:
             stop_event.set()
             print("\nStopped.")
@@ -335,7 +410,7 @@ Examples:
                 cmd = cmd.strip()
                 if cmd:
                     last_active = time.monotonic()
-                    _run_and_render(cmd, config, local)
+                    _run_and_render(cmd, config, local, driver)
                     cmd_display_until = time.monotonic() + cmd_display_secs
                     break
             time.sleep(min(0.5, remaining))

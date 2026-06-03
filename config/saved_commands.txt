@@ -1,0 +1,10 @@
+# Saved commands — one per line, # lines are comments
+# These appear at the TOP of the F6 command palette
+git status
+git log --oneline -10
+git push origin main
+sudo systemctl restart eink-display
+journalctl -u eink-display -n 50 -f
+df -h
+free -h
+top -bn1 | head -20

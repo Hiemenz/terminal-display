@@ -11,6 +11,8 @@ Two usage modes:
 import os
 import platform
 import logging
+import queue as _queue
+import threading
 from PIL import Image
 
 from refresh_tracker import needs_full_refresh, record_full_refresh
@@ -66,133 +68,206 @@ def display_image(image_to_display, output_filename=None):
             pass
 
 
-def _group_rows(rows: set) -> list:
-    """Convert a set of row indices into sorted contiguous spans [(ystart, yend), ...]."""
-    if not rows:
-        return []
-    sorted_r = sorted(rows)
-    groups = []
-    start = prev = sorted_r[0]
-    for r in sorted_r[1:]:
-        if r == prev + 1:
-            prev = r
-        else:
-            groups.append((start, prev + 1))
-            start = prev = r
-    groups.append((start, prev + 1))
-    return groups
+def _save(image: Image.Image, output_path: str = None):
+    if output_path is None:
+        output_path = _DEFAULT_OUTPUT
+    os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
+    image.save(output_path)
 
 
 # ── Persistent driver for terminal mode ──────────────────────────────────────
 
 class EinkDriver:
     """
-    Persistent e-ink driver that keeps the display "warm" between frames.
+    Persistent e-ink driver with a background hardware-write thread.
 
-    Refresh modes:
-      partial_refresh — fast (~0.3 s), no flash.  Use for every terminal update.
-      full_refresh    — slow (~2 s), visible flash. Use periodically to clear ghosting.
+    Public methods return immediately; the actual SPI writes happen on a
+    dedicated worker thread.  For partial refreshes the worker always uses
+    the *latest* enqueued frame (stale intermediate frames are dropped), so
+    the main loop is never blocked waiting for the display to finish.
 
-    Sequence for terminal:
-      1. partial_refresh() × N          → automatic init_part on first call
-      2. full_refresh()                 → init_fast → display → init_part (stays in partial mode)
-      3. repeat
-      4. sleep()                        → only on app exit
+    Sequence:
+      partial_refresh_diff()  → async, latest-frame-wins
+      full_refresh()          → async, queued in order
+      sleep()                 → synchronous (blocks until hardware sleeps)
     """
+
+    # ── task kinds sent to the worker ─────────────────────────────────────────
+    _PARTIAL = 'partial'
+    _FULL    = 'full'
+    _SLEEP   = 'sleep'
 
     def __init__(self, local: bool = False):
         self._local = local or _IS_MAC
-        self._epd = None
-        self._partial_ready = False  # True after init_part() has been called
+
+        # Hardware state — owned exclusively by the worker thread (no locks).
+        self._epd          = None
+        self._partial_ready = False
+        self._prev_buf      = None
+        self._hw_sleeping   = False   # True after sleep(); full init() needed to wake
+
+        # Worker communication.
+        self._q            = _queue.Queue()       # ordered task queue
+        self._partial_lock = threading.Lock()
+        self._pending_partial = None              # latest partial frame (replace-on-write)
+
+        if not (local or _IS_MAC):
+            threading.Thread(target=self._worker, daemon=True, name='eink-hw').start()
+
+    # ── worker loop ───────────────────────────────────────────────────────────
+
+    def _worker(self):
+        while True:
+            item = self._q.get()
+            kind = item[0]
+            if kind == self._PARTIAL:
+                with self._partial_lock:
+                    img = self._pending_partial
+                    self._pending_partial = None
+                if img is not None:
+                    self._hw_partial_diff(img)
+            elif kind == self._FULL:
+                self._hw_full(item[1])
+            elif kind == self._SLEEP:
+                self._hw_sleep()
+                item[1].set()   # unblock sleep() caller
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    def full_refresh(self, image: Image.Image, output_path: str = None):
+        """Full refresh with flash. Async — enqueued behind any pending work."""
+        _save(image, output_path)
+        record_full_refresh()
+        if self._local:
+            return
+        self._q.put((self._FULL, image))
+
+    def partial_refresh_diff(self, image: Image.Image, output_path: str = None):
+        """Async partial refresh. Returns immediately; hardware write runs in background.
+        If the worker is still busy, the previous pending frame is replaced by this one."""
+        _save(image, output_path)
+        if self._local:
+            return
+        with self._partial_lock:
+            already_queued = self._pending_partial is not None
+            self._pending_partial = image
+        if not already_queued:
+            self._q.put((self._PARTIAL,))
+
+    def partial_refresh(self, image: Image.Image, output_path: str = None):
+        self.partial_refresh_diff(image, output_path)
+
+    def sleep(self):
+        """Wait for all pending writes to finish, then hardware-sleep the display."""
+        if self._local:
+            return
+        # Cancel any queued partial that will never be shown.
+        with self._partial_lock:
+            self._pending_partial = None
+        done = threading.Event()
+        self._q.put((self._SLEEP, done))
+        done.wait()
+
+    # ── hardware routines (worker thread only) ────────────────────────────────
 
     def _epd_instance(self):
         if self._epd is None and epd7in5_V2 is not None:
             self._epd = epd7in5_V2.EPD()
         return self._epd
 
-    def full_refresh(self, image: Image.Image, output_path: str = None):
-        """Full refresh with flash. Clears ghosting. Re-enters partial mode afterwards."""
-        if output_path is None:
-            output_path = _DEFAULT_OUTPUT
-        os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-        image.save(output_path)
-        record_full_refresh()
-
-        if self._local:
-            return
-
+    def _hw_full(self, image: Image.Image):
         epd = self._epd_instance()
         if epd is None:
             return
-
         try:
-            # init_fast is faster than init for a periodic ghost-clear refresh
-            epd.init_fast()
-            epd.display(epd.getbuffer(image))
-            # Re-enter partial mode so the next partial_refresh() needs no re-init
+            buf = epd.getbuffer(image)
+            # After deep sleep use full init() to restore power rails.
+            if self._hw_sleeping:
+                epd.init()
+                self._hw_sleeping = False
+            else:
+                epd.init_fast()
+            epd.display(buf)
+            # Stay in partial mode so the next partial write needs no re-init.
             epd.init_part()
             self._partial_ready = True
+            self._prev_buf = bytearray(buf)
         except IOError as e:
             logging.error('E-ink full refresh error: %s', e)
 
-    def partial_refresh(self, image: Image.Image, output_path: str = None):
-        """Fast partial refresh of the full screen — no flash."""
-        self.partial_refresh_rows(image, None, output_path)
-
-    def partial_refresh_rows(
-        self,
-        image: Image.Image,
-        dirty_pixel_rows: set,
-        output_path: str = None,
-    ):
-        """
-        Refresh only the dirty pixel rows — the fastest possible update.
-
-        dirty_pixel_rows: set of pixel-row indices that changed.
-                          Pass None to refresh the entire screen.
-
-        How it works: display_Partial(buf, 0, ystart, 800, yend) accepts a
-        buffer offset so we slice buf[ystart * row_bytes:] which makes the
-        function read the correct rows from the full-image buffer.
-        """
-        if output_path is None:
-            output_path = _DEFAULT_OUTPUT
-        os.makedirs(os.path.dirname(output_path) or '.', exist_ok=True)
-        image.save(output_path)
-
-        if self._local:
-            return
-
+    def _hw_partial_diff(self, image: Image.Image):
+        """Diff against previous frame; update only changed pixel rectangles."""
         epd = self._epd_instance()
         if epd is None:
             return
-
         try:
             if not self._partial_ready:
                 epd.init_part()
                 self._partial_ready = True
 
             buf = epd.getbuffer(image)
-            row_bytes = epd.width // 8  # 100 for 800-px-wide display
+            row_bytes = epd.width // 8  # 100 bytes per row for 800-wide display
 
-            if dirty_pixel_rows is None:
-                # Full-screen partial (no flash, updates everything)
+            if self._prev_buf is None or len(self._prev_buf) != len(buf):
                 epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+                self._prev_buf = bytearray(buf)
                 return
 
-            for ystart, yend in _group_rows(dirty_pixel_rows):
-                # Slice the buffer so display_Partial reads the correct rows.
-                # display_Partial indexes Image[0..Width*Height-1], which maps
-                # to buf[ystart*row_bytes .. yend*row_bytes-1] via this slice.
-                epd.display_Partial(buf[ystart * row_bytes:], 0, ystart, epd.width, yend)
+            # Find dirty byte positions and record per-row X extents.
+            dirty: dict = {}  # pixel-row → (xmin_byte, xmax_byte)
+            for idx in range(len(buf)):
+                if buf[idx] != self._prev_buf[idx]:
+                    row, col = divmod(idx, row_bytes)
+                    if row in dirty:
+                        xn, xx = dirty[row]
+                        dirty[row] = (min(xn, col), max(xx, col))
+                    else:
+                        dirty[row] = (col, col)
+
+            self._prev_buf = bytearray(buf)
+
+            if not dirty:
+                return
+
+            # Too many dirty rows — a full refresh is faster and cleaner.
+            if len(dirty) > epd.height * 0.4:
+                self._hw_full(image)
+                return
+
+            # Group nearby dirty rows (within 2 rows) into a single span to
+            # reduce the number of display_Partial SPI calls.
+            _GAP = 2
+            rows = sorted(dirty)
+            ys, ye = rows[0], rows[0] + 1
+            xn, xx = dirty[rows[0]]
+            spans = []
+            for row in rows[1:]:
+                rn, rx = dirty[row]
+                if row <= ye + _GAP:
+                    ye = max(ye, row + 1)
+                    xn = min(xn, rn)
+                    xx = max(xx, rx)
+                else:
+                    spans.append((ys, ye, xn, xx))
+                    ys, ye, xn, xx = row, row + 1, rn, rx
+            spans.append((ys, ye, xn, xx))
+
+            # Single display_Partial call over the bounding box of all spans —
+            # avoids a ReadBusy() wait per span.
+            y0  = spans[0][0]
+            y1  = spans[-1][1]
+            xb0 = min(s[2] for s in spans)
+            xb1 = max(s[3] for s in spans)
+            # Crop the PIL image to the dirty bounding box and convert to
+            # e-paper format (same polarity as getbuffer output).
+            crop  = image.crop((xb0 * 8, y0, (xb1 + 1) * 8, y1))
+            patch = epd.getbuffer_partial(crop)
+            epd.display_Partial(patch, xb0 * 8, y0, (xb1 + 1) * 8, y1)
 
         except IOError as e:
             logging.error('E-ink partial refresh error: %s', e)
 
-    def sleep(self):
-        """Put the display to sleep. Call only when the application exits."""
-        if self._local:
-            return
+    def _hw_sleep(self):
         epd = self._epd_instance()
         if epd is not None:
             try:
@@ -200,3 +275,4 @@ class EinkDriver:
             except Exception:
                 pass
         self._partial_ready = False
+        self._hw_sleeping = True
