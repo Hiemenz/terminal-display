@@ -159,8 +159,24 @@ class EinkDriver:
         self._cell_w = max(0, cell_w)
         self._cell_h = max(0, cell_h)
 
-    def full_refresh(self, image: Image.Image, output_path: str = None):
-        """Full refresh with flash. Async — enqueued behind any pending work."""
+    def full_refresh(self, image: Image.Image, output_path: str = None, flash: bool = False):
+        """Update the full screen. By default uses partial mode (no flash).
+        Pass flash=True to force a full black/white clear (clears ghosting but visible flash)."""
+        _save(image, output_path)
+        if self._local:
+            return
+        if flash:
+            record_full_refresh()
+            self._q.put((self._FULL, image))
+        else:
+            with self._partial_lock:
+                already_queued = self._pending_partial is not None
+                self._pending_partial = image
+            if not already_queued:
+                self._q.put((self._PARTIAL,))
+
+    def flash_refresh(self, image: Image.Image, output_path: str = None):
+        """Force a full flash refresh (black/white clear) — use for anti-ghosting or F10."""
         _save(image, output_path)
         record_full_refresh()
         if self._local:
@@ -303,11 +319,14 @@ class EinkDriver:
                     b_xlo, b_xhi = cell_row_x[cr]
             bands.append((b_start, b_end, b_xlo, b_xhi))
 
-            # Fall back to full refresh when total changed height or band count is large.
+            # Fall back to full-screen partial when too many bands change.
+            # Using display_Partial for the whole screen avoids the flash that
+            # epd.display() causes while still updating every pixel.
             total_h = sum(min(epd.height, (be + 1) * cell_h) - bs * cell_h
                           for bs, be, _, _ in bands)
             if total_h > epd.height * 0.6 or len(bands) > self._MAX_PARTIAL_SPANS:
-                self._hw_full(image)
+                epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+                self._prev_buf = bytearray(buf)
                 return
 
             # Collect all band patches, then flush with a single panel refresh.
@@ -341,8 +360,8 @@ class EinkDriver:
             epd.display_Partial_multi(patches)
 
             if record_partial_refresh(self._partial_refresh_limit):
-                self._hw_full(image)
-                record_full_refresh()
+                self._hw_full(image)   # flash to clear accumulated ghosting
+                record_full_refresh()  # track it
 
         except IOError as e:
             logging.error('E-ink partial refresh error: %s', e)

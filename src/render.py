@@ -98,7 +98,8 @@ def render(stats: dict, config: dict) -> Image.Image:
     # TOP BAR: hostname + time + date
     # -----------------------------------------------------------------------
     y = PAD
-    hostname = stats.get('hostname', 'unknown')
+    device_label = config.get('device_label', '').strip()
+    hostname = device_label if device_label else stats.get('hostname', 'unknown')
     time_str = stats.get('time', '--:--:--')
     date_str = stats.get('date', '')
     uptime = stats.get('uptime', '')
@@ -280,8 +281,8 @@ def render_screensaver(image_path: str, qr_url: str, config: dict) -> Image.Imag
             qr.make(fit=True)
             qr_img = qr.make_image(fill_color='black', back_color='white').get_image().convert('L')
             qr_size = qr_img.width
-            box_pad = 8
-            label_h = 18
+            box_pad = 4
+            label_h = 16
             # Bottom-right corner, leaving room for the label below the QR.
             qr_x = W - PAD - qr_size
             qr_y = H - PAD - qr_size - box_pad - label_h
@@ -298,6 +299,71 @@ def render_screensaver(image_path: str, qr_url: str, config: dict) -> Image.Imag
             d.text((qr_x + (qr_size - lw) // 2, qr_y + qr_size + 4), label, font=f_small, fill=_BLACK)
         except Exception:
             pass
+
+    return img
+
+
+def render_text_message(text: str, label: str, config: dict) -> Image.Image:
+    """Render a full-screen custom text message (for 'send to display' web feature)."""
+    dark = config.get('dark_mode', True)
+    font_path = config.get('font_path', '')
+
+    bg = _BLACK if dark else _WHITE
+    fg = _WHITE if dark else _BLACK
+
+    f_label = _find_font(font_path, 18)
+    f_text  = _find_font(font_path, 36)
+    f_hint  = _find_font(font_path, 13)
+
+    img = Image.new('L', (W, H), color=bg)
+    d = ImageDraw.Draw(img)
+
+    y = PAD
+    if label:
+        d.text((PAD, y), label, font=f_label, fill=fg)
+        lh = f_label.getbbox(label)[3] + 4
+        y += lh
+        d.line([(PAD, y), (W - PAD, y)], fill=fg, width=1)
+        y += 8
+
+    # Word-wrap text to fit width
+    max_px = W - PAD * 2
+    words = text.split()
+    lines = []
+    current = ''
+    for word in words:
+        test = (current + ' ' + word).strip()
+        try:
+            tw = int(d.textlength(test, font=f_text)) if hasattr(d, 'textlength') else f_text.getbbox(test)[2]
+        except Exception:
+            tw = len(test) * 20
+        if tw <= max_px:
+            current = test
+        else:
+            if current:
+                lines.append(current)
+            current = word
+    if current:
+        lines.append(current)
+
+    line_h = f_text.getbbox('Mg')[3] + 8
+    total_h = len(lines) * line_h
+    body_h  = H - y - PAD
+    y_start = y + max(0, (body_h - total_h) // 2)
+
+    for line in lines:
+        if y_start + line_h > H - PAD:
+            break
+        try:
+            lw = int(d.textlength(line, font=f_text)) if hasattr(d, 'textlength') else f_text.getbbox(line)[2]
+        except Exception:
+            lw = len(line) * 20
+        d.text(((W - lw) // 2, y_start), line, font=f_text, fill=fg)
+        y_start += line_h
+
+    # Subtle hint at bottom
+    hint = 'Press any key to return'
+    d.text((PAD, H - PAD - f_hint.getbbox(hint)[3]), hint, font=f_hint, fill=fg)
 
     return img
 

@@ -113,6 +113,7 @@ def render_screen(
     net_stats: dict = None,
     overlay: tuple = None,
     tab_bar: list = None,
+    bar_config: dict = None,
 ) -> Image.Image:
     """
     Render pyte.Screen to an 800×480 grayscale PIL Image.
@@ -181,6 +182,7 @@ def render_screen(
         alerts=alerts,
         scale=scale,
         net_stats=net_stats,
+        bar_config=bar_config,
     )
 
     # ── HQ downsample + hard threshold ───────────────────────────────────────
@@ -255,7 +257,7 @@ def _draw_url_qr(img: Image.Image, url: str, terminal_width: int = W):
                 fill_color='black', back_color='white'
             ).get_image().convert('L')
         qr_img = _qr_cache[url]
-        pad = 4
+        pad = 2
         sz  = qr_img.width
         x0  = terminal_width - sz - pad
         y0  = TAB_BAR_H + TERMINAL_H - sz - pad
@@ -369,6 +371,7 @@ def render_screen_partial(
     alerts: list = None,
     net_stats: dict = None,
     url_qr: str = None,
+    bar_config: dict = None,
 ) -> Image.Image:
     """Redraw only changed rows onto cached_img — much faster than a full render.
 
@@ -419,7 +422,7 @@ def render_screen_partial(
 
     _draw_status_bar(draw, font_size, fg, bg, terminal_width,
                      status_info=status_info, alerts=alerts, scale=1,
-                     net_stats=net_stats)
+                     net_stats=net_stats, bar_config=bar_config)
 
     if url_qr:
         _draw_url_qr(cached_img, url_qr, terminal_width)
@@ -439,6 +442,7 @@ def _draw_status_bar(
     alerts: list = None,
     scale: int = 1,
     net_stats: dict = None,
+    bar_config: dict = None,
 ):
     """Single-line status bar: time · CWD:branch · IP/WiFi · net speeds (or alert)."""
     y0    = (TAB_BAR_H + TERMINAL_H) * scale
@@ -446,6 +450,7 @@ def _draw_status_bar(
     sfont = _find_mono_font('', 10 * scale)
     pad   = 2 * scale
     x_pad = 4 * scale
+    bc    = bar_config or {}
 
     draw.rectangle([0, y0, terminal_width, H_s], fill=fg)
 
@@ -459,16 +464,20 @@ def _draw_status_bar(
     if active:
         draw.text((x_pad, y0 + pad), f'⚠ {active[0]}', font=sfont, fill=bg)
     else:
-        parts = [time_str]
-        if cwd or branch:
+        parts = []
+        if bc.get('show_time', True):
+            parts.append(time_str)
+        if bc.get('show_cwd', True) and (cwd or branch):
             parts.append((cwd + ':' + branch) if cwd and branch else (cwd or branch))
         if net_stats:
             ip       = net_stats.get('ip', '')
             up, dn   = net_stats.get('up', ''), net_stats.get('down', '')
             wifi_sig = net_stats.get('wifi_signal')
-            if ip:
+            if bc.get('show_ip', True) and ip:
                 ip_str = ip + (f' {wifi_sig:+d}dBm' if wifi_sig is not None else '')
                 parts.append(ip_str)
-            if up or dn:
+            if bc.get('show_speed', True) and (up or dn):
                 parts.append((f'↑{up}' if up else '') + (f'  ↓{dn}' if dn else ''))
+        if not parts:
+            parts = [time_str]  # always show something
         draw.text((x_pad, y0 + pad), '  '.join(parts), font=sfont, fill=bg)

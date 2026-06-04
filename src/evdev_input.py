@@ -153,8 +153,15 @@ def _build_modifier_set():
 _build_modifier_set()
 
 
-def find_keyboard(prefer_path: str = '') -> 'evdev.InputDevice | None':
-    """Return the first keyboard-like input device, or None."""
+_BUS_BLUETOOTH = 0x05
+_BUS_USB       = 0x03
+
+
+def find_keyboard(prefer_path: str = '', prefer_bluetooth: bool = False) -> 'evdev.InputDevice | None':
+    """Return the best keyboard-like input device, or None.
+
+    prefer_bluetooth=True: rank Bluetooth devices first, then USB, then others.
+    A specific path in prefer_path is always tried first."""
     if not _EVDEV_OK:
         return None
 
@@ -164,17 +171,46 @@ def find_keyboard(prefer_path: str = '') -> 'evdev.InputDevice | None':
         except Exception as e:
             logger.warning('evdev: could not open %s: %s', prefer_path, e)
 
+    candidates = []
     for path in sorted(evdev.list_devices()):
         try:
             dev = evdev.InputDevice(path)
             caps = dev.capabilities()
             keys = caps.get(ecodes.EV_KEY, [])
             if ecodes.KEY_A in keys and ecodes.KEY_ENTER in keys:
-                logger.info('evdev: auto-selected keyboard %s (%s)', dev.name, path)
-                return dev
+                bus = getattr(dev.input_id, 'bustype', 0)
+                candidates.append((bus, path, dev))
         except Exception:
             continue
-    return None
+
+    if not candidates:
+        return None
+
+    if prefer_bluetooth:
+        # Bluetooth first, then USB, then others
+        def _rank(c):
+            bus = c[0]
+            if bus == _BUS_BLUETOOTH:
+                return 0
+            if bus == _BUS_USB:
+                return 1
+            return 2
+        candidates.sort(key=_rank)
+    else:
+        # USB first, then Bluetooth, then others (default)
+        def _rank(c):
+            bus = c[0]
+            if bus == _BUS_USB:
+                return 0
+            if bus == _BUS_BLUETOOTH:
+                return 1
+            return 2
+        candidates.sort(key=_rank)
+
+    bus, path, dev = candidates[0]
+    bus_name = {_BUS_USB: 'USB', _BUS_BLUETOOTH: 'Bluetooth'}.get(bus, f'bus={bus:#x}')
+    logger.info('evdev: auto-selected %s keyboard %s (%s)', bus_name, dev.name, path)
+    return dev
 
 
 class EvdevKeyboard:

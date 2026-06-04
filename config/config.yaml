@@ -1,8 +1,11 @@
 # Terminal Display Configuration
 # 800x480 Waveshare 7.5" V2 e-ink display
 
+# Custom label shown on stats screen (leave empty to use hostname)
+device_label: ""
+
 # Dark mode: black background, white text (recommended for terminal aesthetic)
-dark_mode: true
+dark_mode: false
 
 # How often to refresh (seconds)
 update_interval: 30
@@ -30,8 +33,9 @@ disk_path: /
 # Network interface to monitor (empty = auto-detect)
 network_interface: ""
 
-# How often to sample network throughput for the status bar (seconds)
-net_speed_interval: 3
+# Speedtest interval: run a real speedtest.net test every N seconds (default 20 min)
+# Set to 0 to disable speedtest and fall back to local throughput sampling.
+speedtest_interval: 1200
 
 # Number of top processes to show
 top_process_count: 5
@@ -52,7 +56,7 @@ terminal_font_size: 14
 # Path to a monospace TTF for the terminal (empty = auto-detect)
 terminal_font_path: ""
 
-# Dark mode for the terminal (black bg, white text)
+# Dark mode for the terminal — inherits global dark_mode if not set here
 terminal_dark_mode: false
 
 # Seconds of active use between full (flash) refreshes that clear ghosting.
@@ -62,6 +66,13 @@ terminal_full_refresh_interval: 120
 # Force a full refresh after this many partial refreshes to clear ghosting,
 # regardless of how much time has elapsed.
 partial_refresh_before_full: 30
+
+# Keyboard device path ('auto' = auto-detect, '' = stdin only).
+# Set to a specific /dev/input/eventN to force a device.
+terminal_keyboard_device: auto
+
+# Prefer Bluetooth keyboards over USB when auto-detecting.
+terminal_keyboard_prefer_bluetooth: false
 
 # tmux: attach to (or create) a named tmux session so shell state survives
 # app restarts. Sessions do NOT survive reboots without tmux-resurrect.
@@ -78,8 +89,17 @@ terminal_idle_timeout: 900
 
 # (removed — idle refreshes are no longer done; the display sleeps on screensaver instead)
 
+# Show QR code in terminal corner (URL of current page or web UI link)
+terminal_show_qr: true
+
 # Status bar extras: show current time, working directory, and git branch.
 terminal_status_bar_extras: true
+
+# Status bar item toggles (all default on)
+terminal_status_bar_show_time: true
+terminal_status_bar_show_cwd: true
+terminal_status_bar_show_ip: true
+terminal_status_bar_show_speed: true
 
 # Compact status bar: shorten labels (C:/M:/D:/L:) and drop uptime/sizes.
 # Full:    14:30  |  CPU 15%  |  MEM 1.2g 62%  |  Disk 12g/32g 38%  |  Load 0.52  |  Up 2h  |  192.168.1.145

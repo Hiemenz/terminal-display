@@ -210,7 +210,7 @@ class EinkTerminal:
         self._config    = config
         self._font_size = config.get('terminal_font_size', 14)
         self._font_path = config.get('terminal_font_path', '')
-        self._dark_mode = config.get('terminal_dark_mode', False)
+        self._dark_mode = config.get('terminal_dark_mode', config.get('dark_mode', False))
         self._full_refresh_interval = config.get('terminal_full_refresh_interval', 60)
         self._idle_timeout = config.get('terminal_idle_timeout', 0)
         self._split_view  = config.get('terminal_split_view', False)
@@ -234,11 +234,21 @@ class EinkTerminal:
         self._stdin_fd    = sys.stdin.fileno()
         self._old_tty     = None
 
+        # Status bar item visibility
+        self._bar_config = {
+            'show_time':  config.get('terminal_status_bar_show_time',  True),
+            'show_cwd':   config.get('terminal_status_bar_show_cwd',   True),
+            'show_ip':    config.get('terminal_status_bar_show_ip',    True),
+            'show_speed': config.get('terminal_status_bar_show_speed', True),
+        }
+
         # evdev keyboard (preferred over stdin when a desktop is running)
         kbd_path = config.get('terminal_keyboard_device', 'auto')
+        prefer_bt = config.get('terminal_keyboard_prefer_bluetooth', False)
         self._kbd_path = kbd_path if kbd_path != 'auto' else ''
+        self._prefer_bt = prefer_bt
         self._last_kbd_probe = 0.0
-        _dev = find_keyboard(self._kbd_path)
+        _dev = find_keyboard(self._kbd_path, prefer_bt)
         self._evdev_kb: EvdevKeyboard | None = EvdevKeyboard(_dev) if _dev else None
         if self._evdev_kb:
             logger.info('Using evdev keyboard: %s', _dev.path)
@@ -271,6 +281,11 @@ class EinkTerminal:
         # Screensaver cycle state
         self._screensaver_cycle_idx  = 0
         self._screensaver_last_cycle = 0.0
+        self._screensaver_show_mono  = 0.0   # when screensaver was last shown (for grace period)
+
+        # Text message (send-to-display) state
+        self._in_text_message = False
+        self._display_queue = None   # set in run() after server starts
 
         # Tab management
         self._tabs: list = []
@@ -894,36 +909,66 @@ class EinkTerminal:
         return ''
 
     def _start_network_monitor_thread(self):
-        """Sample network speed once per hour; never triggers more than one
-        display refresh per hour from network data."""
-        iface = self._config.get('network_interface', '') or 'wlan0'
+        """Run speedtest.net every speedtest_interval seconds (default 20 min).
+        Falls back to a 5-second local throughput sample if speedtest is unavailable."""
+        iface    = self._config.get('network_interface', '') or 'wlan0'
+        interval = self._config.get('speedtest_interval', 1200)
 
-        def _counters():
-            import psutil
-            per = psutil.net_io_counters(pernic=True)
-            c = per.get(iface)
-            return c if c is not None else psutil.net_io_counters()
+        def _run_speedtest() -> tuple:
+            """Returns (up_bps, down_bps). Tries speedtest-cli, then local sample."""
+            # Try speedtest-cli Python package
+            try:
+                import speedtest as _st
+                s = _st.Speedtest(secure=True)
+                s.get_best_server()
+                down_bps = s.download()
+                up_bps   = s.upload()
+                logger.info('Speedtest: ↓%.1f Mbps ↑%.1f Mbps',
+                            down_bps / 1e6, up_bps / 1e6)
+                return up_bps, down_bps
+            except Exception:
+                pass
+            # Try speedtest-cli subprocess
+            try:
+                import json as _json
+                r = subprocess.run(
+                    ['speedtest-cli', '--json', '--secure'],
+                    capture_output=True, text=True, timeout=60,
+                )
+                if r.returncode == 0:
+                    d = _json.loads(r.stdout)
+                    return d.get('upload', 0), d.get('download', 0)
+            except Exception:
+                pass
+            # Fall back to 5-second local throughput sample
+            try:
+                import psutil as _psutil
+                per = _psutil.net_io_counters(pernic=True)
+                c0  = per.get(iface) or _psutil.net_io_counters()
+                time.sleep(5)
+                per = _psutil.net_io_counters(pernic=True)
+                c1  = per.get(iface) or _psutil.net_io_counters()
+                up   = (c1.bytes_sent - c0.bytes_sent) / 5.0 * 8
+                down = (c1.bytes_recv - c0.bytes_recv) / 5.0 * 8
+                return up, down
+            except Exception:
+                return 0.0, 0.0
 
         def _loop():
             while self._running:
-                # Two-sample measurement over 5 seconds.
-                try:
-                    c0 = _counters()
-                    time.sleep(5)
-                    c1 = _counters()
-                    up   = (c1.bytes_sent - c0.bytes_sent) / 5.0
-                    down = (c1.bytes_recv - c0.bytes_recv) / 5.0
-                except Exception as e:
-                    logger.debug('net monitor: %s', e)
-                    up = down = 0.0
+                up_bps, down_bps = _run_speedtest()
                 ip = _get_local_ip()
                 with self._net_stats_lock:
                     self._net_stats = {
-                        'ip': ip, 'up': _fmt_speed(up), 'down': _fmt_speed(down),
-                        'dirty': True, 'wifi_signal': _read_wifi_signal(),
+                        'ip':          ip,
+                        'up':          _fmt_speed(up_bps),
+                        'down':        _fmt_speed(down_bps),
+                        'dirty':       True,
+                        'wifi_signal': _read_wifi_signal(),
                     }
-                # Wait 1 hour before next sample, interruptible every 30 s.
-                deadline = time.monotonic() + 3600
+                if interval <= 0:
+                    break
+                deadline = time.monotonic() + interval
                 while self._running and time.monotonic() < deadline:
                     time.sleep(30)
 
@@ -931,8 +976,20 @@ class EinkTerminal:
 
     def _force_full_refresh(self):
         if self._last_image is not None:
-            self._driver.full_refresh(self._last_image)
+            self._driver.flash_refresh(self._last_image)
             self._last_full_refresh_mono = time.monotonic()
+
+    def _show_text_message(self, text: str, label: str = ''):
+        """Display custom text on the e-ink screen (from web /message endpoint)."""
+        try:
+            from render import render_text_message
+            img = render_text_message(text, label, self._config)
+            self._driver.full_refresh(img)
+            self._last_image = img
+            self._in_text_message = True
+            self._screensaver_show_mono = time.monotonic()
+        except Exception as e:
+            logger.warning('Text message render error: %s', e)
 
     def _switch_to_stats(self):
         self._running = False
@@ -993,6 +1050,7 @@ class EinkTerminal:
             img = render_screensaver(image_path, qr_url, self._config)
             self._driver.full_refresh(img)
             self._last_image = img
+            self._screensaver_show_mono = time.monotonic()
             logger.info('Screensaver activated — img=%s mode=%s', os.path.basename(image_path), mode)
             self._driver.sleep()   # power down panel; wakes automatically on next full_refresh
         except Exception as e:
@@ -1080,7 +1138,8 @@ class EinkTerminal:
             _port = self._config.get('preview_server_port', 8080)
             if _ip:
                 self._last_url = f'http://{_ip}:{_port}/config'
-        url_qr = self._last_url if self._show_url_qr else None
+        show_qr = self._show_url_qr and self._config.get('terminal_show_qr', True)
+        url_qr = self._last_url if show_qr else None
 
         with self._net_stats_lock:
             net_stats = dict(self._net_stats) if self._net_stats else None
@@ -1139,6 +1198,7 @@ class EinkTerminal:
                 alerts=alerts if alerts else None,
                 net_stats=net_stats,
                 url_qr=url_qr,
+                bar_config=self._bar_config,
             )
         else:
             img = render_screen(
@@ -1154,6 +1214,7 @@ class EinkTerminal:
                 net_stats=net_stats,
                 overlay=overlay,
                 tab_bar=tab_bar,
+                bar_config=self._bar_config,
             )
             # Overlay split-view sidebar
             if self._split_view:
@@ -1211,6 +1272,7 @@ class EinkTerminal:
                                 clipboard_path=self._clipboard_path)
         if server is not None:
             self._web_input_queue = server.input_queue
+            self._display_queue   = server.display_queue
         self._render(force_full=True)
 
         try:
@@ -1252,7 +1314,7 @@ class EinkTerminal:
             # Hot-plug: probe for keyboard every 2 s when none is present
             if self._evdev_kb is None and (now - self._last_kbd_probe) >= 2.0:
                 self._last_kbd_probe = now
-                dev = find_keyboard(self._kbd_path)
+                dev = find_keyboard(self._kbd_path, self._prefer_bt)
                 if dev is not None:
                     self._evdev_kb = EvdevKeyboard(dev)
                     self._evdev_kb.grab()
@@ -1280,7 +1342,7 @@ class EinkTerminal:
             # ── Idle screensaver check ────────────────────────────────────────
             if self._idle_timeout > 0:
                 idle = now - self._last_activity
-                if idle > self._idle_timeout and not in_screensaver:
+                if idle > self._idle_timeout and not in_screensaver and not self._in_text_message:
                     in_screensaver = True
                     self._show_screensaver()
                     continue  # skip stale r — next iteration runs a fresh select
@@ -1294,11 +1356,14 @@ class EinkTerminal:
                     continue
                 if data:
                     self._last_activity = now
-                    if in_screensaver:
-                        in_screensaver = False
-                        self._render(force_full=True)
-                        self._last_full_refresh_mono = time.monotonic()
-                        # swallow the wake key
+                    grace = now - self._screensaver_show_mono < 2.0
+                    if in_screensaver or self._in_text_message:
+                        if not grace:
+                            in_screensaver = False
+                            self._in_text_message = False
+                            self._render(force_full=True)
+                            self._last_full_refresh_mono = time.monotonic()
+                        # swallow the wake key regardless
                     else:
                         if self._scroll_pages > 0:
                             self._snap_to_live()
@@ -1323,11 +1388,14 @@ class EinkTerminal:
                 except OSError:
                     break
                 self._last_activity = now
-                if in_screensaver:
-                    in_screensaver = False
-                    self._render(force_full=True)
-                    self._last_full_refresh_mono = time.monotonic()
-                    # swallow the wake key
+                grace = now - self._screensaver_show_mono < 2.0
+                if in_screensaver or self._in_text_message:
+                    if not grace:
+                        in_screensaver = False
+                        self._in_text_message = False
+                        self._render(force_full=True)
+                        self._last_full_refresh_mono = time.monotonic()
+                    # swallow the wake key regardless
                 else:
                     if self._scroll_pages > 0:
                         self._snap_to_live()
@@ -1380,12 +1448,34 @@ class EinkTerminal:
                         if text and self._pty_master is not None:
                             os.write(self._pty_master, text.encode('utf-8'))
                             self._last_activity = now
-                            if in_screensaver:
+                            if in_screensaver or self._in_text_message:
                                 in_screensaver = False
+                                self._in_text_message = False
                                 self._render(force_full=True)
                                 self._last_full_refresh_mono = time.monotonic()
                             else:
                                 has_pending = True
+                except _queue.Empty:
+                    pass
+
+            # ── Display command queue (from web server) ───────────────────────
+            if self._display_queue is not None:
+                try:
+                    while True:
+                        cmd = self._display_queue.get_nowait()
+                        action = cmd.get('type', '')
+                        if action == 'message':
+                            self._show_text_message(
+                                cmd.get('text', ''), cmd.get('label', ''))
+                            in_screensaver = False
+                        elif action == 'screensaver':
+                            in_screensaver = True
+                            self._in_text_message = False
+                            self._show_screensaver()
+                        elif action == 'toggle_qr':
+                            self._toggle_url_qr()
+                        elif action == 'force_refresh':
+                            self._force_full_refresh()
                 except _queue.Empty:
                     pass
 

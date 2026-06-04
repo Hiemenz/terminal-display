@@ -43,6 +43,7 @@ _ALLOWED_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
 
 _CONFIG_SCHEMA = [
     ['Display', [
+        ['device_label',        'str',    'Device Label',         'Custom name shown on display (blank = hostname)'],
         ['dark_mode',           'bool',   'Dark Mode',            'White text on black background'],
         ['update_interval',     'int',    'Update Interval',      'Seconds between refreshes'],
         ['timezone',            'str',    'Timezone',             'IANA string, e.g. America/Chicago'],
@@ -63,20 +64,26 @@ _CONFIG_SCHEMA = [
         ['night_end',           'int',    'Night End',            'Hour 0–23'],
     ]],
     ['Terminal', [
-        ['terminal_font_size',                  'int',  'Font Size (pt)',        '8–20 pt — affects cols × rows'],
-        ['terminal_dark_mode',                  'bool', 'Dark Mode',             None],
-        ['terminal_idle_timeout',               'int',  'Idle Timeout (s)',      '0 = disabled'],
-        ['terminal_full_refresh_interval',      'int',  'Full Refresh (s)',      '0 = disabled'],
-        ['terminal_use_tmux',                   'bool', 'Use tmux',              None],
-        ['terminal_tmux_session',               'str',  'tmux Session',          None],
-        ['terminal_hq_render',                  'bool', 'HQ Render',             '2× supersample → sharper text'],
-        ['terminal_split_view',                 'bool', 'Split View',            '600 px terminal + 200 px sidebar'],
-        ['terminal_status_bar_extras',          'bool', 'Status Bar Extras',     'Time, CWD, git branch'],
-        ['terminal_status_bar_compact',         'bool', 'Compact Status Bar',    'Short labels, no uptime/sizes'],
-        ['terminal_scrollback',                 'int',  'Scrollback Lines',      'Non-tmux mode only'],
-        ['terminal_alert_cpu_threshold',        'int',  'CPU Alert %',           '0 = disabled'],
-        ['terminal_alert_disk_free_threshold',  'int',  'Disk Free Alert %',     '0 = disabled'],
-        ['terminal_alert_ssh_logins',           'bool', 'SSH Login Alerts',      None],
+        ['terminal_font_size',                  'select', 'Font Size',            [8, 10, 12, 14, 16, 18, 20]],
+        ['terminal_dark_mode',                  'bool',   'Dark Mode',            'Inherits global Dark Mode if off'],
+        ['terminal_show_qr',                    'bool',   'Show QR Code',         'URL QR in terminal corner'],
+        ['terminal_idle_timeout',               'int',    'Idle Timeout (s)',      '0 = disabled'],
+        ['terminal_full_refresh_interval',      'int',    'Full Refresh (s)',      '0 = disabled'],
+        ['terminal_use_tmux',                   'bool',   'Use tmux',              None],
+        ['terminal_tmux_session',               'str',    'tmux Session',          None],
+        ['terminal_keyboard_prefer_bluetooth',  'bool',   'Prefer BT Keyboard',   'Rank Bluetooth keyboards first'],
+        ['terminal_hq_render',                  'bool',   'HQ Render',             '2× supersample → sharper text'],
+        ['terminal_split_view',                 'bool',   'Split View',            '600 px terminal + 200 px sidebar'],
+        ['terminal_status_bar_extras',          'bool',   'Status Bar Extras',     'Time, CWD, git branch'],
+        ['terminal_status_bar_compact',         'bool',   'Compact Status Bar',    'Short labels, no uptime/sizes'],
+        ['terminal_status_bar_show_time',       'bool',   'Status: Time',          None],
+        ['terminal_status_bar_show_cwd',        'bool',   'Status: CWD',           None],
+        ['terminal_status_bar_show_ip',         'bool',   'Status: IP',            None],
+        ['terminal_status_bar_show_speed',      'bool',   'Status: Speed',         None],
+        ['terminal_scrollback',                 'int',    'Scrollback Lines',      'Non-tmux mode only'],
+        ['terminal_alert_cpu_threshold',        'int',    'CPU Alert %',           '0 = disabled'],
+        ['terminal_alert_disk_free_threshold',  'int',    'Disk Free Alert %',     '0 = disabled'],
+        ['terminal_alert_ssh_logins',           'bool',   'SSH Login Alerts',      None],
     ]],
     ['Screensaver', [
         ['screensaver_enabled',         'bool',   'Enabled',              None],
@@ -89,7 +96,7 @@ _CONFIG_SCHEMA = [
         ['startup_mode',            'select', 'Startup Mode',          ['terminal', 'stats']],
         ['preview_server_enabled',  'bool',   'Web Server',            None],
         ['preview_server_port',     'int',    'Web Port',              None],
-        ['net_speed_interval',      'int',    'Net Speed Interval (s)', None],
+        ['speedtest_interval',      'int',    'Speedtest Interval (s)', '1200 = 20 min, 0 = disable'],
         ['command_display_seconds', 'int',    'Command Display (s)',   'Seconds to show output'],
     ]],
 ]
@@ -679,6 +686,99 @@ _PAGE_HTML = '''\
     .dot.ok {{ background: var(--success); }}
     .dot.busy {{ background: var(--warn); }}
     .dot.err {{ background: var(--danger); }}
+
+    /* Action buttons */
+    .actions {{
+      display: flex;
+      gap: 5px;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+      padding-bottom: 1px;
+    }}
+    .actions::-webkit-scrollbar {{ display: none; }}
+    .act {{
+      flex-shrink: 0;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font: inherit;
+      font-size: 11px;
+      padding: 7px 11px;
+      cursor: pointer;
+      white-space: nowrap;
+      min-width: 44px;
+      text-align: center;
+    }}
+    .act:active {{ background: #2a2a2a; }}
+    .act.accent {{ border-color: #1d3a60; color: var(--accent); }}
+    .act.accent:active {{ background: #0f1e30; }}
+
+    /* Message form */
+    .msg-form {{
+      display: flex;
+      gap: 6px;
+      align-items: flex-end;
+    }}
+    #msg-inp {{
+      flex: 1;
+      background: var(--surface2);
+      border: 1.5px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font: inherit;
+      font-size: 14px;
+      padding: 9px 12px;
+      outline: none;
+      -webkit-appearance: none;
+    }}
+    #msg-inp:focus {{ border-color: var(--accent); }}
+    #msg-inp::placeholder {{ color: #3a3a3a; }}
+    #msg-send {{
+      flex-shrink: 0;
+      border-radius: var(--radius);
+      border: none;
+      background: #1d4a2a;
+      color: var(--success);
+      font: inherit;
+      font-size: 12px;
+      padding: 9px 14px;
+      cursor: pointer;
+      white-space: nowrap;
+    }}
+    #msg-send:active {{ background: #143520; }}
+
+    /* WiFi section */
+    .wifi-row {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }}
+    #wifi-ssid {{
+      flex: 1;
+      font-size: 12px;
+      color: var(--muted);
+    }}
+    #wifi-btn {{
+      flex-shrink: 0;
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text);
+      font: inherit;
+      font-size: 12px;
+      padding: 7px 14px;
+      cursor: pointer;
+    }}
+    #wifi-btn:active {{ background: #2a2a2a; }}
+    #wifi-qr-wrap {{
+      text-align: center;
+      padding: 8px 0 4px;
+      display: none;
+    }}
+    #wifi-qr-wrap img {{ max-width: 180px; border-radius: 4px; }}
+    #wifi-qr-wrap p {{ font-size: 11px; color: var(--muted); margin-top: 4px; }}
   </style>
 </head>
 <body>
@@ -698,6 +798,35 @@ _PAGE_HTML = '''\
   </div>
 
   <div class="panel">
+    <!-- 7 quick display actions -->
+    <div class="actions">
+      <button class="act accent" onclick="doAction('force_refresh')" title="Clear ghosting (flash)">&#9678; Refresh</button>
+      <button class="act" onclick="doAction('toggle_dark')" title="Toggle dark/light mode">&#9681; Dark</button>
+      <button class="act" onclick="sendRaw('\\x1b[20~')" title="Smaller font">A&#8315;</button>
+      <button class="act" onclick="sendRaw('\\x1b[24~')" title="Larger font">A&#8314;</button>
+      <button class="act" onclick="doAction('screensaver')" title="Show screensaver now">&#9167; Sleep</button>
+      <button class="act" onclick="sendRaw('\\x1b[23~')" title="Switch to stats">&#128200; Stats</button>
+      <button class="act" onclick="doAction('toggle_qr')" title="Toggle QR code">&#9638; QR</button>
+    </div>
+
+    <!-- Send text to display -->
+    <div class="msg-form">
+      <input id="msg-inp" type="text" placeholder="Send text to display…"
+        autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+        onkeydown="if(event.key==='Enter')sendMessage()">
+      <button id="msg-send" onclick="sendMessage()">&#128204; Show</button>
+    </div>
+
+    <!-- WiFi join -->
+    <div class="wifi-row">
+      <span id="wifi-ssid">Loading WiFi&#8230;</span>
+      <button id="wifi-btn" onclick="toggleWifi()">&#128246; Join WiFi</button>
+    </div>
+    <div id="wifi-qr-wrap">
+      <img id="wifi-qr-img" src="" alt="WiFi QR">
+      <p>Scan to join this network</p>
+    </div>
+
     <div class="keys" id="keys">
       <button class="key" onclick="sendRaw('\\x03')">^C</button>
       <button class="key" onclick="sendRaw('\\x04')">^D</button>
@@ -811,6 +940,62 @@ _PAGE_HTML = '''\
       }}).catch(loadMode);
     }}
     loadMode();
+
+    /* Display actions */
+    function doAction(action) {{
+      if (action === 'toggle_dark') {{
+        sendRaw('\\x1b[18~'); return;
+      }}
+      setStatus(action + '…', 'busy');
+      fetch("/action", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify({{action: action}})
+      }}).then(function(r) {{
+        if (r.ok) {{ setStatus('done', 'ok'); setTimeout(function(){{ setStatus('ready',''); }}, 2000); }}
+        else setStatus('error', 'err');
+      }}).catch(function() {{ setStatus('offline','err'); }});
+    }}
+
+    /* Send text message to display */
+    function sendMessage() {{
+      var t = document.getElementById('msg-inp').value.trim();
+      if (!t) return;
+      setStatus('sending…', 'busy');
+      fetch("/message", {{
+        method: "POST",
+        headers: {{"Content-Type": "application/json"}},
+        body: JSON.stringify({{text: t, label: 'Message'}})
+      }}).then(function(r) {{
+        if (r.ok) {{
+          document.getElementById('msg-inp').value = '';
+          setStatus('displayed', 'ok');
+          setTimeout(refreshDisplay, 800);
+          setTimeout(function(){{ setStatus('ready',''); }}, 3000);
+        }} else setStatus('error', 'err');
+      }}).catch(function() {{ setStatus('offline','err'); }});
+    }}
+
+    /* WiFi join QR */
+    var _wifiShown = false;
+    function loadWifi() {{
+      fetch("/wifi-info").then(function(r){{ return r.json(); }}).then(function(d) {{
+        document.getElementById('wifi-ssid').textContent =
+          d.ssid ? 'WiFi: ' + d.ssid : 'No WiFi detected';
+        if (d.qr_url) {{
+          document.getElementById('wifi-qr-img').src = d.qr_url;
+        }} else {{
+          document.getElementById('wifi-btn').style.display = 'none';
+        }}
+      }}).catch(function() {{
+        document.getElementById('wifi-ssid').textContent = 'WiFi info unavailable';
+      }});
+    }}
+    function toggleWifi() {{
+      _wifiShown = !_wifiShown;
+      document.getElementById('wifi-qr-wrap').style.display = _wifiShown ? 'block' : 'none';
+    }}
+    loadWifi();
   </script>
 </body>
 </html>
@@ -1119,9 +1304,37 @@ _CLIPBOARD_HTML = '''\
 '''
 
 
+def _get_wifi_info() -> dict:
+    """Return {'ssid': str, 'qr_url': str} for the current WiFi connection."""
+    ssid = ''
+    try:
+        import subprocess as _sp
+        r = _sp.run(['iwgetid', '-r'], capture_output=True, text=True, timeout=3)
+        ssid = r.stdout.strip()
+    except Exception:
+        pass
+    if not ssid:
+        return {'ssid': '', 'qr_url': ''}
+    # Build WIFI QR code URL (data URL)
+    wifi_str = f'WIFI:T:WPA;S:{ssid};;'
+    try:
+        import io as _io
+        import qrcode as _qr
+        qr = _qr.QRCode(error_correction=_qr.constants.ERROR_CORRECT_L, box_size=5, border=2)
+        qr.add_data(wifi_str)
+        qr.make(fit=True)
+        buf = _io.BytesIO()
+        qr.make_image(fill_color='black', back_color='white').get_image().save(buf, format='PNG')
+        import base64 as _b64
+        qr_url = 'data:image/png;base64,' + _b64.b64encode(buf.getvalue()).decode()
+        return {'ssid': ssid, 'qr_url': qr_url}
+    except Exception:
+        return {'ssid': ssid, 'qr_url': ''}
+
+
 def _make_handler(bmp_path: str, input_queue: queue.Queue,
                   activity_ref: List[float], photos_dir: str, config_path: str = '',
-                  clipboard_path: str = ''):
+                  clipboard_path: str = '', display_queue: queue.Queue = None):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             activity_ref[0] = time.time()
@@ -1143,6 +1356,9 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._respond(200, 'application/json', json.dumps({'mode': mode}).encode())
             elif path == '/config':
                 self._serve_config()
+            elif path == '/wifi-info':
+                info = _get_wifi_info()
+                self._respond(200, 'application/json', json.dumps(info).encode())
             elif path == '/clipboard':
                 self._respond(200, 'text/html; charset=utf-8', _CLIPBOARD_HTML.encode())
             elif path == '/clipboard/list':
@@ -1156,6 +1372,10 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             path = self.path.split('?')[0]
             if path == '/send':
                 self._handle_send()
+            elif path == '/message':
+                self._handle_message()
+            elif path == '/action':
+                self._handle_action()
             elif path == '/upload':
                 self._handle_upload()
             elif path == '/select':
@@ -1322,6 +1542,41 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             _set_selected(photos_dir, name)
             self._respond(200, 'application/json', b'{"ok":true}')
 
+        def _handle_message(self):
+            """POST /message — display text on the e-ink screen."""
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                data = json.loads(raw)
+                text  = data.get('text', '').strip()
+                label = data.get('label', '').strip()
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+            if not text:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"text required"}')
+                return
+            if display_queue is not None:
+                display_queue.put({'type': 'message', 'text': text, 'label': label})
+            self._respond(200, 'application/json', b'{"ok":true}')
+
+        def _handle_action(self):
+            """POST /action — send a display command (screensaver, toggle_qr, force_refresh)."""
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                action = json.loads(raw).get('action', '')
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+            _VALID = {'screensaver', 'toggle_qr', 'force_refresh'}
+            if action not in _VALID:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Unknown action"}')
+                return
+            if display_queue is not None:
+                display_queue.put({'type': action})
+            self._respond(200, 'application/json', b'{"ok":true}')
+
         def _handle_mode(self):
             length = int(self.headers.get('Content-Length', 0))
             raw = self.rfile.read(length)
@@ -1444,7 +1699,8 @@ class PreviewServer:
         self._config_path = config_path
         self._clipboard_path = clipboard_path
         self._server = None
-        self.input_queue: queue.Queue = queue.Queue()
+        self.input_queue:   queue.Queue = queue.Queue()
+        self.display_queue: queue.Queue = queue.Queue()
         self._activity_ref: List[float] = [time.time()]
 
     @property
@@ -1457,6 +1713,7 @@ class PreviewServer:
             self._bmp_path, self.input_queue,
             self._activity_ref, self._photos_dir, self._config_path,
             clipboard_path=self._clipboard_path,
+            display_queue=self.display_queue,
         )
         self._server = HTTPServer(('', self._port), handler)
         self._server.allow_reuse_address = True
