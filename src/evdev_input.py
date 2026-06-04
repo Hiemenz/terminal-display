@@ -178,7 +178,10 @@ def find_keyboard(prefer_path: str = '', prefer_bluetooth: bool = False) -> 'evd
             caps = dev.capabilities()
             keys = caps.get(ecodes.EV_KEY, [])
             if ecodes.KEY_A in keys and ecodes.KEY_ENTER in keys:
-                bus = getattr(dev.input_id, 'bustype', 0)
+                try:
+                    bus = dev.info.bustype
+                except Exception:
+                    bus = 0
                 candidates.append((bus, path, dev))
         except Exception:
             continue
