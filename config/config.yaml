@@ -9,8 +9,8 @@ update_interval: 30
 
 # Night mode: skip refreshes between night_start and night_end (24-hour format)
 night_mode: true
-night_start: 2   # 2am
-night_end: 7     # 7am
+night_start: 2
+night_end: 7
 
 # Timezone for time display (IANA string)
 timezone: America/Chicago
@@ -25,10 +25,13 @@ show_top_processes: true
 show_load: true
 
 # Disk path to monitor
-disk_path: "/"
+disk_path: /
 
 # Network interface to monitor (empty = auto-detect)
 network_interface: ""
+
+# How often to sample network throughput for the status bar (seconds)
+net_speed_interval: 3
 
 # Number of top processes to show
 top_process_count: 5
@@ -54,7 +57,11 @@ terminal_dark_mode: false
 
 # Seconds of active use between full (flash) refreshes that clear ghosting.
 # Partial (no-flash) updates are used in between. 0 = disabled.
-terminal_full_refresh_interval: 60
+terminal_full_refresh_interval: 120
+
+# Force a full refresh after this many partial refreshes to clear ghosting,
+# regardless of how much time has elapsed.
+partial_refresh_before_full: 30
 
 # tmux: attach to (or create) a named tmux session so shell state survives
 # app restarts. Sessions do NOT survive reboots without tmux-resurrect.
@@ -67,20 +74,25 @@ terminal_scrollback: 500
 
 # Idle screensaver: switch to stats after N seconds of no keyboard activity.
 # Set to 0 to disable.
-terminal_idle_timeout: 900  # 15 minutes
+terminal_idle_timeout: 900
 
 # (removed — idle refreshes are no longer done; the display sleeps on screensaver instead)
 
 # Status bar extras: show current time, working directory, and git branch.
 terminal_status_bar_extras: true
 
+# Compact status bar: shorten labels (C:/M:/D:/L:) and drop uptime/sizes.
+# Full:    14:30  |  CPU 15%  |  MEM 1.2g 62%  |  Disk 12g/32g 38%  |  Load 0.52  |  Up 2h  |  192.168.1.145
+# Compact: 14:30  C:15%  M:62%  D:38%  L:0.52  192.168.1.145
+terminal_status_bar_compact: true
+
 # Split view: 600px terminal on the left, 200px live stats on the right.
 terminal_split_view: false
 
 # Alert thresholds (0 = disabled)
-terminal_alert_cpu_threshold: 90         # % CPU — alert if above this
-terminal_alert_disk_free_threshold: 10   # % free disk — alert if below this
-terminal_alert_ssh_logins: true          # notify on new SSH connections
+terminal_alert_cpu_threshold: 90
+terminal_alert_disk_free_threshold: 10
+terminal_alert_ssh_logins: true
 
 # High-quality rendering: render at 2× then downsample (sharper text on e-ink).
 # Adds ~15ms to render time — negligible vs. display refresh time.
@@ -116,7 +128,7 @@ screensaver_image_path: "assets/test.jpg"
 
 # 'static' = one image, 'cycle' = rotate through gallery, 'mlb' = MLB scores & standings
 screensaver_mode: static
-screensaver_cycle_interval: 5  # minutes between image changes in cycle mode
+screensaver_cycle_interval: 5
 
 # MLB screensaver: favorite team abbreviation to highlight (e.g. 'CHC', 'NYY', 'LAD')
 screensaver_mlb_team: ""

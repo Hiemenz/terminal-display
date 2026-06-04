@@ -41,6 +41,364 @@ _DISPLAY_W, _DISPLAY_H = 800, 480
 
 _ALLOWED_EXTS = {'.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp'}
 
+_CONFIG_SCHEMA = [
+    ['Display', [
+        ['dark_mode',           'bool',   'Dark Mode',            'White text on black background'],
+        ['update_interval',     'int',    'Update Interval',      'Seconds between refreshes'],
+        ['timezone',            'str',    'Timezone',             'IANA string, e.g. America/Chicago'],
+        ['show_cpu',            'bool',   'Show CPU',             None],
+        ['show_memory',         'bool',   'Show Memory',          None],
+        ['show_disk',           'bool',   'Show Disk',            None],
+        ['show_network',        'bool',   'Show Network',         None],
+        ['show_load',           'bool',   'Show Load Average',    None],
+        ['show_top_processes',  'bool',   'Show Top Processes',   None],
+        ['top_process_count',   'int',    'Top Process Count',    'Number of processes to list'],
+        ['disk_path',           'str',    'Disk Path',            'Filesystem path to monitor'],
+        ['network_interface',   'str',    'Network Interface',    'Empty = auto-detect'],
+        ['show_qr_code',        'bool',   'Show QR Code',         'QR code in stats screen'],
+    ]],
+    ['Night Mode', [
+        ['night_mode',          'bool',   'Night Mode',           'Skip refreshes at night'],
+        ['night_start',         'int',    'Night Start',          'Hour 0–23'],
+        ['night_end',           'int',    'Night End',            'Hour 0–23'],
+    ]],
+    ['Terminal', [
+        ['terminal_font_size',                  'int',  'Font Size (pt)',        '8–20 pt — affects cols × rows'],
+        ['terminal_dark_mode',                  'bool', 'Dark Mode',             None],
+        ['terminal_idle_timeout',               'int',  'Idle Timeout (s)',      '0 = disabled'],
+        ['terminal_full_refresh_interval',      'int',  'Full Refresh (s)',      '0 = disabled'],
+        ['terminal_use_tmux',                   'bool', 'Use tmux',              None],
+        ['terminal_tmux_session',               'str',  'tmux Session',          None],
+        ['terminal_hq_render',                  'bool', 'HQ Render',             '2× supersample → sharper text'],
+        ['terminal_split_view',                 'bool', 'Split View',            '600 px terminal + 200 px sidebar'],
+        ['terminal_status_bar_extras',          'bool', 'Status Bar Extras',     'Time, CWD, git branch'],
+        ['terminal_status_bar_compact',         'bool', 'Compact Status Bar',    'Short labels, no uptime/sizes'],
+        ['terminal_scrollback',                 'int',  'Scrollback Lines',      'Non-tmux mode only'],
+        ['terminal_alert_cpu_threshold',        'int',  'CPU Alert %',           '0 = disabled'],
+        ['terminal_alert_disk_free_threshold',  'int',  'Disk Free Alert %',     '0 = disabled'],
+        ['terminal_alert_ssh_logins',           'bool', 'SSH Login Alerts',      None],
+    ]],
+    ['Screensaver', [
+        ['screensaver_enabled',         'bool',   'Enabled',              None],
+        ['screensaver_idle_timeout',    'int',    'Idle Timeout (s)',      'Before screensaver activates'],
+        ['screensaver_mode',            'select', 'Mode',                 ['static', 'cycle', 'mlb']],
+        ['screensaver_cycle_interval',  'int',    'Cycle Interval (min)', 'Cycle mode only'],
+        ['screensaver_mlb_team',        'str',    'MLB Team',             'e.g. CHC, NYY — empty = all'],
+    ]],
+    ['Startup & Web', [
+        ['startup_mode',            'select', 'Startup Mode',          ['terminal', 'stats']],
+        ['preview_server_enabled',  'bool',   'Web Server',            None],
+        ['preview_server_port',     'int',    'Web Port',              None],
+        ['net_speed_interval',      'int',    'Net Speed Interval (s)', None],
+        ['command_display_seconds', 'int',    'Command Display (s)',   'Seconds to show output'],
+    ]],
+]
+
+_CONFIG_HTML = '''\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d0d0d">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Config — e-ink</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg: #0d0d0d; --surface: #161616; --surface2: #1e1e1e;
+      --border: #2a2a2a; --text: #e2e2e2; --muted: #888;
+      --accent: #3b82f6; --danger: #ef4444; --success: #22c55e;
+      --radius: 12px;
+    }
+    html, body {
+      min-height: 100dvh; background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      position: sticky; top: 0; z-index: 10;
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 16px; padding-top: max(12px, env(safe-area-inset-top));
+      background: var(--surface); border-bottom: 1px solid var(--border);
+    }
+    .back {
+      color: var(--accent); text-decoration: none; font-size: 14px;
+      flex-shrink: 0; padding: 4px 0;
+    }
+    .back:active { opacity: 0.7; }
+    header h1 { flex: 1; font-size: 17px; font-weight: 700; }
+    #save-btn {
+      background: var(--accent); color: #fff; border: none;
+      border-radius: 8px; padding: 9px 18px; font-size: 14px;
+      font-weight: 600; cursor: pointer; flex-shrink: 0;
+    }
+    #save-btn:active { background: #2563eb; }
+    #save-btn:disabled { background: var(--surface2); color: var(--muted); cursor: default; }
+
+    main {
+      padding: 16px; padding-bottom: max(40px, env(safe-area-inset-bottom));
+      display: flex; flex-direction: column; gap: 14px;
+    }
+
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden;
+    }
+    .card-title {
+      padding: 9px 16px; font-size: 11px; font-weight: 700;
+      letter-spacing: 0.8px; text-transform: uppercase; color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    .row {
+      display: flex; align-items: center; gap: 12px;
+      padding: 13px 16px; border-bottom: 1px solid var(--border); min-height: 54px;
+    }
+    .row:last-child { border-bottom: none; }
+    .row-lbl { flex: 1; min-width: 0; }
+    .lbl { font-size: 14px; font-weight: 500; }
+    .hint { font-size: 11px; color: var(--muted); margin-top: 2px; line-height: 1.35; }
+
+    /* Toggle */
+    .toggle { position: relative; flex-shrink: 0; width: 50px; height: 28px; }
+    .toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .track {
+      position: absolute; inset: 0; cursor: pointer; background: #333;
+      border-radius: 14px; transition: background 0.2s;
+    }
+    .toggle input:checked ~ .track { background: var(--accent); }
+    .track::after {
+      content: ""; position: absolute; left: 4px; top: 4px;
+      width: 20px; height: 20px; background: #fff; border-radius: 50%;
+      box-shadow: 0 1px 3px rgba(0,0,0,.4); transition: transform 0.2s;
+    }
+    .toggle input:checked ~ .track::after { transform: translateX(22px); }
+
+    /* Stepper */
+    .stepper {
+      display: flex; align-items: center; flex-shrink: 0;
+      border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+    }
+    .step-btn {
+      width: 36px; height: 38px; background: var(--surface2); border: none;
+      color: var(--text); font-size: 20px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .step-btn:active { background: #2e2e2e; }
+    .step-inp {
+      width: 60px; height: 38px; background: var(--surface2);
+      border: none; border-left: 1px solid var(--border);
+      border-right: 1px solid var(--border);
+      color: var(--text); font-size: 14px; text-align: center;
+      padding: 0; outline: none;
+      -moz-appearance: textfield; appearance: textfield;
+    }
+    .step-inp::-webkit-inner-spin-button,
+    .step-inp::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+
+    /* Text / select */
+    .txt-inp, .sel-inp {
+      flex-shrink: 0; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); font-size: 15px;
+      padding: 9px 10px; outline: none; min-width: 0;
+    }
+    .txt-inp { width: 148px; }
+    .txt-inp:focus { border-color: var(--accent); }
+    .sel-inp {
+      appearance: none; -webkit-appearance: none;
+      padding-right: 28px; cursor: pointer;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath fill='%23888' d='M0 0l5 6 5-6z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat; background-position: right 10px center; background-size: 10px;
+    }
+
+    /* Toast */
+    #toast {
+      position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
+      padding: 12px 22px; font-size: 14px; font-weight: 600; white-space: nowrap;
+      opacity: 0; transition: opacity 0.25s; pointer-events: none; z-index: 50;
+    }
+    #toast.show { opacity: 1; }
+    #toast.ok  { border-color: var(--success); color: var(--success); }
+    #toast.err { border-color: var(--danger);  color: var(--danger); }
+
+    /* Restart overlay */
+    #overlay {
+      position: fixed; inset: 0; z-index: 100; background: rgba(13,13,13,.93);
+      display: flex; align-items: center; justify-content: center;
+      flex-direction: column; gap: 14px;
+    }
+    #overlay[hidden] { display: none; }
+    .spin {
+      width: 46px; height: 46px;
+      border: 3px solid #333; border-top-color: var(--accent);
+      border-radius: 50%; animation: spin .7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .ov-title { font-size: 18px; font-weight: 700; }
+    .ov-count { font-size: 54px; font-weight: 800; color: var(--accent); line-height: 1; }
+    .ov-sub   { font-size: 13px; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <a href="/" class="back">&#8592; e-ink</a>
+    <h1>Config</h1>
+    <button id="save-btn" onclick="save()">Save &amp; Restart</button>
+  </header>
+  <main id="root"></main>
+  <div id="toast"></div>
+  <div id="overlay" hidden>
+    <div class="spin"></div>
+    <div class="ov-title">Restarting&hellip;</div>
+    <div class="ov-count" id="ov-n">5</div>
+    <div class="ov-sub">Page reloads automatically</div>
+  </div>
+  <script>
+    var CFG    = __CONFIG_JSON__;
+    var SCHEMA = __SCHEMA_JSON__;
+
+    var root = document.getElementById("root");
+    SCHEMA.forEach(function(sec) {
+      var card  = mk("div", {className: "card"});
+      card.appendChild(mk("div", {className: "card-title"}, sec[0]));
+      sec[1].forEach(function(f) { card.appendChild(makeRow(f)); });
+      root.appendChild(card);
+    });
+
+    function makeRow(f) {
+      var key = f[0], type = f[1], label = f[2], extra = f[3];
+      var val = CFG[key];
+      var row = mk("div", {className: "row"});
+      var lbl = mk("div", {className: "row-lbl"});
+      lbl.appendChild(mk("div", {className: "lbl"}, label));
+      if (extra && !Array.isArray(extra))
+        lbl.appendChild(mk("div", {className: "hint"}, extra));
+      row.appendChild(lbl);
+
+      var ctrl;
+      if (type === "bool") {
+        ctrl = mk("label", {className: "toggle"});
+        var inp = mk("input"); inp.type = "checkbox";
+        inp.checked = !!val; inp.dataset.key = key;
+        ctrl.appendChild(inp);
+        ctrl.appendChild(mk("span", {className: "track"}));
+      } else if (type === "int") {
+        ctrl = mk("div", {className: "stepper"});
+        var minus = mk("button", {className: "step-btn", type: "button"}, "−");
+        var si    = mk("input", {className: "step-inp", type: "number"});
+        var plus  = mk("button", {className: "step-btn", type: "button"}, "+");
+        si.dataset.key = key; si.value = val != null ? val : 0;
+        minus.addEventListener("click", function() { si.value = parseInt(si.value||0) - 1; });
+        plus.addEventListener("click",  function() { si.value = parseInt(si.value||0) + 1; });
+        ctrl.appendChild(minus); ctrl.appendChild(si); ctrl.appendChild(plus);
+      } else if (type === "select") {
+        ctrl = mk("select", {className: "sel-inp"});
+        ctrl.dataset.key = key;
+        (Array.isArray(extra) ? extra : []).forEach(function(o) {
+          var opt = mk("option", {value: o}, o);
+          if (o === val) opt.selected = true;
+          ctrl.appendChild(opt);
+        });
+      } else {
+        ctrl = mk("input", {className: "txt-inp", type: "text"});
+        ctrl.dataset.key = key;
+        ctrl.value = val != null ? String(val) : "";
+      }
+      row.appendChild(ctrl);
+      return row;
+    }
+
+    function mk(tag, props, text) {
+      var e = document.createElement(tag);
+      if (props) Object.assign(e, props);
+      if (text != null) e.textContent = text;
+      return e;
+    }
+
+    function collect() {
+      var out = {};
+      document.querySelectorAll("[data-key]").forEach(function(e) {
+        var k = e.dataset.key;
+        if (e.type === "checkbox")    out[k] = e.checked;
+        else if (e.classList.contains("step-inp")) out[k] = parseInt(e.value) || 0;
+        else out[k] = e.value;
+      });
+      return out;
+    }
+
+    function save() {
+      var btn = document.getElementById("save-btn");
+      btn.disabled = true;
+      fetch("/config", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(collect())
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.ok) startRestart();
+        else { toast("Error: " + (d.error || "?"), "err"); btn.disabled = false; }
+      }).catch(function(e) {
+        toast("Failed: " + e, "err"); btn.disabled = false;
+      });
+    }
+
+    function startRestart() {
+      var ov = document.getElementById("overlay");
+      var nn = document.getElementById("ov-n");
+      ov.removeAttribute("hidden");
+      var n = 5;
+      var t = setInterval(function() {
+        n--; nn.textContent = n > 0 ? n : "↻";
+        if (n <= 0) { clearInterval(t); poll(); }
+      }, 1000);
+    }
+
+    function poll() {
+      fetch("/config?_=" + Date.now(), {cache: "no-store"})
+        .then(function(r) { if (r.ok) location.reload(); else setTimeout(poll, 600); })
+        .catch(function()  { setTimeout(poll, 600); });
+    }
+
+    function toast(msg, cls) {
+      var t = document.getElementById("toast");
+      t.textContent = msg; t.className = "show" + (cls ? " " + cls : "");
+      setTimeout(function() { t.className = ""; }, 3500);
+    }
+  </script>
+</body>
+</html>
+'''
+
+
+def _save_config_values(config_path: str, updates: dict):
+    """Write key-value pairs into config.yaml, replacing only the matching lines."""
+    with open(config_path) as f:
+        content = f.read()
+    for key, value in updates.items():
+        if isinstance(value, bool):
+            val_str = 'true' if value else 'false'
+        elif isinstance(value, (int, float)):
+            val_str = str(int(value))
+        else:
+            s = str(value)
+            needs_quotes = not s or any(c in s for c in ':#{}[]|>&!\'"@`')
+            val_str = f'"{s}"' if needs_quotes else s
+        pattern = rf'^({re.escape(key)}:\s*).*$'
+        new_line = f'{key}: {val_str}'
+        content, n = re.subn(pattern, new_line, content, flags=re.MULTILINE)
+        if n == 0:
+            content += f'\n{new_line}\n'
+    with open(config_path, 'w') as f:
+        f.write(content)
+
+
+def _build_config_html(config_data: dict) -> str:
+    import json
+    return (_CONFIG_HTML
+            .replace('__CONFIG_JSON__', json.dumps(config_data))
+            .replace('__SCHEMA_JSON__', json.dumps(_CONFIG_SCHEMA)))
+
 
 def _get_startup_mode(config_path: str) -> str:
     try:
@@ -327,6 +685,7 @@ _PAGE_HTML = '''\
   <header>
     <span class="logo">e-ink</span>
     <div class="header-right">
+      <a href="/config" class="pill-btn">&#9881; Config</a>
       <a href="/gallery" class="pill-btn">&#128247; Gallery</a>
       <a href="/clipboard" class="pill-btn">&#128203; Clips</a>
       <button id="mode-btn" class="pill-btn" onclick="toggleMode()">&#8644; Mode</button>
@@ -782,6 +1141,8 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             elif path == '/mode':
                 mode = _get_startup_mode(config_path) if config_path else 'stats'
                 self._respond(200, 'application/json', json.dumps({'mode': mode}).encode())
+            elif path == '/config':
+                self._serve_config()
             elif path == '/clipboard':
                 self._respond(200, 'text/html; charset=utf-8', _CLIPBOARD_HTML.encode())
             elif path == '/clipboard/list':
@@ -801,6 +1162,8 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._handle_select()
             elif path == '/mode':
                 self._handle_mode()
+            elif path == '/config':
+                self._handle_config_post()
             elif path == '/clipboard/add':
                 self._handle_clipboard_add()
             else:
@@ -976,6 +1339,41 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             try:
                 _set_startup_mode(config_path, mode)
                 self._respond(200, 'application/json', b'{"ok":true}')
+            except Exception as e:
+                self._respond(500, 'application/json',
+                              json.dumps({'ok': False, 'error': str(e)}).encode())
+
+        # ── Config handlers ──────────────────────────────────────────────────
+
+        def _serve_config(self):
+            if not config_path:
+                self._respond(500, 'text/plain', b'No config path configured')
+                return
+            try:
+                import yaml
+                with open(config_path) as f:
+                    cfg = yaml.safe_load(f) or {}
+                html = _build_config_html(cfg)
+                self._respond(200, 'text/html; charset=utf-8', html.encode())
+            except Exception as e:
+                self._respond(500, 'text/plain', str(e).encode())
+
+        def _handle_config_post(self):
+            if not config_path:
+                self._respond(500, 'application/json', b'{"ok":false,"error":"No config path"}')
+                return
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                updates = json.loads(raw)
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+            try:
+                _save_config_values(config_path, updates)
+                self._respond(200, 'application/json', b'{"ok":true}')
+                if platform.system() == 'Linux':
+                    subprocess.Popen(['sudo', 'systemctl', 'restart', 'eink-display'])
             except Exception as e:
                 self._respond(500, 'application/json',
                               json.dumps({'ok': False, 'error': str(e)}).encode())

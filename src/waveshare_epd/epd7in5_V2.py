@@ -29,6 +29,7 @@
 
 
 import logging
+import time
 from . import epdconfig
 
 # Display resolution
@@ -77,10 +78,15 @@ class EPD:
         logger.debug("e-Paper busy")
         self.send_command(0x71)
         busy = epdconfig.digital_read(self.busy_pin)
-        while(busy == 0):
+        deadline = time.monotonic() + 15.0
+        while busy == 0:
+            if time.monotonic() > deadline:
+                logger.error('e-Paper ReadBusy timeout — panel is stuck, forcing reinit')
+                raise IOError('e-Paper BUSY pin timeout (15s)')
+            epdconfig.delay_ms(10)
             self.send_command(0x71)
             busy = epdconfig.digital_read(self.busy_pin)
-        epdconfig.delay_ms(20)
+        epdconfig.delay_ms(10)
         logger.debug("e-Paper busy release")
         
     def init(self):
@@ -193,30 +199,14 @@ class EPD:
             # return a blank buffer
             return [0x00] * (int(self.width/8) * self.height)
 
-        buf = bytearray(img.tobytes('raw'))
-        # The bytes need to be inverted, because in the PIL world 0=black and 1=white, but
-        # in the e-paper world 0=white and 1=black.
-        for i in range(len(buf)):
-            buf[i] ^= 0xFF
-        return buf
+        return bytearray(b ^ 0xFF for b in img.tobytes('raw'))
 
     def getbuffer_partial(self, image):
         """Convert an arbitrarily-sized PIL image to e-paper format bytes for display_Partial."""
-        buf = bytearray(image.convert('1').tobytes('raw'))
-        for i in range(len(buf)):
-            buf[i] ^= 0xFF
-        return buf
+        return bytearray(b ^ 0xFF for b in image.convert('1').tobytes('raw'))
 
     def display(self, image):
-        if(self.width % 8 == 0):
-            Width = self.width // 8
-        else:
-            Width = self.width // 8 +1
-        Height = self.height
-        image1 = [0xFF] * int(self.width * self.height / 8)
-        for j in range(Height):
-                for i in range(Width):
-                    image1[i + j * Width] = ~image[i + j * Width]
+        image1 = bytearray(b ^ 0xFF for b in image)
         self.send_command(0x10)
         self.send_data2(image1)
 
@@ -224,7 +214,6 @@ class EPD:
         self.send_data2(image)
 
         self.send_command(0x12)
-        epdconfig.delay_ms(100)
         self.ReadBusy()
 
     def Clear(self):
@@ -267,13 +256,56 @@ class EPD:
         self.send_data ((Yend-1)%256)  #y-end
         self.send_data (0x01)
 
-        # Image is expected in e-paper format (1=black, 0=white) as returned by
-        # getbuffer_partial(). Send directly — no polarity inversion needed here.
+        # Partial mode (0x91) drives the 0x13 RAM with the *opposite* polarity to
+        # a full display() refresh on this panel, so the patch must be inverted
+        # here. Without this, the partially-updated region renders inverted
+        # (white text on a black box) until the next full refresh repaints it.
+        inverted = bytes(b ^ 0xFF for b in Image)
         self.send_command(0x13)
-        self.send_data2(Image)
+        self.send_data2(inverted)
 
         self.send_command(0x12)
-        epdconfig.delay_ms(100)
+        self.ReadBusy()
+
+    def display_Partial_multi(self, patches):
+        """Write multiple partial regions to RAM then trigger a single panel refresh.
+
+        patches: iterable of (image_bytes, Xstart, Ystart, Xend, Yend)
+
+        All regions are written to the controller RAM before the 0x12 refresh
+        command is issued, so the panel settles once regardless of band count.
+        """
+        self.send_command(0x50)
+        self.send_data(0xA9)
+        self.send_data(0x07)
+
+        for image, Xstart, Ystart, Xend, Yend in patches:
+            # Same x byte-alignment as display_Partial.
+            if((Xstart % 8 + Xend % 8 == 8 & Xstart % 8 > Xend % 8) | Xstart % 8 + Xend % 8 == 0 | (Xend - Xstart) % 8 == 0):
+                Xstart = Xstart // 8 * 8
+                Xend = Xend // 8 * 8
+            else:
+                Xstart = Xstart // 8 * 8
+                Xend = Xend // 8 * 8 if Xend % 8 == 0 else Xend // 8 * 8 + 1
+
+            self.send_command(0x91)       # enter partial mode for this window
+            self.send_command(0x90)       # set partial window
+            self.send_data(Xstart // 256)
+            self.send_data(Xstart % 256)
+            self.send_data((Xend - 1) // 256)
+            self.send_data((Xend - 1) % 256)
+            self.send_data(Ystart // 256)
+            self.send_data(Ystart % 256)
+            self.send_data((Yend - 1) // 256)
+            self.send_data((Yend - 1) % 256)
+            self.send_data(0x01)
+
+            inverted = bytes(b ^ 0xFF for b in image)
+            self.send_command(0x13)
+            self.send_data2(inverted)
+
+        # Single refresh trigger — panel settles all written regions at once.
+        self.send_command(0x12)
         self.ReadBusy()
 
     def sleep(self):

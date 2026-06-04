@@ -44,7 +44,7 @@ import pyte
 
 from alert_monitor import AlertMonitor
 from terminal_renderer import (
-    render_screen, render_mini_stats, terminal_dimensions,
+    render_screen, render_screen_partial, render_mini_stats, terminal_dimensions,
     TERMINAL_H, SPLIT_TERMINAL_W,
 )
 from display_eink import EinkDriver
@@ -61,12 +61,12 @@ class _Tab:
     child_pid: int
     title: str = ''
     scroll_pages: int = 0
+    tmux_session: str = ''
 
 
-_RENDER_DEBOUNCE        = 0.02   # seconds — lower now that hw writes are async
-_STATUS_CACHE_TTL       = 5.0    # seconds between CWD/branch re-reads
-_STATS_UPDATE_SEC       = 30     # seconds between split-view stats refreshes
-_STATUSBAR_STATS_UPDATE = 120    # seconds between status bar stats refresh
+_RENDER_DEBOUNCE  = 0.02   # seconds — lower now that hw writes are async
+_STATUS_CACHE_TTL = 5.0    # seconds between CWD/branch re-reads
+_STATS_UPDATE_SEC = 30     # seconds between split-view stats refreshes
 _MIN_FONT = 8
 _MAX_FONT = 32
 
@@ -74,11 +74,12 @@ _URL_RE = re.compile(r'https?://[^\s\x00-\x1f"\'<>]{6,}')
 
 
 def _fmt_speed(bps: float) -> str:
-    if bps < 1024:
-        return f'{bps:.0f} B/s'
-    elif bps < 1024 ** 2:
-        return f'{bps / 1024:.1f} KB/s'
-    return f'{bps / 1024 ** 2:.1f} MB/s'
+    mbps = bps * 8 / 1_000_000
+    if mbps < 0.1:
+        return '<0.1 Mbps'
+    elif mbps < 10.0:
+        return f'{mbps:.1f} Mbps'
+    return f'{mbps:.0f} Mbps'
 
 
 def _filter_pty_output(data: bytes, pty_master_fd) -> bytes:
@@ -190,6 +191,18 @@ def _get_local_ip() -> str:
         return ''
 
 
+def _read_wifi_signal() -> int | None:
+    try:
+        with open('/proc/net/wireless') as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 4 and parts[0].rstrip(':').startswith('w'):
+                    return int(float(parts[3].rstrip('.')))
+    except Exception:
+        pass
+    return None
+
+
 class EinkTerminal:
     """Runs a shell in a PTY and mirrors output to the e-ink display."""
 
@@ -197,34 +210,40 @@ class EinkTerminal:
         self._config    = config
         self._font_size = config.get('terminal_font_size', 14)
         self._font_path = config.get('terminal_font_path', '')
-        self._dark_mode = config.get('terminal_dark_mode', True)
+        self._dark_mode = config.get('terminal_dark_mode', False)
         self._full_refresh_interval = config.get('terminal_full_refresh_interval', 60)
         self._idle_timeout = config.get('terminal_idle_timeout', 0)
         self._split_view  = config.get('terminal_split_view', False)
-        self._status_extras = config.get('terminal_status_bar_extras', True)
+        self._status_extras  = config.get('terminal_status_bar_extras', True)
 
         # tmux
         self._use_tmux     = config.get('terminal_use_tmux', False) and bool(shutil.which('tmux'))
         self._tmux_session = config.get('terminal_tmux_session', 'eink')
 
-        self._driver      = EinkDriver(local=local)
+        self._driver      = EinkDriver(local=local,
+                                       partial_refresh_limit=config.get('partial_refresh_before_full', 30))
         self._screen      = None
         self._stream      = None
         self._pty_master  = None
         self._child_pid   = None
         self._running     = False
-        self._last_image  = None
+        self._last_image      = None
+        self._img_cache       = None   # cached 800×480 image for incremental renders
+        self._last_cursor_row = None   # cursor row at last render
+        self._last_start_row  = 0      # viewport start row at last render
         self._stdin_fd    = sys.stdin.fileno()
         self._old_tty     = None
 
         # evdev keyboard (preferred over stdin when a desktop is running)
         kbd_path = config.get('terminal_keyboard_device', 'auto')
-        _dev = find_keyboard(kbd_path if kbd_path != 'auto' else '')
+        self._kbd_path = kbd_path if kbd_path != 'auto' else ''
+        self._last_kbd_probe = 0.0
+        _dev = find_keyboard(self._kbd_path)
         self._evdev_kb: EvdevKeyboard | None = EvdevKeyboard(_dev) if _dev else None
         if self._evdev_kb:
             logger.info('Using evdev keyboard: %s', _dev.path)
         else:
-            logger.info('evdev keyboard not found — using stdin')
+            logger.info('evdev keyboard not found — will retry on hot-plug')
 
         # Scrollback state (only when not using tmux)
         self._scroll_pages = 0
@@ -248,11 +267,6 @@ class EinkTerminal:
         self._stats_data: dict = None
         self._stats_dirty  = False
         self._stats_lock   = threading.Lock()
-
-        # Status bar system stats (CPU/RAM/Disk)
-        self._statusbar_stats: dict = None
-        self._statusbar_stats_dirty = False
-        self._statusbar_stats_lock  = threading.Lock()
 
         # Screensaver cycle state
         self._screensaver_cycle_idx  = 0
@@ -310,7 +324,9 @@ class EinkTerminal:
 
     def _init_screen(self):
         tw = SPLIT_TERMINAL_W if self._split_view else 800
-        cols, rows, _, _ = terminal_dimensions(self._font_size, self._font_path, tw)
+        cols, rows, cw, ch = terminal_dimensions(self._font_size, self._font_path, tw)
+        if hasattr(self, '_driver'):
+            self._driver.set_cell_size(cw, ch)
         if self._use_tmux:
             self._screen = pyte.Screen(cols, rows)
         else:
@@ -321,12 +337,13 @@ class EinkTerminal:
 
     # ─── PTY ─────────────────────────────────────────────────────────────────
 
-    def _spawn_shell(self):
+    def _spawn_shell(self, tmux_session: str = None):
+        session = tmux_session if tmux_session is not None else self._tmux_session
         pid, master_fd = pty.fork()
         if pid == 0:
             os.environ['TERM'] = 'xterm-256color'
             if self._use_tmux:
-                os.execvp('tmux', ['tmux', 'new-session', '-A', '-s', self._tmux_session])
+                os.execvp('tmux', ['tmux', 'new-session', '-A', '-s', session])
             else:
                 shell = os.environ.get('SHELL', '/bin/bash')
                 os.execvp(shell, [shell])
@@ -500,9 +517,11 @@ class EinkTerminal:
             t.screen = self._screen; t.stream = self._stream
             t.pty_master = self._pty_master; t.child_pid = self._child_pid
         self._init_screen()
-        self._spawn_shell()
+        new_session = f'{self._tmux_session}-{len(self._tabs) + 1}'
+        self._spawn_shell(tmux_session=new_session)
         self._tabs.append(_Tab(screen=self._screen, stream=self._stream,
-                               pty_master=self._pty_master, child_pid=self._child_pid))
+                               pty_master=self._pty_master, child_pid=self._child_pid,
+                               tmux_session=new_session))
         self._active_tab = len(self._tabs) - 1
         self._scroll_pages = 0
         if cmd:
@@ -875,27 +894,39 @@ class EinkTerminal:
         return ''
 
     def _start_network_monitor_thread(self):
-        """Measure IP + upload/download rates every 15 min, only when idle."""
+        """Sample network speed once per hour; never triggers more than one
+        display refresh per hour from network data."""
+        iface = self._config.get('network_interface', '') or 'wlan0'
+
+        def _counters():
+            import psutil
+            per = psutil.net_io_counters(pernic=True)
+            c = per.get(iface)
+            return c if c is not None else psutil.net_io_counters()
+
         def _loop():
             while self._running:
-                idle = time.monotonic() - self._last_activity
-                if idle >= 300:
-                    try:
-                        import psutil
-                        c1 = psutil.net_io_counters()
-                        time.sleep(5)
-                        c2 = psutil.net_io_counters()
-                        up   = (c2.bytes_sent - c1.bytes_sent) / 5.0
-                        down = (c2.bytes_recv - c1.bytes_recv) / 5.0
-                        ip   = _get_local_ip()
-                        with self._net_stats_lock:
-                            self._net_stats = {
-                                'ip': ip, 'up': _fmt_speed(up),
-                                'down': _fmt_speed(down), 'dirty': True,
-                            }
-                    except Exception as e:
-                        logger.debug('net monitor: %s', e)
-                time.sleep(max(60, 900 - 5))
+                # Two-sample measurement over 5 seconds.
+                try:
+                    c0 = _counters()
+                    time.sleep(5)
+                    c1 = _counters()
+                    up   = (c1.bytes_sent - c0.bytes_sent) / 5.0
+                    down = (c1.bytes_recv - c0.bytes_recv) / 5.0
+                except Exception as e:
+                    logger.debug('net monitor: %s', e)
+                    up = down = 0.0
+                ip = _get_local_ip()
+                with self._net_stats_lock:
+                    self._net_stats = {
+                        'ip': ip, 'up': _fmt_speed(up), 'down': _fmt_speed(down),
+                        'dirty': True, 'wifi_signal': _read_wifi_signal(),
+                    }
+                # Wait 1 hour before next sample, interruptible every 30 s.
+                deadline = time.monotonic() + 3600
+                while self._running and time.monotonic() < deadline:
+                    time.sleep(30)
+
         threading.Thread(target=_loop, daemon=True, name='net-monitor').start()
 
     def _force_full_refresh(self):
@@ -905,10 +936,16 @@ class EinkTerminal:
 
     def _switch_to_stats(self):
         self._running = False
+        for tab in self._tabs:
+            if tab.child_pid:
+                try:
+                    os.kill(tab.child_pid, signal.SIGTERM)
+                except (ProcessLookupError, OSError):
+                    pass
         if self._child_pid:
             try:
                 os.kill(self._child_pid, signal.SIGTERM)
-            except ProcessLookupError:
+            except (ProcessLookupError, OSError):
                 pass
         main_py = os.path.join(_REPO_ROOT, 'main.py')
         subprocess.Popen(
@@ -951,12 +988,13 @@ class EinkTerminal:
 
             port = self._config.get('preview_server_port', 8080)
             ip = _get_local_ip()
-            qr_url = f'http://{ip}:{port}/' if ip else ''
+            qr_url = f'http://{ip}:{port}/config' if ip else ''
 
             img = render_screensaver(image_path, qr_url, self._config)
             self._driver.full_refresh(img)
             self._last_image = img
             logger.info('Screensaver activated — img=%s mode=%s', os.path.basename(image_path), mode)
+            self._driver.sleep()   # power down panel; wakes automatically on next full_refresh
         except Exception as e:
             logger.warning('Screensaver render error: %s', e)
 
@@ -1024,36 +1062,24 @@ class EinkTerminal:
         t = threading.Thread(target=_loop, daemon=True)
         t.start()
 
-    def _start_statusbar_stats_thread(self):
-        def _loop():
-            sys.path.insert(0, os.path.join(_REPO_ROOT, 'src'))
-            from system_stats import collect as _collect
-            while self._running:
-                try:
-                    data = _collect(self._config)
-                    with self._statusbar_stats_lock:
-                        self._statusbar_stats = data
-                        self._statusbar_stats_dirty = True
-                except Exception as e:
-                    logger.warning('Statusbar stats error: %s', e)
-                time.sleep(_STATUSBAR_STATS_UPDATE)
-
-        threading.Thread(target=_loop, daemon=True).start()
-
     # ─── Rendering ───────────────────────────────────────────────────────────
 
     def _render(self, force_full: bool = False):
         tw = SPLIT_TERMINAL_W if self._split_view else 800
         status_info = self._get_status_info()
+        if status_info is not None:
+            tab_str = f'[{self._active_tab+1}/{len(self._tabs)}]' if len(self._tabs) > 1 else ''
+            status_info = (status_info[0], status_info[1], status_info[2], tab_str)
         alerts = self._alert_monitor.active()
-
-        with self._statusbar_stats_lock:
-            sys_stats = self._statusbar_stats
-            self._statusbar_stats_dirty = False
 
         found = self._scan_for_url()
         if found:
             self._last_url = found
+        elif not self._last_url:
+            _ip = _get_local_ip()
+            _port = self._config.get('preview_server_port', 8080)
+            if _ip:
+                self._last_url = f'http://{_ip}:{_port}/config'
         url_qr = self._last_url if self._show_url_qr else None
 
         with self._net_stats_lock:
@@ -1083,31 +1109,67 @@ class EinkTerminal:
         tab_bar = [(self._tab_title(t), i == self._active_tab)
                    for i, t in enumerate(self._tabs)] if self._tabs else None
 
-        img = render_screen(
-            self._screen,
-            self._font_size,
-            dark_mode=self._dark_mode,
-            font_path=self._font_path,
-            terminal_width=tw,
-            status_info=status_info,
-            alerts=alerts if alerts else None,
-            hq=self._hq_render,
-            sys_stats=sys_stats,
-            url_qr=url_qr,
-            net_stats=net_stats,
-            overlay=overlay,
-            tab_bar=tab_bar,
+        # Compute viewport start_row (for scroll detection).
+        _, vis_rows, _, _ = terminal_dimensions(self._font_size, self._font_path, tw)
+        start_row = (max(0, self._screen.cursor.y - vis_rows + 1)
+                     if self._screen.cursor.y >= vis_rows else 0)
+
+        # Use incremental rendering when the cache is warm and no large change
+        # (overlay, scroll, split sidebar) invalidates the full layout.
+        use_incremental = (
+            self._img_cache is not None
+            and not force_full
+            and overlay is None
+            and not self._split_view
+            and start_row == self._last_start_row
         )
 
-        # Overlay split-view sidebar
-        if self._split_view:
-            with self._stats_lock:
-                stats = self._stats_data
-                self._stats_dirty = False
-            render_mini_stats(img, stats, dark_mode=self._dark_mode)
+        if use_incremental:
+            img = render_screen_partial(
+                self._screen,
+                self._img_cache,
+                set(self._screen.dirty),
+                self._last_cursor_row,
+                start_row,
+                self._font_size,
+                dark_mode=self._dark_mode,
+                font_path=self._font_path,
+                terminal_width=tw,
+                status_info=status_info,
+                alerts=alerts if alerts else None,
+                net_stats=net_stats,
+                url_qr=url_qr,
+            )
+        else:
+            img = render_screen(
+                self._screen,
+                self._font_size,
+                dark_mode=self._dark_mode,
+                font_path=self._font_path,
+                terminal_width=tw,
+                status_info=status_info,
+                alerts=alerts if alerts else None,
+                hq=self._hq_render,
+                url_qr=url_qr,
+                net_stats=net_stats,
+                overlay=overlay,
+                tab_bar=tab_bar,
+            )
+            # Overlay split-view sidebar
+            if self._split_view:
+                with self._stats_lock:
+                    stats = self._stats_data
+                    self._stats_dirty = False
+                render_mini_stats(img, stats, dark_mode=self._dark_mode)
+            # Warm the cache for subsequent incremental renders.
+            self._img_cache      = img
+            self._last_start_row = start_row
 
+        self._last_cursor_row = self._screen.cursor.y
         self._last_image = img
-        time_full = (self._full_refresh_interval > 0 and
+        recently_active = (time.monotonic() - self._last_activity) < 60.0
+        time_full = (recently_active and
+                     self._full_refresh_interval > 0 and
                      (time.monotonic() - self._last_full_refresh_mono) >= self._full_refresh_interval)
         do_full = force_full or time_full
 
@@ -1141,9 +1203,6 @@ class EinkTerminal:
         if self._split_view:
             self._start_stats_thread()
 
-        if self._status_extras:
-            self._start_statusbar_stats_thread()
-
         self._start_network_monitor_thread()
 
         _config_path = os.path.join(_REPO_ROOT, 'config', 'config.yaml')
@@ -1171,6 +1230,16 @@ class EinkTerminal:
                 except ChildProcessError:
                     pass
 
+    def _evdev_disconnect(self):
+        """Called when the evdev keyboard is removed."""
+        try:
+            self._evdev_kb.ungrab()
+        except Exception:
+            pass
+        logger.info('evdev keyboard disconnected — watching for reconnect')
+        self._evdev_kb = None
+        self._last_kbd_probe = 0.0
+
     def _loop(self):
         last_render = 0.0
         has_pending = False
@@ -1178,6 +1247,17 @@ class EinkTerminal:
         in_screensaver = False
 
         while self._running:
+            now = time.monotonic()
+
+            # Hot-plug: probe for keyboard every 2 s when none is present
+            if self._evdev_kb is None and (now - self._last_kbd_probe) >= 2.0:
+                self._last_kbd_probe = now
+                dev = find_keyboard(self._kbd_path)
+                if dev is not None:
+                    self._evdev_kb = EvdevKeyboard(dev)
+                    self._evdev_kb.grab()
+                    logger.info('Hot-plugged keyboard: %s', dev.path)
+
             try:
                 fds = []
                 if self._evdev_kb is None:
@@ -1190,6 +1270,9 @@ class EinkTerminal:
                         fds.append(tab.pty_master)
                 r, _, _ = select.select(fds, [], [], _RENDER_DEBOUNCE)
             except (ValueError, OSError):
+                if self._evdev_kb is not None:
+                    self._evdev_disconnect()
+                    continue
                 break
 
             now = time.monotonic()
@@ -1204,7 +1287,11 @@ class EinkTerminal:
 
             # ── Keyboard input (evdev path) ───────────────────────────────────
             if self._evdev_kb is not None and self._evdev_kb.fileno() in r:
-                data = self._evdev_kb.read()
+                try:
+                    data = self._evdev_kb.read()
+                except OSError:
+                    self._evdev_disconnect()
+                    continue
                 if data:
                     self._last_activity = now
                     if in_screensaver:
@@ -1273,6 +1360,7 @@ class EinkTerminal:
                                 self._snap_to_live()
                             tab.stream.feed(chunk)
                         if tab_i == self._active_tab and not in_screensaver:
+                            self._last_activity = now
                             has_pending = True
                 except OSError:
                     if tab_i == self._active_tab:
@@ -1307,22 +1395,17 @@ class EinkTerminal:
                     has_pending = True  # alert changed — re-render status bar
                 last_alert_tick = now
 
+            _idle = now - self._last_activity
+
             # ── Split-view stats update ───────────────────────────────────────
-            if self._split_view and not in_screensaver:
+            if self._split_view and not in_screensaver and _idle < 60.0:
                 with self._stats_lock:
                     stats_dirty = self._stats_dirty
                 if stats_dirty:
                     has_pending = True
 
-            # ── Status bar stats update ───────────────────────────────────────
-            if self._status_extras and not in_screensaver:
-                with self._statusbar_stats_lock:
-                    statusbar_dirty = self._statusbar_stats_dirty
-                if statusbar_dirty:
-                    has_pending = True
-
             # ── Network stats update ──────────────────────────────────────────
-            if not in_screensaver:
+            if not in_screensaver and _idle < 60.0:
                 with self._net_stats_lock:
                     if self._net_stats.get('dirty'):
                         self._net_stats['dirty'] = False

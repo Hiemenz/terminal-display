@@ -22,11 +22,12 @@ except ImportError:
 W, H = 800, 480
 SPLIT_TERMINAL_W = 600
 SPLIT_SIDEBAR_W  = W - SPLIT_TERMINAL_W  # 200
-STATUS_H         = 34    # two-line status bar (17px per line)
-TAB_BAR_H        = 18    # tab bar strip at the very top
-TERMINAL_H       = H - STATUS_H - TAB_BAR_H  # 428
+STATUS_H         = 17    # single-line status bar
+TAB_BAR_H        = 0     # tab bar removed; tab indicator shown in status bar
+TERMINAL_H       = H - STATUS_H - TAB_BAR_H  # 463
 
 _font_cache: dict = {}
+_qr_cache:   dict = {}  # url -> PIL Image, generated once per URL
 
 
 # ── Font helpers ──────────────────────────────────────────────────────────────
@@ -108,7 +109,6 @@ def render_screen(
     status_info: tuple = None,
     alerts: list = None,
     hq: bool = True,
-    sys_stats: dict = None,
     url_qr: str = None,
     net_stats: dict = None,
     overlay: tuple = None,
@@ -162,7 +162,7 @@ def render_screen(
                 break
             char = row[col_idx]
             is_cursor    = (row_idx == screen.cursor.y and col_idx == screen.cursor.x)
-            cell_inverted = bool(char.reverse) or is_cursor
+            cell_inverted = bool(char.reverse)
             cell_fg = bg if cell_inverted else fg
             cell_bg = fg if cell_inverted else bg
             if cell_bg != bg:
@@ -170,6 +170,9 @@ def render_screen(
             glyph = char.data
             if glyph and glyph != ' ':
                 draw.text((x, y), glyph, font=font, fill=cell_fg)
+            if is_cursor:
+                bar_h = max(2, ch // 6)
+                draw.rectangle([x, y + ch - bar_h, x + cw - 1, y + ch - 1], fill=fg)
 
     # ── Status bar ───────────────────────────────────────────────────────────
     _draw_status_bar(
@@ -177,7 +180,6 @@ def render_screen(
         status_info=status_info,
         alerts=alerts,
         scale=scale,
-        sys_stats=sys_stats,
         net_stats=net_stats,
     )
 
@@ -205,6 +207,8 @@ def render_screen(
 
 def render_tab_bar(img: Image.Image, tabs_info: list, dark_mode: bool = True):
     """Draw a tab bar strip at y=0..TAB_BAR_H on the given image."""
+    if TAB_BAR_H == 0:
+        return
     bg = 0 if dark_mode else 255
     fg = 255 if dark_mode else 0
     draw = ImageDraw.Draw(img)
@@ -240,16 +244,23 @@ def _draw_url_qr(img: Image.Image, url: str, terminal_width: int = W):
     if not _HAS_QRCODE:
         return
     try:
-        qr_size = 90
-        border  = 4
-        qr_img = _qrcode.make(url).resize((qr_size, qr_size), Image.NEAREST).convert('L')
-        x0 = terminal_width - qr_size - border
-        y0 = TAB_BAR_H + TERMINAL_H - qr_size - border
+        if url not in _qr_cache:
+            qr = _qrcode.QRCode(
+                error_correction=_qrcode.constants.ERROR_CORRECT_L,
+                box_size=4, border=2,
+            )
+            qr.add_data(url)
+            qr.make(fit=True)
+            _qr_cache[url] = qr.make_image(
+                fill_color='black', back_color='white'
+            ).get_image().convert('L')
+        qr_img = _qr_cache[url]
+        pad = 4
+        sz  = qr_img.width
+        x0  = terminal_width - sz - pad
+        y0  = TAB_BAR_H + TERMINAL_H - sz - pad
         draw = ImageDraw.Draw(img)
-        draw.rectangle(
-            [x0 - border, y0 - border, x0 + qr_size + border, y0 + qr_size + border],
-            fill=255,
-        )
+        draw.rectangle([x0 - pad, y0 - pad, x0 + sz + pad, y0 + sz + pad], fill=255)
         img.paste(qr_img, (x0, y0))
     except Exception:
         pass
@@ -344,6 +355,78 @@ def _draw_palette(draw, img, items, idx, title, scale, bg, fg):
         y += lh
 
 
+def render_screen_partial(
+    screen: pyte.Screen,
+    cached_img: Image.Image,
+    dirty_rows: set,
+    prev_cursor_row,
+    start_row: int,
+    font_size: int,
+    dark_mode: bool = True,
+    font_path: str = '',
+    terminal_width: int = W,
+    status_info: tuple = None,
+    alerts: list = None,
+    net_stats: dict = None,
+    url_qr: str = None,
+) -> Image.Image:
+    """Redraw only changed rows onto cached_img — much faster than a full render.
+
+    Repaints dirty pyte rows plus the old and new cursor rows (so the cursor
+    block appears/disappears cleanly). The status bar is always repainted.
+    Mutates and returns cached_img directly; no allocation."""
+    font = _find_mono_font(font_path, font_size)
+    cw, ch = _char_size(font)
+    bg = 0 if dark_mode else 255
+    fg = 255 if dark_mode else 0
+    visible_rows = max(1, TERMINAL_H // ch)
+    draw = ImageDraw.Draw(cached_img)
+
+    # Rows to repaint: dirty pyte rows + old and new cursor rows.
+    repaint = set()
+    for r in dirty_rows:
+        di = r - start_row
+        if 0 <= di < visible_rows:
+            repaint.add(r)
+    for r in (prev_cursor_row, screen.cursor.y):
+        if r is not None:
+            di = r - start_row
+            if 0 <= di < visible_rows:
+                repaint.add(r)
+
+    for row_idx in repaint:
+        draw_i = row_idx - start_row
+        y = draw_i * ch + TAB_BAR_H
+        draw.rectangle([0, y, terminal_width - 1, y + ch - 1], fill=bg)
+        row = screen.buffer[row_idx]
+        for col_idx in range(screen.columns):
+            x = col_idx * cw
+            if x >= terminal_width:
+                break
+            char = row[col_idx]
+            is_cursor    = (row_idx == screen.cursor.y and col_idx == screen.cursor.x)
+            cell_inverted = bool(char.reverse)
+            cell_fg = bg if cell_inverted else fg
+            cell_bg = fg if cell_inverted else bg
+            if cell_bg != bg:
+                draw.rectangle([x, y, x + cw - 1, y + ch - 1], fill=cell_bg)
+            glyph = char.data
+            if glyph and glyph != ' ':
+                draw.text((x, y), glyph, font=font, fill=cell_fg)
+            if is_cursor:
+                bar_h = max(2, ch // 6)
+                draw.rectangle([x, y + ch - bar_h, x + cw - 1, y + ch - 1], fill=fg)
+
+    _draw_status_bar(draw, font_size, fg, bg, terminal_width,
+                     status_info=status_info, alerts=alerts, scale=1,
+                     net_stats=net_stats)
+
+    if url_qr:
+        _draw_url_qr(cached_img, url_qr, terminal_width)
+
+    return cached_img
+
+
 # ── Status bar ────────────────────────────────────────────────────────────────
 
 def _draw_status_bar(
@@ -355,64 +438,37 @@ def _draw_status_bar(
     status_info: tuple = None,
     alerts: list = None,
     scale: int = 1,
-    sys_stats: dict = None,
     net_stats: dict = None,
 ):
-    """Two-line status bar. All positions and fonts are scale-aware."""
-    y0      = (TAB_BAR_H + TERMINAL_H) * scale
-    H_s     = H * scale
-    line_h  = (STATUS_H // 2) * scale
-    sfont   = _find_mono_font('', 10 * scale)
-    pad     = 2 * scale
-    x_pad   = 4 * scale
+    """Single-line status bar: time · CWD:branch · IP/WiFi · net speeds (or alert)."""
+    y0    = (TAB_BAR_H + TERMINAL_H) * scale
+    H_s   = H * scale
+    sfont = _find_mono_font('', 10 * scale)
+    pad   = 2 * scale
+    x_pad = 4 * scale
 
     draw.rectangle([0, y0, terminal_width, H_s], fill=fg)
 
-    # ── Line 1: info or active alert ─────────────────────────────────────────
-    y1 = y0 + pad
+    cwd      = status_info[1] if status_info and len(status_info) > 1 else ''
+    branch   = status_info[2] if status_info and len(status_info) > 2 else ''
+    tab_str  = status_info[3] if status_info and len(status_info) > 3 else ''
+    raw_time = status_info[0] if status_info else datetime.now().strftime('%H:%M')
+    time_str = (tab_str + ' ' if tab_str else '') + raw_time
+
     active = alerts or []
     if active:
-        # Alert: draw on a "un-inverted" background to stand out
-        draw.rectangle([0, y0, terminal_width, y0 + line_h], fill=bg)
-        draw.text((x_pad, y1), f'⚠ {active[0]}', font=sfont, fill=fg)
-    elif status_info:
-        time_str, cwd, branch = status_info
-        parts = [p for p in (time_str, cwd, f'⎯ {branch}' if branch else '') if p]
-        line1 = '  '.join(parts)
-        if net_stats:
-            ip, up, dn = net_stats.get('ip',''), net_stats.get('up',''), net_stats.get('down','')
-            if ip or up or dn:
-                line1 += '  |' + (f'  {ip}' if ip else '') + (f'  ↑{up}' if up else '') + (f'  ↓{dn}' if dn else '')
-        draw.text((x_pad, y1), line1, font=sfont, fill=bg)
+        draw.text((x_pad, y0 + pad), f'⚠ {active[0]}', font=sfont, fill=bg)
     else:
-        line1 = datetime.now().strftime('%H:%M')
+        parts = [time_str]
+        if cwd or branch:
+            parts.append((cwd + ':' + branch) if cwd and branch else (cwd or branch))
         if net_stats:
-            ip, up, dn = net_stats.get('ip',''), net_stats.get('up',''), net_stats.get('down','')
-            if ip or up or dn:
-                line1 += '  |' + (f'  {ip}' if ip else '') + (f'  ↑{up}' if up else '') + (f'  ↓{dn}' if dn else '')
-        draw.text((x_pad, y1), line1, font=sfont, fill=bg)
-
-    # ── Line 2: system stats (if available) or hotkeys ───────────────────────
-    y2 = y0 + line_h + pad
-    if sys_stats:
-        cpu  = sys_stats.get('cpu_percent', 0)
-        mem  = sys_stats.get('memory', {})
-        disk = sys_stats.get('disk', {})
-        load = sys_stats.get('load')
-        uptime = sys_stats.get('uptime', '')
-        parts = [f'CPU {cpu:.0f}%']
-        if mem:
-            parts.append(f"MEM {mem.get('used_str', '')} {mem.get('percent', 0):.0f}%")
-        if disk:
-            parts.append(f"Disk {disk.get('used_str', '')}/{disk.get('total_str', '')} {disk.get('percent', 0):.0f}%")
-        if load:
-            parts.append(f"Load {load[0]:.2f}")
-        if uptime:
-            parts.append(f"Up {uptime}")
-        draw.text((x_pad, y2), '  '.join(parts), font=sfont, fill=bg)
-    else:
-        keys = (
-            f'F3:Kill  F4:Svc  F5:Pwr  F6:Cmd  F7:Dark  F8:Clip  '
-            f'F9:Font-({font_size}pt)  F12:Font+  F10:Refresh  F11:Stats'
-        )
-        draw.text((x_pad, y2), keys, font=sfont, fill=bg)
+            ip       = net_stats.get('ip', '')
+            up, dn   = net_stats.get('up', ''), net_stats.get('down', '')
+            wifi_sig = net_stats.get('wifi_signal')
+            if ip:
+                ip_str = ip + (f' {wifi_sig:+d}dBm' if wifi_sig is not None else '')
+                parts.append(ip_str)
+            if up or dn:
+                parts.append((f'↑{up}' if up else '') + (f'  ↓{dn}' if dn else ''))
+        draw.text((x_pad, y0 + pad), '  '.join(parts), font=sfont, fill=bg)

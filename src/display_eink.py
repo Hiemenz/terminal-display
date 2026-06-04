@@ -15,7 +15,13 @@ import queue as _queue
 import threading
 from PIL import Image
 
-from refresh_tracker import needs_full_refresh, record_full_refresh
+try:
+    import numpy as _np
+    _HAS_NUMPY = True
+except ImportError:
+    _HAS_NUMPY = False
+
+from refresh_tracker import needs_full_refresh, record_full_refresh, record_partial_refresh
 
 _IS_MAC = platform.system() == 'Darwin'
 
@@ -97,14 +103,24 @@ class EinkDriver:
     _FULL    = 'full'
     _SLEEP   = 'sleep'
 
-    def __init__(self, local: bool = False):
+    # Above this many disjoint changed regions in one frame, do a single full
+    # refresh instead of many small partial flashes.
+    _MAX_PARTIAL_SPANS = 7
+
+    def __init__(self, local: bool = False, partial_refresh_limit: int = 30):
         self._local = local or _IS_MAC
+        self._partial_refresh_limit = partial_refresh_limit
+
+        # Character cell dimensions for aligned partial-refresh rectangles.
+        # Set by EinkTerminal via set_cell_size() whenever the font changes.
+        self._cell_w = 0
+        self._cell_h = 0
 
         # Hardware state — owned exclusively by the worker thread (no locks).
         self._epd          = None
         self._partial_ready = False
         self._prev_buf      = None
-        self._hw_sleeping   = False   # True after sleep(); full init() needed to wake
+        self._hw_sleeping   = True    # assume display is sleeping on startup; forces full init()
 
         # Worker communication.
         self._q            = _queue.Queue()       # ordered task queue
@@ -133,6 +149,15 @@ class EinkDriver:
                 item[1].set()   # unblock sleep() caller
 
     # ── public API ────────────────────────────────────────────────────────────
+
+    def set_cell_size(self, cell_w: int, cell_h: int):
+        """Set the terminal font's character cell dimensions.
+
+        When set, partial-refresh rectangles are snapped to whole character
+        cells so the flash box always aligns cleanly with character boundaries
+        instead of cutting through the middle of a glyph or background row."""
+        self._cell_w = max(0, cell_w)
+        self._cell_h = max(0, cell_h)
 
     def full_refresh(self, image: Image.Image, output_path: str = None):
         """Full refresh with flash. Async — enqueued behind any pending work."""
@@ -194,9 +219,11 @@ class EinkDriver:
             self._prev_buf = bytearray(buf)
         except IOError as e:
             logging.error('E-ink full refresh error: %s', e)
+            self._hw_sleeping  = True
+            self._partial_ready = False
 
     def _hw_partial_diff(self, image: Image.Image):
-        """Diff against previous frame; update only changed pixel rectangles."""
+        """Diff against previous frame; refresh minimal per-band bounding boxes."""
         epd = self._epd_instance()
         if epd is None:
             return
@@ -213,59 +240,114 @@ class EinkDriver:
                 self._prev_buf = bytearray(buf)
                 return
 
-            # Find dirty byte positions and record per-row X extents.
-            dirty: dict = {}  # pixel-row → (xmin_byte, xmax_byte)
-            for idx in range(len(buf)):
-                if buf[idx] != self._prev_buf[idx]:
-                    row, col = divmod(idx, row_bytes)
-                    if row in dirty:
-                        xn, xx = dirty[row]
-                        dirty[row] = (min(xn, col), max(xx, col))
-                    else:
-                        dirty[row] = (col, col)
+            # Diff against previous frame to find changed bytes.
+            row_x = {}  # pixel_row -> [x_lo_px, x_hi_px]
+            if _HAS_NUMPY:
+                arr  = _np.frombuffer(buf, dtype=_np.uint8)
+                prev = _np.frombuffer(self._prev_buf, dtype=_np.uint8)
+                changed = _np.where(arr != prev)[0]
+                self._prev_buf[:] = buf  # in-place: reuse allocation
+                if len(changed) == 0:
+                    return
+                rows = changed // row_bytes
+                cols = changed % row_bytes
+                for r in _np.unique(rows):
+                    mask     = rows == r
+                    row_cols = cols[mask]
+                    row_x[int(r)] = [int(row_cols.min()) * 8,
+                                     int(row_cols.max()) * 8 + 7]
+            else:
+                for idx in range(len(buf)):
+                    if buf[idx] != self._prev_buf[idx]:
+                        prow = idx // row_bytes
+                        pcol = idx % row_bytes
+                        x_lo = pcol * 8
+                        x_hi = x_lo + 7
+                        if prow in row_x:
+                            if x_lo < row_x[prow][0]: row_x[prow][0] = x_lo
+                            if x_hi > row_x[prow][1]: row_x[prow][1] = x_hi
+                        else:
+                            row_x[prow] = [x_lo, x_hi]
+                self._prev_buf[:] = buf  # in-place: reuse allocation
+                if not row_x:
+                    return
 
-            self._prev_buf = bytearray(buf)
+            # Map pixel rows to cell rows, accumulating x range per cell row.
+            cell_h = self._cell_h if self._cell_h > 0 else 1
+            snap_y = self._cell_h > 0
+            snap_x = self._cell_w > 0
 
-            if not dirty:
-                return
+            cell_row_x = {}  # cell_row -> [x_lo, x_hi]
+            for prow, (x_lo, x_hi) in row_x.items():
+                cr = prow // cell_h if snap_y else prow
+                if cr in cell_row_x:
+                    if x_lo < cell_row_x[cr][0]: cell_row_x[cr][0] = x_lo
+                    if x_hi > cell_row_x[cr][1]: cell_row_x[cr][1] = x_hi
+                else:
+                    cell_row_x[cr] = [x_lo, x_hi]
 
-            # Too many dirty rows — a full refresh is faster and cleaner.
-            if len(dirty) > epd.height * 0.4:
+            # Group contiguous cell rows into bands.
+            sorted_crows = sorted(cell_row_x)
+            bands = []  # (cell_row_start, cell_row_end, x_lo, x_hi)
+            b_start = sorted_crows[0]
+            b_end   = b_start
+            b_xlo, b_xhi = cell_row_x[b_start]
+            for cr in sorted_crows[1:]:
+                if cr == b_end + 1:
+                    b_end = cr
+                    if cell_row_x[cr][0] < b_xlo: b_xlo = cell_row_x[cr][0]
+                    if cell_row_x[cr][1] > b_xhi: b_xhi = cell_row_x[cr][1]
+                else:
+                    bands.append((b_start, b_end, b_xlo, b_xhi))
+                    b_start = b_end = cr
+                    b_xlo, b_xhi = cell_row_x[cr]
+            bands.append((b_start, b_end, b_xlo, b_xhi))
+
+            # Fall back to full refresh when total changed height or band count is large.
+            total_h = sum(min(epd.height, (be + 1) * cell_h) - bs * cell_h
+                          for bs, be, _, _ in bands)
+            if total_h > epd.height * 0.6 or len(bands) > self._MAX_PARTIAL_SPANS:
                 self._hw_full(image)
                 return
 
-            # Group nearby dirty rows (within 2 rows) into a single span to
-            # reduce the number of display_Partial SPI calls.
-            _GAP = 2
-            rows = sorted(dirty)
-            ys, ye = rows[0], rows[0] + 1
-            xn, xx = dirty[rows[0]]
-            spans = []
-            for row in rows[1:]:
-                rn, rx = dirty[row]
-                if row <= ye + _GAP:
-                    ye = max(ye, row + 1)
-                    xn = min(xn, rn)
-                    xx = max(xx, rx)
-                else:
-                    spans.append((ys, ye, xn, xx))
-                    ys, ye, xn, xx = row, row + 1, rn, rx
-            spans.append((ys, ye, xn, xx))
+            # Collect all band patches, then flush with a single panel refresh.
+            patches = []
+            for b_start, b_end, b_xlo, b_xhi in bands:
+                y_min = b_start * cell_h
+                y_max = min(epd.height, (b_end + 1) * cell_h)
 
-            # Single display_Partial call over the bounding box of all spans —
-            # avoids a ReadBusy() wait per span.
-            y0  = spans[0][0]
-            y1  = spans[-1][1]
-            xb0 = min(s[2] for s in spans)
-            xb1 = max(s[3] for s in spans)
-            # Crop the PIL image to the dirty bounding box and convert to
-            # e-paper format (same polarity as getbuffer output).
-            crop  = image.crop((xb0 * 8, y0, (xb1 + 1) * 8, y1))
-            patch = epd.getbuffer_partial(crop)
-            epd.display_Partial(patch, xb0 * 8, y0, (xb1 + 1) * 8, y1)
+                if snap_x:
+                    cw = self._cell_w
+                    x_start = (b_xlo // cw) * cw
+                    x_end   = ((b_xhi // cw) + 1) * cw
+                    x_start = (x_start // 8) * 8
+                    x_end   = min(epd.width, ((x_end + 7) // 8) * 8)
+                else:
+                    x_start = b_xlo          # already byte-aligned (pcol * 8)
+                    x_end   = min(epd.width, b_xhi + 1)  # b_xhi+1 is byte-aligned
+
+                # Slice band rows directly from the already-converted buffer —
+                # avoids PIL crop + convert('1') + inversion per band.
+                x_b0 = x_start // 8
+                band_w = x_end // 8 - x_b0
+                band = bytearray(band_w * (y_max - y_min))
+                out = 0
+                for row in range(y_min, y_max):
+                    src = row * row_bytes + x_b0
+                    band[out:out + band_w] = buf[src:src + band_w]
+                    out += band_w
+                patches.append((band, x_start, y_min, x_end, y_max))
+
+            epd.display_Partial_multi(patches)
+
+            if record_partial_refresh(self._partial_refresh_limit):
+                self._hw_full(image)
+                record_full_refresh()
 
         except IOError as e:
             logging.error('E-ink partial refresh error: %s', e)
+            self._partial_ready = False
+            self._prev_buf      = None
 
     def _hw_sleep(self):
         epd = self._epd_instance()

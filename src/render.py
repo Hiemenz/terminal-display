@@ -205,18 +205,22 @@ def render(stats: dict, config: dict) -> Image.Image:
             d.text((rx, ry), line, font=f_small, fill=fg)
             ry += ROW_H - 4
 
-    # QR code (SSH address) — bottom-right of right column, before dark inversion
+    # QR code (config URL) — bottom-right of right column, before dark inversion
     primary_ip = stats.get('primary_ip', '')
-    qr_size = 100
     if primary_ip and _HAS_QRCODE and config.get('show_qr_code', True):
         try:
             port = config.get('preview_server_port', 8080)
-            qr_url = f'http://{primary_ip}:{port}'
-            qr_img = _qrcode.make(qr_url).convert('L')
-            qr_img = qr_img.resize((qr_size, qr_size), Image.NEAREST)
-            # Place just above bottom bar in the right column
-            qr_x = W - PAD - qr_size
-            qr_y = H - 18 - qr_size - 4
+            qr_url = f'http://{primary_ip}:{port}/config'
+            qr = _qrcode.QRCode(
+                error_correction=_qrcode.constants.ERROR_CORRECT_L,
+                box_size=4, border=2,
+            )
+            qr.add_data(qr_url)
+            qr.make(fit=True)
+            qr_img = qr.make_image(fill_color='black', back_color='white').get_image().convert('L')
+            sz = qr_img.width
+            qr_x = W - PAD - sz
+            qr_y = H - 18 - sz - 4
             img.paste(qr_img, (qr_x, qr_y))
         except Exception:
             pass
@@ -267,17 +271,24 @@ def render_screensaver(image_path: str, qr_url: str, config: dict) -> Image.Imag
             pass
 
     if qr_url and _HAS_QRCODE:
-        qr_size = 140
         try:
-            qr_img = _qrcode.make(qr_url).convert('L')
-            qr_img = qr_img.resize((qr_size, qr_size), Image.NEAREST)
-            qr_x = W - PAD - qr_size
-            qr_y = PAD
+            qr = _qrcode.QRCode(
+                error_correction=_qrcode.constants.ERROR_CORRECT_L,
+                box_size=5, border=2,
+            )
+            qr.add_data(qr_url)
+            qr.make(fit=True)
+            qr_img = qr.make_image(fill_color='black', back_color='white').get_image().convert('L')
+            qr_size = qr_img.width
             box_pad = 8
+            label_h = 18
+            # Bottom-right corner, leaving room for the label below the QR.
+            qr_x = W - PAD - qr_size
+            qr_y = H - PAD - qr_size - box_pad - label_h
             d = ImageDraw.Draw(img)
             d.rectangle(
                 [qr_x - box_pad, qr_y - box_pad,
-                 qr_x + qr_size + box_pad, qr_y + qr_size + box_pad + 18],
+                 qr_x + qr_size + box_pad, qr_y + qr_size + box_pad + label_h],
                 fill=_WHITE,
             )
             img.paste(qr_img, (qr_x, qr_y))

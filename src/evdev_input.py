@@ -215,7 +215,8 @@ class EvdevKeyboard:
         return self._dev.fileno()
 
     def read(self) -> bytes:
-        """Read all pending events and return resulting terminal bytes."""
+        """Read all pending events and return resulting terminal bytes.
+        Raises OSError if the device is disconnected."""
         out = bytearray()
         try:
             for event in self._dev.read():
@@ -224,6 +225,8 @@ class EvdevKeyboard:
                     out.extend(chunk)
         except BlockingIOError:
             pass
+        except OSError:
+            raise
         except Exception as e:
             logger.debug('evdev read error: %s', e)
         return bytes(out)
