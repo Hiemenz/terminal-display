@@ -66,13 +66,24 @@ _CONFIG_SCHEMA = [
     ['Terminal', [
         ['terminal_font_size',                  'select', 'Font Size',            [8, 10, 12, 14, 16, 18, 20]],
         ['terminal_dark_mode',                  'bool',   'Dark Mode',            'Inherits global Dark Mode if off'],
+        ['terminal_cursor_style',               'select', 'Cursor Style',         ['block', 'underline']],
         ['terminal_show_qr',                    'bool',   'Show QR Code',         'URL QR in terminal corner'],
+        ['terminal_prompt_custom',              'bool',   'Custom Prompt',        'Override shell PS1 with parts below'],
+        ['terminal_prompt_show_user',           'bool',   'Prompt: User',         None],
+        ['terminal_prompt_show_host',           'bool',   'Prompt: Host',         None],
+        ['terminal_prompt_show_cwd',            'bool',   'Prompt: Dir',          None],
+        ['terminal_prompt_show_git',            'bool',   'Prompt: Git Branch',   None],
+        ['terminal_start_dir',                  'str',    'Start Directory',      "home, last, root, or a path"],
         ['terminal_idle_timeout',               'int',    'Idle Timeout (s)',      '0 = disabled'],
         ['terminal_full_refresh_interval',      'int',    'Full Refresh (s)',      '0 = disabled'],
         ['terminal_use_tmux',                   'bool',   'Use tmux',              None],
         ['terminal_tmux_session',               'str',    'tmux Session',          None],
         ['terminal_keyboard_prefer_bluetooth',  'bool',   'Prefer BT Keyboard',   'Rank Bluetooth keyboards first'],
         ['terminal_hq_render',                  'bool',   'HQ Render',             '2× supersample → sharper text'],
+        ['terminal_region_flash',               'bool',   'Region Flash',          'Flash only the changed rows, not the whole panel'],
+        ['terminal_full_refresh_interval',      'int',    'Full Flash Interval',   'Seconds between whole-panel flashes (0 = off)'],
+        ['terminal_flash_idle_gap',             'int',    'Flash Idle Gap',        'Wait for this quiet gap before the full flash'],
+        ['terminal_du_adaptive',                'bool',   'Adaptive DU',           'More DU frames for heavy/inverse content'],
         ['terminal_split_view',                 'bool',   'Split View',            '600 px terminal + 200 px sidebar'],
         ['terminal_status_bar_extras',          'bool',   'Status Bar Extras',     'Time, CWD, git branch'],
         ['terminal_status_bar_compact',         'bool',   'Compact Status Bar',    'Short labels, no uptime/sizes'],
@@ -1332,9 +1343,34 @@ def _get_wifi_info() -> dict:
         return {'ssid': ssid, 'qr_url': ''}
 
 
+_BEAM_HTML = '''\
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Beamed screen</title><style>
+body{margin:0;background:#0d0d0d;color:#e2e2e2;
+font-family:-apple-system,BlinkMacSystemFont,sans-serif}
+header{position:sticky;top:0;display:flex;gap:10px;align-items:center;
+padding:12px 16px;background:#161616;border-bottom:1px solid #2a2a2a}
+h1{flex:1;font-size:16px;margin:0}
+button{background:#3b82f6;color:#fff;border:0;border-radius:8px;
+padding:8px 14px;font-size:14px}
+pre{margin:0;padding:16px;white-space:pre-wrap;word-break:break-word;
+font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
+</style></head><body><header><h1>Beamed screen</h1>
+<button onclick="navigator.clipboard.writeText(document.getElementById('t').textContent)">Copy</button>
+</header><pre id="t">__TEXT__</pre></body></html>'''
+
+
+def _render_beam_page(text: str) -> str:
+    """A minimal page showing the beamed terminal text with a copy button."""
+    import html as _html
+    return _BEAM_HTML.replace('__TEXT__', _html.escape(text))
+
+
 def _make_handler(bmp_path: str, input_queue: queue.Queue,
                   activity_ref: List[float], photos_dir: str, config_path: str = '',
-                  clipboard_path: str = '', display_queue: queue.Queue = None):
+                  clipboard_path: str = '', display_queue: queue.Queue = None,
+                  beam_ref: List[str] = None):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             activity_ref[0] = time.time()
@@ -1364,6 +1400,10 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             elif path == '/clipboard/list':
                 items = _load_clipboard_json(clipboard_path) if clipboard_path else []
                 self._respond(200, 'application/json', json.dumps(items).encode())
+            elif path == '/beam':
+                text = (beam_ref[0] if beam_ref else '') or '(nothing beamed yet)'
+                self._respond(200, 'text/html; charset=utf-8',
+                              _render_beam_page(text).encode())
             else:
                 self._respond(404, 'text/plain', b'Not found')
 
@@ -1702,6 +1742,11 @@ class PreviewServer:
         self.input_queue:   queue.Queue = queue.Queue()
         self.display_queue: queue.Queue = queue.Queue()
         self._activity_ref: List[float] = [time.time()]
+        self._beam_ref:     List[str] = ['']   # latest "beam to phone" text
+
+    def set_beam_text(self, text: str):
+        """Store the text shown at /beam (called by the app on beam-to-phone)."""
+        self._beam_ref[0] = text or ''
 
     @property
     def last_activity(self) -> float:
@@ -1714,6 +1759,7 @@ class PreviewServer:
             self._activity_ref, self._photos_dir, self._config_path,
             clipboard_path=self._clipboard_path,
             display_queue=self.display_queue,
+            beam_ref=self._beam_ref,
         )
         self._server = HTTPServer(('', self._port), handler)
         self._server.allow_reuse_address = True
