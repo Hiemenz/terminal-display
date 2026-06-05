@@ -207,6 +207,7 @@ _SETTINGS_SCHEMA = [
     ('terminal_font_size',            'select', 'Font Size',        [8, 10, 12, 14, 16, 18, 20]),
     ('terminal_font_path',            'select', 'Font',             '__FONTS__'),
     ('terminal_split_view',           'bool',   'Split View',       None),
+    ('screensaver_sleep_minutes',     'select', 'Sleep After (min)', [0, 5, 10, 15, 30, 60]),
     ('terminal_start_dir',            'select', 'Start Dir',        ['home', 'last', 'root']),
     ('terminal_prompt_custom',        'bool',   'Custom Prompt',    None),
     ('terminal_prompt_show_user',     'bool',   'Prompt: User',     None),
@@ -219,6 +220,7 @@ _SETTINGS_SCHEMA = [
 _SETTINGS_LIVE = {
     'terminal_cursor_style', 'terminal_show_qr', 'terminal_dark_mode',
     'terminal_font_size', 'terminal_font_path', 'terminal_split_view',
+    'screensaver_sleep_minutes',
 }
 # Shell-level settings only affect newly-spawned shells, so saving them
 # restarts the service to respawn. (Everything not in _SETTINGS_LIVE.)
@@ -279,7 +281,11 @@ class EinkTerminal:
         # use); force it anyway at 2× the interval.
         self._flash_idle_gap = config.get('terminal_flash_idle_gap', 30)
         self._needs_periodic_flash = False   # set after a content partial
-        self._idle_timeout = config.get('terminal_idle_timeout', 0)
+        # Idle → screensaver + panel deep-sleep. screensaver_sleep_minutes (in
+        # minutes, editable on-device) takes precedence over the legacy seconds.
+        _sleep_min = config.get('screensaver_sleep_minutes')
+        self._idle_timeout = (int(_sleep_min) * 60 if _sleep_min is not None
+                              else config.get('terminal_idle_timeout', 0))
         self._split_view  = config.get('terminal_split_view', False)
         self._status_extras  = config.get('terminal_status_bar_extras', True)
         self._cursor_style   = config.get('terminal_cursor_style', 'block')
@@ -1280,6 +1286,8 @@ class EinkTerminal:
             if bool(value) != self._split_view:
                 self._split_view = bool(value)
                 self._reflow_shell()
+        elif key == 'screensaver_sleep_minutes':
+            self._idle_timeout = int(value) * 60
         # terminal_show_qr: render reads self._config — no attribute to update.
 
     def _settings_save(self):

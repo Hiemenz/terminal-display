@@ -113,8 +113,14 @@ terminal_tmux_session: eink
 # with tmux, use Ctrl+B [ to enter copy mode).
 terminal_scrollback: 500
 
-# Idle screensaver: switch to stats after N seconds of no keyboard activity.
-# Set to 0 to disable.
+# Minutes of no keyboard activity before the terminal switches to the
+# screensaver AND deep-sleeps the e-ink panel (the image is retained with no
+# power; any keypress wakes it). 0 = never sleep. This takes precedence over
+# terminal_idle_timeout below and is editable from the on-display config editor.
+screensaver_sleep_minutes: 15
+
+# (legacy, seconds) Idle timeout — used only if screensaver_sleep_minutes is
+# unset. Set to 0 to disable.
 terminal_idle_timeout: 900
 
 # (removed — idle refreshes are no longer done; the display sleeps on screensaver instead)

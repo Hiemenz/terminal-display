@@ -97,6 +97,7 @@ _CONFIG_SCHEMA = [
         ['terminal_alert_ssh_logins',           'bool',   'SSH Login Alerts',      None],
     ]],
     ['Screensaver', [
+        ['screensaver_sleep_minutes',   'select', 'Sleep After (min)',    [0, 5, 10, 15, 30, 60]],
         ['screensaver_enabled',         'bool',   'Enabled',              None],
         ['screensaver_idle_timeout',    'int',    'Idle Timeout (s)',      'Before screensaver activates'],
         ['screensaver_mode',            'select', 'Mode',                 ['static', 'cycle', 'mlb']],
