@@ -12,6 +12,7 @@ Features:
   - Split view: 600px terminal + 200px live stats sidebar
 
 Hotkeys:
+  F6        — command palette (first entry opens the on-display config editor)
   F9        — decrease font size (−2 pt)
   F12       — increase font size (+2 pt)
   F10       — force full display refresh (clear ghosting)
@@ -21,14 +22,17 @@ Hotkeys:
   Ctrl+C    — kill foreground process (forwarded normally)
 """
 import fcntl
+import getpass
 import json
 import logging
 import os
+import pwd
 from dataclasses import dataclass
 import pty
 import queue as _queue
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -43,12 +47,14 @@ import tty
 import pyte
 
 from alert_monitor import AlertMonitor
+from PIL import ImageDraw
 from terminal_renderer import (
     render_screen, render_screen_partial, render_mini_stats, terminal_dimensions,
-    TERMINAL_H, SPLIT_TERMINAL_W,
+    _find_mono_font, TERMINAL_H, SPLIT_TERMINAL_W,
 )
 from display_eink import EinkDriver
 from preview_server import start_if_enabled as _start_preview
+from preview_server import _save_config_values
 from evdev_input import EvdevKeyboard, find_keyboard
 
 logger = logging.getLogger(__name__)
@@ -80,6 +86,23 @@ def _fmt_speed(bps: float) -> str:
     elif mbps < 10.0:
         return f'{mbps:.1f} Mbps'
     return f'{mbps:.0f} Mbps'
+
+
+def _get_uptime() -> str:
+    """System uptime as 'Xd Yh Zm' (drops leading zero units). Cheap: reads /proc."""
+    try:
+        with open('/proc/uptime') as f:
+            secs = int(float(f.read().split()[0]))
+    except Exception:
+        return ''
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    if days:
+        return f'{days}d {hours}h {mins}m'
+    if hours:
+        return f'{hours}h {mins}m'
+    return f'{mins}m'
 
 
 def _filter_pty_output(data: bytes, pty_master_fd) -> bytes:
@@ -172,6 +195,47 @@ _F6   = b'\x1b[17~'   # command palette
 _F11  = b'\x1b[23~'
 
 _POWER_ITEMS = ['  Shutdown', '  Reboot', '  Cancel']
+
+# On-display config editor (opened from the F6 command palette). Each entry is
+# (config_key, type, label, options). Only bool/select are editable here so the
+# whole thing is keyboard-navigable on the e-ink panel without text entry.
+# Anything more exotic stays in the web editor at /config.
+_SETTINGS_SCHEMA = [
+    ('terminal_cursor_style',         'select', 'Cursor',          ['block', 'underline']),
+    ('terminal_show_qr',              'bool',   'QR Code',          None),
+    ('terminal_dark_mode',            'bool',   'Dark Mode',        None),
+    ('terminal_font_size',            'select', 'Font Size',        [8, 10, 12, 14, 16, 18, 20]),
+    ('terminal_font_path',            'select', 'Font',             '__FONTS__'),
+    ('terminal_split_view',           'bool',   'Split View',       None),
+    ('screensaver_sleep_minutes',     'select', 'Sleep After (min)', [0, 5, 10, 15, 30, 60]),
+    ('terminal_start_dir',            'select', 'Start Dir',        ['home', 'last', 'root']),
+    ('terminal_prompt_custom',        'bool',   'Custom Prompt',    None),
+    ('terminal_prompt_show_user',     'bool',   'Prompt: User',     None),
+    ('terminal_prompt_show_host',     'bool',   'Prompt: Host',     None),
+    ('terminal_prompt_show_cwd',      'bool',   'Prompt: Dir',      None),
+    ('terminal_prompt_show_git',      'bool',   'Prompt: Git',      None),
+]
+
+# Display-level settings take effect instantly on Save (no service restart).
+_SETTINGS_LIVE = {
+    'terminal_cursor_style', 'terminal_show_qr', 'terminal_dark_mode',
+    'terminal_font_size', 'terminal_font_path', 'terminal_split_view',
+    'screensaver_sleep_minutes',
+}
+# Shell-level settings only affect newly-spawned shells, so saving them
+# restarts the service to respawn. (Everything not in _SETTINGS_LIVE.)
+_SETTINGS_SHELL = {
+    'terminal_start_dir', 'terminal_prompt_custom', 'terminal_prompt_show_user',
+    'terminal_prompt_show_host', 'terminal_prompt_show_cwd',
+    'terminal_prompt_show_git', 'terminal_prompt_symbol',
+}
+_SETTINGS_OPEN = '⚙ Settings (e-ink config)'
+_SNIPPETS_OPEN = '✎ Snippets (saved commands)'
+_BIGTEXT_OPEN  = '🔍 Big text (read mode)'
+_BEAM_OPEN     = '📱 Beam screen to phone'
+_HUD_TOGGLE    = '📊 Toggle refresh stats HUD'
+# Palette actions that open an overlay / run in-app instead of typing a command.
+_PALETTE_ACTIONS = (_SETTINGS_OPEN, _SNIPPETS_OPEN, _BIGTEXT_OPEN, _BEAM_OPEN, _HUD_TOGGLE)
 _F12  = b'\x1b[24~'
 _CTRL_LEFT  = b'\x1b[1;5D'   # cycle tabs
 _CTRL_RIGHT = b'\x1b[1;5C'
@@ -211,17 +275,46 @@ class EinkTerminal:
         self._font_size = config.get('terminal_font_size', 14)
         self._font_path = config.get('terminal_font_path', '')
         self._dark_mode = config.get('terminal_dark_mode', config.get('dark_mode', False))
-        self._full_refresh_interval = config.get('terminal_full_refresh_interval', 60)
-        self._idle_timeout = config.get('terminal_idle_timeout', 0)
+        self._full_refresh_interval = config.get('terminal_full_refresh_interval', 300)
+        # Smart flash: once the interval elapses, wait for this many seconds of
+        # no typing before the whole-panel flash (so it never interrupts active
+        # use); force it anyway at 2× the interval.
+        self._flash_idle_gap = config.get('terminal_flash_idle_gap', 30)
+        self._needs_periodic_flash = False   # set after a content partial
+        # Idle → screensaver + panel deep-sleep. screensaver_sleep_minutes (in
+        # minutes, editable on-device) takes precedence over the legacy seconds.
+        _sleep_min = config.get('screensaver_sleep_minutes')
+        self._idle_timeout = (int(_sleep_min) * 60 if _sleep_min is not None
+                              else config.get('terminal_idle_timeout', 0))
         self._split_view  = config.get('terminal_split_view', False)
         self._status_extras  = config.get('terminal_status_bar_extras', True)
+        self._cursor_style   = config.get('terminal_cursor_style', 'block')
+
+        # Custom shell prompt (PS1) injected after the shell's rc loads. Each
+        # part can be toggled on/off from config / the on-display editor.
+        self._prompt_custom    = config.get('terminal_prompt_custom', False)
+        self._prompt_show_user = config.get('terminal_prompt_show_user', True)
+        self._prompt_show_host = config.get('terminal_prompt_show_host', True)
+        self._prompt_show_cwd  = config.get('terminal_prompt_show_cwd', True)
+        self._prompt_show_git  = config.get('terminal_prompt_show_git', True)
+        self._prompt_symbol    = config.get('terminal_prompt_symbol', '$')
+
+        # Where new shells start: 'home', 'root', 'last' (resume previous dir),
+        # or an explicit path. 'last' is persisted to data/last_cwd.txt.
+        self._start_dir_pref = config.get('terminal_start_dir', 'home')
 
         # tmux
         self._use_tmux     = config.get('terminal_use_tmux', False) and bool(shutil.which('tmux'))
         self._tmux_session = config.get('terminal_tmux_session', 'eink')
 
         self._driver      = EinkDriver(local=local,
-                                       partial_refresh_limit=config.get('partial_refresh_before_full', 30))
+                                       partial_refresh_limit=config.get('partial_refresh_before_full', 30),
+                                       flicker_free=config.get('terminal_flicker_free_partial', False),
+                                       region_flash=config.get('terminal_region_flash', True),
+                                       du_adaptive=config.get('terminal_du_adaptive', True),
+                                       du_frames_text=config.get('terminal_du_frames_text', 0x14),
+                                       du_frames_heavy=config.get('terminal_du_frames_heavy', 0x1A),
+                                       du_heavy_threshold=config.get('terminal_du_heavy_threshold', 0.22))
         self._screen      = None
         self._stream      = None
         self._pty_master  = None
@@ -234,13 +327,25 @@ class EinkTerminal:
         self._stdin_fd    = sys.stdin.fileno()
         self._old_tty     = None
 
-        # Status bar item visibility
+        # Status bar item visibility. 'host' is the machine name shown alongside
+        # the working directory; falls back to the system hostname.
+        _host = config.get('device_label', '') or socket.gethostname()
         self._bar_config = {
+            'show_host':  config.get('terminal_status_bar_show_host',  True),
             'show_time':  config.get('terminal_status_bar_show_time',  True),
             'show_cwd':   config.get('terminal_status_bar_show_cwd',   True),
             'show_ip':    config.get('terminal_status_bar_show_ip',    True),
             'show_speed': config.get('terminal_status_bar_show_speed', True),
+            'show_uptime': config.get('terminal_status_bar_show_uptime', True),
+            'host':       _host,
         }
+
+        # Status bar is deprioritized: it is only repainted (and thus refreshed
+        # on the panel) at most once per this interval, so frequent time/net/
+        # uptime ticks don't drive a display refresh every few seconds.
+        self._status_bar_interval = config.get('terminal_status_bar_interval', 300)
+        self._last_status_render  = 0.0   # monotonic of last status-bar repaint
+        self._status_force        = False # set when an alert change must update now
 
         # evdev keyboard (preferred over stdin when a desktop is running)
         kbd_path = config.get('terminal_keyboard_device', 'auto')
@@ -286,6 +391,7 @@ class EinkTerminal:
         # Text message (send-to-display) state
         self._in_text_message = False
         self._display_queue = None   # set in run() after server starts
+        self._preview_server = None  # set in run() after server starts
 
         # Tab management
         self._tabs: list = []
@@ -317,6 +423,27 @@ class EinkTerminal:
         self._palette_active = False
         self._palette_items: list = []
         self._palette_idx: int = 0
+
+        # On-display config editor (Settings overlay)
+        self._settings_active = False
+        self._settings_idx: int = 0
+        self._settings_pending: dict = {}   # key -> staged value (not yet saved)
+
+        # Snippets picker (saved_commands.txt only — curated, no history)
+        self._snippets_active = False
+        self._snippets_items: list = []
+        self._snippets_idx: int = 0
+
+        # Refresh-stats debug HUD (toggled from the command palette)
+        self._show_refresh_hud = False
+
+        # "Big text" momentary read mode — any key restores the prior font.
+        self._big_text_active = False
+        self._big_text_prev_font: int = 0
+
+        # Beam-to-phone: a pinned QR linking to the captured screen text.
+        self._beam_url: str = ''
+        self._beam_until_mono: float = 0.0
 
         # Clipboard picker
         self._clipboard: list = []
@@ -354,18 +481,272 @@ class EinkTerminal:
 
     def _spawn_shell(self, tmux_session: str = None):
         session = tmux_session if tmux_session is not None else self._tmux_session
+        # Resolve everything that needs the filesystem in the parent, before the
+        # fork, so the forked child only execs.
+        start_dir = self._resolve_start_dir()
+        promptcmd = self._build_prompt_command()   # None unless custom prompt is on
         pid, master_fd = pty.fork()
         if pid == 0:
             os.environ['TERM'] = 'xterm-256color'
             if self._use_tmux:
-                os.execvp('tmux', ['tmux', 'new-session', '-A', '-s', session])
+                os.execvp('tmux', self._tmux_launch_argv(session, start_dir, promptcmd))
             else:
-                shell = os.environ.get('SHELL', '/bin/bash')
-                os.execvp(shell, [shell])
+                if start_dir:
+                    try:
+                        os.chdir(start_dir)
+                    except OSError:
+                        pass
+                if promptcmd:
+                    # An interactive shell wired up with our custom prompt. The
+                    # leading 'exec' replaces this sh, so no extra layer remains.
+                    os.execvp('/bin/sh', ['/bin/sh', '-c', promptcmd])
+                shell = os.environ.get('SHELL') or pwd.getpwuid(os.getuid()).pw_shell or '/bin/bash'
+                # Start as a login shell (argv[0] prefixed with '-') so it behaves
+                # like a normal console terminal: sources /etc/profile + ~/.profile,
+                # sets PATH, shows the user's real prompt, prints MOTD/last-login.
+                argv0 = '-' + os.path.basename(shell)
+                os.execvp(shell, [argv0])
             os._exit(1)
         self._child_pid = pid
         self._pty_master = master_fd
         self._sync_pty_winsize()
+
+    def _tmux_launch_argv(self, session: str, start_dir: str, promptcmd: str) -> list:
+        """argv for `tmux new-session -A` (attach-or-create).
+
+        When a custom prompt is active we run our custom-prompt shell as the pane
+        command AND set it as the session's default-command, so every future
+        window/pane (split, new-window, …) gets the same prompt — not just the
+        first one. Attaching an existing session keeps its panes/cwd ('last')."""
+        argv = ['tmux', 'new-session', '-A', '-s', session]
+        if start_dir:
+            argv += ['-c', start_dir]
+        if promptcmd:
+            # initial pane command, then default-command for subsequent panes.
+            argv += [promptcmd, ';', 'set-option', 'default-command', promptcmd]
+        return argv
+
+    # ─── Start directory ──────────────────────────────────────────────────────
+
+    @property
+    def _last_cwd_file(self) -> str:
+        return os.path.join(_REPO_ROOT, 'data', 'last_cwd.txt')
+
+    def _resolve_start_dir(self) -> str | None:
+        """Turn the terminal_start_dir preference into a concrete directory.
+        Falls back to $HOME for anything missing/invalid. None = don't force."""
+        pref = str(self._start_dir_pref or 'home').strip()
+        home = os.path.expanduser('~')
+        if pref == 'home':
+            return home
+        if pref == 'root':
+            return '/'
+        if pref == 'last':
+            return self._read_last_cwd() or home
+        path = os.path.expanduser(pref)
+        return path if os.path.isdir(path) else home
+
+    def _read_last_cwd(self) -> str | None:
+        try:
+            d = open(self._last_cwd_file).read().strip()
+            return d if d and os.path.isdir(d) else None
+        except OSError:
+            return None
+
+    def _save_last_cwd(self):
+        """Persist the active shell's current directory so 'last' can resume it
+        after a restart/reboot. tmux: query the active pane; else read /proc."""
+        d = None
+        try:
+            if self._use_tmux and shutil.which('tmux'):
+                r = subprocess.run(
+                    ['tmux', 'display-message', '-p', '-t', self._tmux_session,
+                     '#{pane_current_path}'],
+                    capture_output=True, text=True, timeout=1)
+                d = r.stdout.strip()
+            elif self._child_pid:
+                d = os.readlink('/proc/%d/cwd' % self._child_pid)
+        except Exception:
+            d = None
+        if d and os.path.isdir(d):
+            try:
+                os.makedirs(os.path.dirname(self._last_cwd_file), exist_ok=True)
+                with open(self._last_cwd_file, 'w') as f:
+                    f.write(d + '\n')
+            except OSError:
+                pass
+
+    # ─── Custom shell prompt (bash / zsh / fish) ──────────────────────────────
+
+    # Per-shell prompt escapes for the user@host:cwd segments. bash and zsh
+    # share the git command substitution (POSIX $()); fish is built separately.
+    _PROMPT_ESC = {
+        'bash': {'user': r'\u', 'host': r'\h', 'cwd': r'\w'},
+        'zsh':  {'user': '%n',  'host': '%m',  'cwd': '%~'},
+    }
+
+    def _detect_shell(self) -> str:
+        """Basename of the user's login shell: 'bash', 'zsh', 'fish', …"""
+        shell = os.environ.get('SHELL') or ''
+        if not shell:
+            try:
+                shell = pwd.getpwuid(os.getuid()).pw_shell
+            except Exception:
+                shell = ''
+        return os.path.basename(shell or '/bin/bash')
+
+    def _build_prompt_string(self, kind: str) -> str:
+        """PS1/PROMPT string for a POSIX-prompt shell (bash or zsh) from the
+        enabled parts. Quoted so the shell expands the escapes + git command
+        substitution fresh on each prompt."""
+        esc = self._PROMPT_ESC[kind]
+        ident = ''
+        if self._prompt_show_user:
+            ident += esc['user']
+        if self._prompt_show_host:
+            ident += ('@' if ident else '') + esc['host']
+        segs = []
+        if ident:
+            segs.append(ident)
+        if self._prompt_show_cwd:
+            segs.append(esc['cwd'])
+        prompt = ':'.join(segs)
+        if self._prompt_show_git:
+            # Show " (branch)" only inside a git work tree; silent otherwise.
+            prompt += r'$(__b=$(git branch --show-current 2>/dev/null); [ -n "$__b" ] && printf " (%s)" "$__b")'
+        sym = self._prompt_symbol or '$'
+        return (prompt + ' ' if prompt else '') + sym + ' '
+
+    def _build_ps1(self) -> str:
+        """Bash PS1 (kept as a named helper; preview/tests use it)."""
+        return self._build_prompt_string('bash')
+
+    def _build_fish_prompt(self) -> str:
+        """A `function fish_prompt … end` definition (fish has no PS1)."""
+        ident = []
+        if self._prompt_show_user:
+            ident.append('$USER')
+        if self._prompt_show_host:
+            ident.append('(prompt_hostname)')
+        id_str = "'@'".join(ident)
+        parts = []
+        if id_str:
+            parts.append(id_str)
+        if self._prompt_show_cwd:
+            parts.append('(prompt_pwd)')
+        head = "':'".join(parts)
+        sym = (self._prompt_symbol or '$').replace("'", r"\'")
+        lines = ['function fish_prompt']
+        if head:
+            lines.append('    echo -n ' + head)
+        if self._prompt_show_git:
+            lines.append('    set -l __b (git branch --show-current 2>/dev/null)')
+            lines.append('    test -n "$__b"; and echo -n " ($__b)"')
+        lines.append("    echo -n ' %s '" % sym)
+        lines.append('end')
+        return '\n'.join(lines)
+
+    def _build_prompt_command(self) -> str | None:
+        """Shell command that launches an interactive shell wired up with our
+        custom prompt — used both as the tmux pane command / default-command and
+        (via `sh -c`) for the non-tmux exec. None when the custom prompt is off.
+
+        Honors the user's actual $SHELL: zsh and fish get their native prompt
+        mechanism; everything else (and unknown shells) uses bash, since the
+        POSIX prompt escapes are bash syntax."""
+        if not self._prompt_custom:
+            return None
+        shell = self._detect_shell()
+        if shell == 'zsh' and shutil.which('zsh'):
+            zdotdir = self._write_zsh_dotdir()
+            if zdotdir:
+                return 'exec env ZDOTDIR=%s zsh -i' % shlex.quote(zdotdir)
+        elif shell == 'fish' and shutil.which('fish'):
+            return 'exec fish -i -C %s' % shlex.quote(self._build_fish_prompt())
+        rc = self._write_bash_rcfile()
+        if rc:
+            return 'exec bash --rcfile %s -i' % shlex.quote(rc)
+        return None
+
+    def _prompt_rcfile_path(self) -> str:
+        return os.path.join(_REPO_ROOT, 'data', 'eink_bashrc')
+
+    def _write_bash_rcfile(self) -> str | None:
+        """bash rcfile that replays login-shell startup (so PATH, aliases, etc.
+        match a normal terminal), then pins our PS1 last. Returns its path, or
+        None on write failure. Used as `bash --rcfile <path> -i`."""
+        ps1 = self._build_prompt_string('bash').replace("'", "'\\''")
+        content = (
+            "# Auto-generated by the e-ink terminal — regenerated on launch from\n"
+            "# config.yaml. Replays login-shell startup, then pins the custom PS1.\n"
+            "[ -r /etc/profile ] && . /etc/profile\n"
+            'for __f in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"; do\n'
+            '    [ -r "$__f" ] && { . "$__f"; break; }\n'
+            "done\n"
+            "PS1='" + ps1 + "'\n"
+        )
+        path = self._prompt_rcfile_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as f:
+                f.write(content)
+        except OSError:
+            return None
+        return path
+
+    def _write_zsh_dotdir(self) -> str | None:
+        """Create a ZDOTDIR whose .zshrc sources the user's real one then pins
+        PROMPT. .zshenv is chained back too so login env is preserved despite the
+        overridden ZDOTDIR. Returns the dir, or None on failure."""
+        prompt = self._build_prompt_string('zsh').replace("'", "'\\''")
+        d = os.path.join(_REPO_ROOT, 'data', 'eink_zdotdir')
+        try:
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, '.zshenv'), 'w') as f:
+                f.write('[ -r "$HOME/.zshenv" ] && source "$HOME/.zshenv"\n')
+            with open(os.path.join(d, '.zshrc'), 'w') as f:
+                f.write(
+                    "# Auto-generated by the e-ink terminal.\n"
+                    '[ -r "$HOME/.zshrc" ] && source "$HOME/.zshrc"\n'
+                    "setopt prompt_subst\n"
+                    "PROMPT='" + prompt + "'\n"
+                )
+        except OSError:
+            return None
+        return d
+
+    # ─── Prompt preview (shown live in the settings editor) ────────────────────
+
+    def _prompt_preview(self) -> str:
+        """A representative expansion of the configured prompt parts, using real
+        user/host but placeholder dir/branch — so the editor can show the effect
+        before saving. Reads staged (pending) values via _settings_value."""
+        if not self._settings_value('terminal_prompt_custom',
+                                    self._config.get('terminal_prompt_custom', False)):
+            return '(custom prompt off)'
+
+        def on(key):
+            return bool(self._settings_value(key, self._config.get(key, True)))
+
+        try:
+            user = getpass.getuser()
+        except Exception:
+            user = 'user'
+        host = socket.gethostname().split('.')[0]
+        ident = ''
+        if on('terminal_prompt_show_user'):
+            ident += user
+        if on('terminal_prompt_show_host'):
+            ident += ('@' if ident else '') + host
+        segs = [ident] if ident else []
+        if on('terminal_prompt_show_cwd'):
+            segs.append('~/project')
+        s = ':'.join(segs)
+        if on('terminal_prompt_show_git'):
+            s += ' (main)'
+        sym = self._settings_value('terminal_prompt_symbol',
+                                   self._config.get('terminal_prompt_symbol', '$')) or '$'
+        return (s + ' ' if s else '') + sym
 
     def _sync_pty_winsize(self):
         tw = SPLIT_TERMINAL_W if self._split_view else 800
@@ -493,14 +874,20 @@ class EinkTerminal:
         if new_size == self._font_size:
             return
         self._font_size = new_size
+        self._reflow_shell()
+        self._render(force_full=True)
+
+    def _reflow_shell(self):
+        """Re-derive the terminal grid (after a font-size or split-view change)
+        and tell the child shell its window resized."""
         self._init_screen()
+        self._img_cache = None   # layout changed — drop the incremental cache
         self._sync_pty_winsize()
         if self._child_pid:
             try:
                 os.kill(self._child_pid, signal.SIGWINCH)
             except ProcessLookupError:
                 pass
-        self._render(force_full=True)
 
     # ─── Tab management ──────────────────────────────────────────────────────
 
@@ -520,6 +907,16 @@ class EinkTerminal:
             except Exception:
                 pass
         return 'shell'
+
+    def _tab_indicator(self) -> str:
+        """Status-bar tab chip: '[2/3 projdir]' — the count plus the active
+        tab's short working-dir/title. Empty when only one tab is open."""
+        if len(self._tabs) <= 1:
+            return ''
+        base = f'{self._active_tab + 1}/{len(self._tabs)}'
+        tab = self._current_tab()
+        name = self._tab_title(tab) if tab else ''
+        return f'[{base} {name}]' if name else f'[{base}]'
 
     def _sync_active_tab(self):
         if self._tabs and 0 <= self._active_tab < len(self._tabs):
@@ -786,10 +1183,284 @@ class EinkTerminal:
             self._power_active = False; self._render(); return b''
         return b''
 
+    # ─── On-display config editor (Settings) ─────────────────────────────────
+
+    def _settings_value(self, key, default=None):
+        """Effective value: staged edit if present, else live config."""
+        if key in self._settings_pending:
+            return self._settings_pending[key]
+        return self._config.get(key, default)
+
+    def _settings_options(self, opts):
+        """Resolve a schema options spec to a concrete list (fonts are dynamic)."""
+        if opts == '__FONTS__':
+            return self._available_fonts()
+        return opts
+
+    def _available_fonts(self) -> list:
+        """Monospace fonts on the system (cached). '' = auto-detect."""
+        if getattr(self, '_font_choices', None) is None:
+            import glob
+            fonts, seen = [''], set()
+            for pat in ('/usr/share/fonts/truetype/**/*.ttf',
+                        '/usr/share/fonts/**/*.ttf',
+                        os.path.expanduser('~/.fonts/**/*.ttf')):
+                for p in sorted(glob.glob(pat, recursive=True)):
+                    if 'mono' in os.path.basename(p).lower() and p not in seen:
+                        seen.add(p)
+                        fonts.append(p)
+            self._font_choices = fonts[:12]
+        return self._font_choices
+
+    def _settings_display_value(self, key, val) -> str:
+        if key == 'terminal_font_path':
+            return os.path.splitext(os.path.basename(val))[0] if val else 'auto'
+        return str(val)
+
+    def _settings_rows(self) -> list:
+        """Build the overlay list: one row per setting + Save/Cancel actions."""
+        rows = []
+        for key, typ, label, _opts in _SETTINGS_SCHEMA:
+            val = self._settings_value(key)
+            if typ == 'bool':
+                vstr = 'on' if val else 'off'
+            else:
+                vstr = self._settings_display_value(key, val)
+            mark = '*' if key in self._settings_pending else ' '
+            rows.append(f'{mark} {label:<16}[ {vstr} ]')
+        # Shell-level edits restart on save; display-level edits apply instantly.
+        save_label = ('  » Save & Restart' if set(self._settings_pending) & _SETTINGS_SHELL
+                      else '  » Save (apply now)')
+        rows.append(save_label)
+        rows.append('  » Cancel (discard)')
+        return rows
+
+    def _toggle_settings(self):
+        if self._settings_active:
+            self._settings_active = False
+        else:
+            self._settings_pending = {}
+            self._settings_idx = 0
+            self._settings_active = True
+            self._palette_active = self._clipboard_active = False
+            self._prockill_active = self._svcmgr_active = False
+            self._power_active = self._sshpick_active = False
+        self._render()
+
+    def _settings_change(self, delta: int):
+        """Cycle/toggle the value of the setting under the cursor."""
+        if self._settings_idx >= len(_SETTINGS_SCHEMA):
+            return  # on an action row
+        key, typ, _label, opts = _SETTINGS_SCHEMA[self._settings_idx]
+        cur = self._settings_value(key)
+        if typ == 'bool':
+            self._settings_pending[key] = not bool(cur)
+        elif typ == 'select':
+            opts = self._settings_options(opts)
+            if opts:
+                try:
+                    i = opts.index(cur)
+                except ValueError:
+                    i = 0
+                self._settings_pending[key] = opts[(i + delta) % len(opts)]
+        self._render()
+
+    def _apply_live(self, key, value):
+        """Apply a display-level setting to the running app immediately, so Save
+        doesn't need a jarring full restart. self._config has already been
+        updated, so QR (read from config at render time) needs nothing here."""
+        if key == 'terminal_cursor_style':
+            self._cursor_style = value
+        elif key == 'terminal_dark_mode':
+            self._dark_mode = bool(value)
+        elif key == 'terminal_font_size':
+            size = max(_MIN_FONT, min(_MAX_FONT, int(value)))
+            if size != self._font_size:
+                self._font_size = size
+                self._reflow_shell()
+        elif key == 'terminal_font_path':
+            if value != self._font_path:
+                self._font_path = value
+                self._reflow_shell()
+        elif key == 'terminal_split_view':
+            if bool(value) != self._split_view:
+                self._split_view = bool(value)
+                self._reflow_shell()
+        elif key == 'screensaver_sleep_minutes':
+            self._idle_timeout = int(value) * 60
+        # terminal_show_qr: render reads self._config — no attribute to update.
+
+    def _settings_save(self):
+        """Persist staged changes. Display-level changes apply live; shell-level
+        changes (prompt, start dir) restart the service to respawn the shell."""
+        pending = dict(self._settings_pending)
+        self._settings_active = False
+        self._settings_pending = {}
+        if not pending:
+            self._render()
+            return
+        config_path = os.path.join(_REPO_ROOT, 'config', 'config.yaml')
+        try:
+            _save_config_values(config_path, pending)
+        except Exception as e:
+            logger.warning('settings save failed: %s', e)
+        self._config.update(pending)   # keep the in-memory config current
+
+        needs_restart = bool(set(pending) & _SETTINGS_SHELL)
+        for key, value in pending.items():
+            if key in _SETTINGS_LIVE:
+                self._apply_live(key, value)
+        self._render(force_full=True)
+
+        if needs_restart:
+            try:
+                subprocess.Popen(['sudo', 'systemctl', 'restart', 'eink-display'])
+                self._running = False
+            except Exception as e:
+                logger.warning('settings restart failed: %s', e)
+
+    def _handle_settings_key(self, data: bytes) -> bytes:
+        if not self._settings_active:
+            return data
+        n_rows = len(_SETTINGS_SCHEMA) + 2  # + Save + Cancel
+        if b'\x1b[A' in data:
+            self._settings_idx = max(0, self._settings_idx - 1)
+            self._render(); return b''
+        if b'\x1b[B' in data:
+            self._settings_idx = min(n_rows - 1, self._settings_idx + 1)
+            self._render(); return b''
+        if b'\x1b[C' in data or b' ' in data:   # Right / Space — next value
+            self._settings_change(+1); return b''
+        if b'\x1b[D' in data:                   # Left — previous value
+            self._settings_change(-1); return b''
+        if b'\r' in data or b'\n' in data:
+            if self._settings_idx == len(_SETTINGS_SCHEMA):       # Save
+                self._settings_save()
+            elif self._settings_idx == len(_SETTINGS_SCHEMA) + 1: # Cancel
+                self._settings_active = False; self._render()
+            else:
+                self._settings_change(+1)                         # toggle/cycle
+            return b''
+        if b'\x1b' in data:
+            self._settings_active = False; self._render(); return b''
+        return b''
+
+    # ─── Palette actions (in-app, not shell commands) ─────────────────────────
+
+    def _run_palette_action(self, action: str):
+        if action == _SETTINGS_OPEN:
+            self._toggle_settings()
+        elif action == _SNIPPETS_OPEN:
+            self._toggle_snippets()
+        elif action == _BIGTEXT_OPEN:
+            self._enter_big_text()
+        elif action == _BEAM_OPEN:
+            self._beam_to_phone()
+        elif action == _HUD_TOGGLE:
+            self._show_refresh_hud = not self._show_refresh_hud
+            self._render(force_full=True)
+
+    # ─── Snippets picker (curated saved_commands.txt) ─────────────────────────
+
+    def _snippets_path(self) -> str:
+        return os.path.join(_REPO_ROOT, 'config', 'saved_commands.txt')
+
+    def _load_snippets(self) -> list:
+        items = []
+        try:
+            for line in open(self._snippets_path()):
+                cmd = line.strip()
+                if cmd and not cmd.startswith('#') and cmd not in items:
+                    items.append(cmd)
+        except OSError:
+            pass
+        return items
+
+    def _toggle_snippets(self):
+        if self._snippets_active:
+            self._snippets_active = False
+        else:
+            self._snippets_items = self._load_snippets()
+            self._snippets_idx = 0
+            self._snippets_active = True
+            self._palette_active = self._clipboard_active = False
+        self._render()
+
+    def _handle_snippets_key(self, data: bytes) -> bytes:
+        if not self._snippets_active:
+            return data
+        if b'\x1b[A' in data:
+            self._snippets_idx = max(0, self._snippets_idx - 1)
+            self._render(); return b''
+        if b'\x1b[B' in data:
+            self._snippets_idx = min(len(self._snippets_items) - 1, self._snippets_idx + 1)
+            self._render(); return b''
+        if b'\r' in data or b'\n' in data:
+            if self._snippets_items:
+                cmd = self._snippets_items[self._snippets_idx]
+                self._snippets_active = False
+                self._render()
+                if self._pty_master is not None:
+                    os.write(self._pty_master, (cmd + '\n').encode())
+            return b''
+        if b'\x1b' in data:
+            self._snippets_active = False; self._render(); return b''
+        return b''
+
+    # ─── Big text (momentary read mode) ───────────────────────────────────────
+
+    def _enter_big_text(self):
+        if self._big_text_active:
+            return
+        self._big_text_prev_font = self._font_size
+        big = min(_MAX_FONT, max(self._font_size + 8, 24))
+        if big == self._font_size:
+            return  # already as large as it gets
+        self._big_text_active = True
+        self._font_size = big
+        self._reflow_shell()
+        self._render(force_full=True)
+
+    def _exit_big_text(self):
+        if not self._big_text_active:
+            return
+        self._big_text_active = False
+        self._font_size = self._big_text_prev_font or self._font_size
+        self._reflow_shell()
+        self._render(force_full=True)
+
+    # ─── Beam screen to phone ─────────────────────────────────────────────────
+
+    def _screen_text(self) -> str:
+        """Plain text of the visible screen (trailing blank lines/spaces trimmed)."""
+        lines = []
+        for row_idx in range(self._screen.lines):
+            row = self._screen.buffer[row_idx]
+            line = ''.join(row[c].data for c in range(self._screen.columns))
+            lines.append(line.rstrip())
+        while lines and not lines[-1]:
+            lines.pop()
+        return '\n'.join(lines)
+
+    def _beam_to_phone(self):
+        """Capture the visible screen text, hand it to the preview server, and
+        pin a QR linking to the page that shows it (copyable on a phone)."""
+        text = self._screen_text()
+        ip = _get_local_ip()
+        port = self._config.get('preview_server_port', 8080)
+        server = getattr(self, '_preview_server', None)
+        if server is not None and ip:
+            server.set_beam_text(text)
+            self._beam_url = f'http://{ip}:{port}/beam'
+            self._beam_until_mono = time.monotonic() + 120  # show QR for 2 min
+        self._render(force_full=True)
+
     # ─── Command palette ─────────────────────────────────────────────────────
 
     def _load_palette_items(self) -> list:
-        items = []
+        # Leading entries are in-app actions (open an overlay / run in-app)
+        # rather than shell commands — handled specially in _handle_palette_key.
+        items = list(_PALETTE_ACTIONS)
         saved = os.path.join(_REPO_ROOT, 'config', 'saved_commands.txt')
         if os.path.exists(saved):
             try:
@@ -841,6 +1512,9 @@ class EinkTerminal:
             if self._palette_items:
                 cmd = self._palette_items[self._palette_idx]
                 self._palette_active = False
+                if cmd in _PALETTE_ACTIONS:
+                    self._run_palette_action(cmd)
+                    return b''
                 self._render()
                 if self._pty_master is not None:
                     os.write(self._pty_master, (cmd + '\n').encode())
@@ -1048,7 +1722,10 @@ class EinkTerminal:
             qr_url = f'http://{ip}:{port}/config' if ip else ''
 
             img = render_screensaver(image_path, qr_url, self._config)
-            self._driver.full_refresh(img)
+            # Must be a flash (ordered _FULL task): full_refresh(flash=False) only
+            # sets _pending_partial, which the sleep() below immediately cancels —
+            # the screensaver would never reach the panel.
+            self._driver.flash_refresh(img)
             self._last_image = img
             self._screensaver_show_mono = time.monotonic()
             logger.info('Screensaver activated — img=%s mode=%s', os.path.basename(image_path), mode)
@@ -1059,7 +1736,7 @@ class EinkTerminal:
     # ─── Status bar info ──────────────────────────────────────────────────────
 
     def _get_status_info(self) -> tuple:
-        """Return (time_str, cwd, git_branch), cached for _STATUS_CACHE_TTL seconds."""
+        """Return (time_str, cwd, git_branch, uptime), cached for _STATUS_CACHE_TTL seconds."""
         if not self._status_extras:
             return None
         now = time.monotonic()
@@ -1070,8 +1747,9 @@ class EinkTerminal:
         time_str = datetime.datetime.now().strftime('%H:%M')
         cwd = self._get_cwd()
         branch = self._get_git_branch(cwd) if cwd else ''
-        self._status_cache = (now, time_str, cwd, branch)
-        return time_str, cwd, branch
+        uptime = _get_uptime()
+        self._status_cache = (now, time_str, cwd, branch, uptime)
+        return time_str, cwd, branch, uptime
 
     def _get_cwd(self) -> str:
         try:
@@ -1122,13 +1800,77 @@ class EinkTerminal:
 
     # ─── Rendering ───────────────────────────────────────────────────────────
 
-    def _render(self, force_full: bool = False):
+    def _refresh_kind(self, force_full: bool, force_flash: bool,
+                      heavy_change: bool) -> str:
+        """Pick the panel update for this frame:
+          'full'    — clean whole-screen repaint, no flash (overlays, resize).
+          'flash'   — whole-panel ghost-clearing flash: the deferred periodic
+                      flash (force_flash), or to resync a near-total redraw.
+          'partial' — incremental update (the driver region-flashes changed rows
+                      on its own count-based cadence)."""
+        if force_full:
+            return 'full'
+        if force_flash or heavy_change:
+            return 'flash'
+        return 'partial'
+
+    def _periodic_flash_due(self, now: float = None) -> bool:
+        """True when the deferred whole-panel ghost-clearing flash should fire:
+        the interval has elapsed since the last full refresh, there's been
+        partial activity since, and we're either in a quiet (no-typing) gap or
+        past 2× the interval (forced so it can't be starved by constant typing)."""
+        if not self._needs_periodic_flash or self._full_refresh_interval <= 0:
+            return False
+        if now is None:
+            now = time.monotonic()
+        since = now - self._last_full_refresh_mono
+        if since < self._full_refresh_interval:
+            return False
+        quiet = (now - self._last_activity) >= self._flash_idle_gap
+        return quiet or since >= 2 * self._full_refresh_interval
+
+    def _draw_refresh_hud(self, img):
+        """Overlay a small debug box of live refresh counters (top-left)."""
+        s = self._driver.stats()
+        age = s.get('last_flash_age')
+        lines = [
+            'REFRESH HUD',
+            f"part {s['partial']}  reg {s['region']}  full {s['full']}",
+            f"bytes {s['bytes']}  du {s['du_frames']}f  font {self._font_size}",
+            f"last flash {int(age)}s ago" if age is not None else 'last flash --',
+        ]
+        fg = 255 if self._dark_mode else 0
+        bg = 0 if self._dark_mode else 255
+        draw = ImageDraw.Draw(img)
+        font = _find_mono_font('', 11)
+        pad, lh, x0, y0 = 4, 13, 4, 4
+        w = max(int(draw.textlength(ln, font=font)) for ln in lines) + pad * 2
+        h = lh * len(lines) + pad * 2
+        draw.rectangle([x0, y0, x0 + w, y0 + h], fill=bg, outline=fg)
+        y = y0 + pad
+        for ln in lines:
+            draw.text((x0 + pad, y), ln, font=font, fill=fg)
+            y += lh
+
+    def _render(self, force_full: bool = False, force_flash: bool = False):
         tw = SPLIT_TERMINAL_W if self._split_view else 800
         status_info = self._get_status_info()
         if status_info is not None:
-            tab_str = f'[{self._active_tab+1}/{len(self._tabs)}]' if len(self._tabs) > 1 else ''
-            status_info = (status_info[0], status_info[1], status_info[2], tab_str)
+            tab_str = self._tab_indicator()
+            uptime  = status_info[3] if len(status_info) > 3 else ''
+            status_info = (status_info[0], status_info[1], status_info[2], tab_str, uptime)
         alerts = self._alert_monitor.active()
+
+        # The status bar is deprioritized: only repaint it on a full render, when
+        # the throttle interval has elapsed, or when an alert change forces it.
+        # Otherwise the cached status-bar pixels are left untouched so it never
+        # triggers a (frequent, oversized) partial refresh of its own.
+        now_m = time.monotonic()
+        draw_status = (force_full or self._status_force or
+                       (now_m - self._last_status_render) >= self._status_bar_interval)
+        if draw_status:
+            self._last_status_render = now_m
+            self._status_force = False
 
         found = self._scan_for_url()
         if found:
@@ -1138,14 +1880,22 @@ class EinkTerminal:
             _port = self._config.get('preview_server_port', 8080)
             if _ip:
                 self._last_url = f'http://{_ip}:{_port}/config'
-        show_qr = self._show_url_qr and self._config.get('terminal_show_qr', True)
-        url_qr = self._last_url if show_qr else None
+        # A fresh "beam to phone" QR takes precedence over the ambient URL QR.
+        if self._beam_url and time.monotonic() < self._beam_until_mono:
+            url_qr = self._beam_url
+        else:
+            self._beam_url = ''
+            show_qr = self._show_url_qr and self._config.get('terminal_show_qr', True)
+            url_qr = self._last_url if show_qr else None
 
         with self._net_stats_lock:
             net_stats = dict(self._net_stats) if self._net_stats else None
 
         if self._palette_active and self._palette_items:
             overlay = (self._palette_items, self._palette_idx, 'Commands')
+        elif self._snippets_active and self._snippets_items:
+            overlay = (self._snippets_items, self._snippets_idx,
+                       'Snippets  [Enter=run  Esc=cancel]')
         elif self._clipboard_active and self._clipboard:
             overlay = (
                 [c.get('label', c.get('text', '')) for c in self._clipboard],
@@ -1159,6 +1909,10 @@ class EinkTerminal:
                        'Services  [R=restart  S=stop  A=start  Esc=close]')
         elif self._power_active:
             overlay = (_POWER_ITEMS, self._power_idx, 'Power  [Enter to confirm]')
+        elif self._settings_active:
+            # Title doubles as a live prompt preview so you see the effect first.
+            title = 'Settings  ·  prompt: %s  ·  ←→ change  Esc close' % self._prompt_preview()
+            overlay = (self._settings_rows(), self._settings_idx, title)
         elif self._sshpick_active and self._sshpick_items:
             overlay = (self._sshpick_items, self._sshpick_idx,
                        'SSH Bookmarks  [Enter=connect  Esc=cancel]')
@@ -1173,6 +1927,11 @@ class EinkTerminal:
         start_row = (max(0, self._screen.cursor.y - vis_rows + 1)
                      if self._screen.cursor.y >= vis_rows else 0)
 
+        # If almost the entire screen changed at once (clear, vim/less redraw,
+        # tab switch), partial updates would leave the panel out of sync and
+        # ghosting; resync with a full flash refresh instead.
+        heavy_change = len(self._screen.dirty) >= max(8, int(vis_rows * 0.85))
+
         # Use incremental rendering when the cache is warm and no large change
         # (overlay, scroll, split sidebar) invalidates the full layout.
         use_incremental = (
@@ -1180,6 +1939,7 @@ class EinkTerminal:
             and not force_full
             and overlay is None
             and not self._split_view
+            and not self._show_refresh_hud   # HUD repaints a corner each frame
             and start_row == self._last_start_row
         )
 
@@ -1199,8 +1959,12 @@ class EinkTerminal:
                 net_stats=net_stats,
                 url_qr=url_qr,
                 bar_config=self._bar_config,
+                draw_status=draw_status,
+                cursor_style=self._cursor_style,
             )
         else:
+            # A full render always repaints the status bar; keep the throttle in sync.
+            self._last_status_render = now_m
             img = render_screen(
                 self._screen,
                 self._font_size,
@@ -1215,6 +1979,7 @@ class EinkTerminal:
                 overlay=overlay,
                 tab_bar=tab_bar,
                 bar_config=self._bar_config,
+                cursor_style=self._cursor_style,
             )
             # Overlay split-view sidebar
             if self._split_view:
@@ -1226,19 +1991,26 @@ class EinkTerminal:
             self._img_cache      = img
             self._last_start_row = start_row
 
+        if self._show_refresh_hud:
+            self._draw_refresh_hud(img)
+
         self._last_cursor_row = self._screen.cursor.y
         self._last_image = img
-        recently_active = (time.monotonic() - self._last_activity) < 60.0
-        time_full = (recently_active and
-                     self._full_refresh_interval > 0 and
-                     (time.monotonic() - self._last_full_refresh_mono) >= self._full_refresh_interval)
-        do_full = force_full or time_full
-
-        if do_full:
+        kind = self._refresh_kind(force_full, force_flash, heavy_change)
+        if kind == 'full':
+            # Clean full repaint with no flash (overlays, font change, resize).
             self._driver.full_refresh(img)
             self._last_full_refresh_mono = time.monotonic()
+            self._needs_periodic_flash = False
+        elif kind == 'flash':
+            # Deferred periodic ghost-clearing flash, or a resync flash for a
+            # near-total redraw so it lands cleanly.
+            self._driver.flash_refresh(img)
+            self._last_full_refresh_mono = time.monotonic()
+            self._needs_periodic_flash = False
         else:
             self._driver.partial_refresh_diff(img)
+            self._needs_periodic_flash = True   # ghosting accrues until a flash
 
     # ─── Main entry point ─────────────────────────────────────────────────────
 
@@ -1271,6 +2043,7 @@ class EinkTerminal:
                                 config_path=_config_path,
                                 clipboard_path=self._clipboard_path)
         if server is not None:
+            self._preview_server  = server
             self._web_input_queue = server.input_queue
             self._display_queue   = server.display_queue
         self._render(force_full=True)
@@ -1278,6 +2051,9 @@ class EinkTerminal:
         try:
             self._loop()
         finally:
+            # Remember where the shell ended so terminal_start_dir: last can
+            # resume there after a restart/reboot.
+            self._save_last_cwd()
             try:
                 os.unlink('/tmp/eink-terminal-active')
             except Exception:
@@ -1365,6 +2141,9 @@ class EinkTerminal:
                             self._last_full_refresh_mono = time.monotonic()
                         # swallow the wake key regardless
                     else:
+                        if self._big_text_active:
+                            self._exit_big_text()
+                            data = b''   # swallow the key that dismissed read mode
                         if self._scroll_pages > 0:
                             self._snap_to_live()
                             has_pending = True
@@ -1372,6 +2151,8 @@ class EinkTerminal:
                         data = self._handle_prockill_key(data)
                         data = self._handle_svcmgr_key(data)
                         data = self._handle_power_key(data)
+                        data = self._handle_settings_key(data)
+                        data = self._handle_snippets_key(data)
                         data = self._handle_palette_key(data)
                         data = self._handle_clipboard_key(data)
                         data = self._handle_sshpick_key(data)
@@ -1397,6 +2178,9 @@ class EinkTerminal:
                         self._last_full_refresh_mono = time.monotonic()
                     # swallow the wake key regardless
                 else:
+                    if self._big_text_active:
+                        self._exit_big_text()
+                        data = b''   # swallow the key that dismissed read mode
                     if self._scroll_pages > 0:
                         self._snap_to_live()
                         has_pending = True
@@ -1404,6 +2188,8 @@ class EinkTerminal:
                     data = self._handle_prockill_key(data)
                     data = self._handle_svcmgr_key(data)
                     data = self._handle_power_key(data)
+                    data = self._handle_settings_key(data)
+                    data = self._handle_snippets_key(data)
                     data = self._handle_palette_key(data)
                     data = self._handle_clipboard_key(data)
                     data = self._handle_sshpick_key(data)
@@ -1480,8 +2266,11 @@ class EinkTerminal:
                     pass
 
             # ── Alert tick ────────────────────────────────────────────────────
+            # Alerts bypass the status-bar throttle: a warning must appear (and
+            # clear) promptly, so force the status bar to repaint this render.
             if now - last_alert_tick >= 1.0:
                 if self._alert_monitor.tick() and not in_screensaver:
+                    self._status_force = True
                     has_pending = True  # alert changed — re-render status bar
                 last_alert_tick = now
 
@@ -1495,11 +2284,17 @@ class EinkTerminal:
                     has_pending = True
 
             # ── Network stats update ──────────────────────────────────────────
+            # These only affect the (deprioritized) status bar, so don't drive a
+            # render on their own — they ride along on the next throttled status
+            # repaint or terminal-content render. Clear the dirty flag so it
+            # doesn't accumulate.
             if not in_screensaver and _idle < 60.0:
+                status_due = (now - self._last_status_render) >= self._status_bar_interval
                 with self._net_stats_lock:
                     if self._net_stats.get('dirty'):
                         self._net_stats['dirty'] = False
-                        has_pending = True
+                        if status_due:
+                            has_pending = True
 
             # ── Cycle screensaver: swap image when interval elapses ───────────
             if in_screensaver and self._config.get('screensaver_mode', 'static') == 'cycle':
@@ -1512,6 +2307,12 @@ class EinkTerminal:
                 self._render()
                 self._screen.dirty.clear()
                 has_pending = False
+                last_render = now
+            elif not in_screensaver and self._periodic_flash_due(now):
+                # Deferred whole-panel ghost-clearing flash, fired in a quiet gap
+                # so it never interrupts active typing.
+                self._render(force_flash=True)
+                self._screen.dirty.clear()
                 last_render = now
 
     def _shell_exited_handler(self) -> bool:

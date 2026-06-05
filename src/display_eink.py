@@ -9,6 +9,7 @@ Two usage modes:
   EinkDriver(local)          — persistent driver for terminal mode with partial refresh
 """
 import os
+import time
 import platform
 import logging
 import queue as _queue
@@ -107,9 +108,42 @@ class EinkDriver:
     # refresh instead of many small partial flashes.
     _MAX_PARTIAL_SPANS = 7
 
-    def __init__(self, local: bool = False, partial_refresh_limit: int = 30):
+    def __init__(self, local: bool = False, partial_refresh_limit: int = 30,
+                 flicker_free: bool = False, region_flash: bool = True,
+                 du_adaptive: bool = True, du_frames_text: int = 0x14,
+                 du_frames_heavy: int = 0x1A, du_heavy_threshold: float = 0.22):
         self._local = local or _IS_MAC
         self._partial_refresh_limit = partial_refresh_limit
+
+        # Content-adaptive DU waveform. Heavy/inverse content (TUIs like htop/vim
+        # — lots of solid black) needs more drive frames to fully transition and
+        # not ghost; light text needs fewer (crisper + faster). We pick the frame
+        # count per refresh from the black-pixel density and re-load the DU LUT
+        # only when it crosses the threshold.
+        self._du_adaptive       = du_adaptive
+        self._du_frames_text    = int(du_frames_text)
+        self._du_frames_heavy   = int(du_frames_heavy)
+        self._du_heavy_threshold = du_heavy_threshold
+        self._du_frames_loaded  = None   # frame count currently in the DU LUT
+
+        # Live refresh counters for the debug HUD (read by the app via stats()).
+        self._stats = {'partial': 0, 'region': 0, 'full': 0,
+                       'bytes': 0, 'last_flash_mono': 0.0, 'du_frames': 0}
+
+        # Ghost clearing: once `partial_refresh_limit` partials have stacked up,
+        # flash just the rows that changed (the portion that changed) rather than
+        # the whole panel — far less jarring on e-ink. A periodic whole-panel
+        # flash (every terminal_full_refresh_interval seconds of activity) is
+        # driven separately by the app layer. Set region_flash False to fall back
+        # to a whole-panel flash for the count-based clear too.
+        self._region_flash = region_flash
+
+        # Flash-free direct-update partial mode (custom register LUT). When on,
+        # partial updates rewrite the whole frame through a DU waveform that
+        # moves only changed pixels, so typed characters appear without the
+        # per-cell flash of the stock OTP partial waveform.
+        self._flicker_free = flicker_free
+        self._du_ready     = False   # panel currently in DU register-LUT mode
 
         # Character cell dimensions for aligned partial-refresh rectangles.
         # Set by EinkTerminal via set_cell_size() whenever the font changes.
@@ -158,6 +192,24 @@ class EinkDriver:
         instead of cutting through the middle of a glyph or background row."""
         self._cell_w = max(0, cell_w)
         self._cell_h = max(0, cell_h)
+
+    def stats(self) -> dict:
+        """Snapshot of the live refresh counters (for the debug HUD)."""
+        s = dict(self._stats)
+        s['last_flash_age'] = (time.monotonic() - s['last_flash_mono']
+                               if s['last_flash_mono'] else None)
+        return s
+
+    def _du_frames_for(self, buf) -> int:
+        """Pick the DU drive-frame count from the frame's black-pixel density:
+        heavy/inverse content gets more frames, light text fewer."""
+        if not self._du_adaptive or not _HAS_NUMPY:
+            return self._du_frames_text
+        arr = _np.frombuffer(buf, dtype=_np.uint8)
+        # bit=1 → black; mean of all bits = black fraction of the frame.
+        black_frac = float(_np.unpackbits(arr).mean())
+        return (self._du_frames_heavy if black_frac >= self._du_heavy_threshold
+                else self._du_frames_text)
 
     def full_refresh(self, image: Image.Image, output_path: str = None, flash: bool = False):
         """Update the full screen. By default uses partial mode (no flash).
@@ -220,6 +272,7 @@ class EinkDriver:
         epd = self._epd_instance()
         if epd is None:
             return
+        logging.info('E-ink full flash refresh (hw_sleeping=%s)', self._hw_sleeping)
         try:
             buf = epd.getbuffer(image)
             # After deep sleep use full init() to restore power rails.
@@ -229,21 +282,99 @@ class EinkDriver:
             else:
                 epd.init_fast()
             epd.display(buf)
-            # Stay in partial mode so the next partial write needs no re-init.
-            epd.init_part()
-            self._partial_ready = True
+            self._stats['full'] += 1
+            self._stats['last_flash_mono'] = time.monotonic()
+            if self._flicker_free:
+                # The flash above left the panel in OTP-LUT mode; force a DU
+                # re-init before the next partial so flash-free updates resume.
+                self._du_ready = False
+                self._du_frames_loaded = None
+            else:
+                # Stay in partial mode so the next partial write needs no re-init.
+                epd.init_part()
+                self._partial_ready = True
             self._prev_buf = bytearray(buf)
         except IOError as e:
             logging.error('E-ink full refresh error: %s', e)
             self._hw_sleeping  = True
             self._partial_ready = False
+            self._du_ready      = False
 
-    def _hw_partial_diff(self, image: Image.Image):
-        """Diff against previous frame; refresh minimal per-band bounding boxes."""
+    def _hw_partial_du(self, image: Image.Image):
+        """Flash-free refresh via the DU register-LUT waveform.
+
+        Rewrites the whole frame, but the DU LUT gives unchanged pixels zero
+        voltage so only changed pixels move — no per-cell flash. Supplies the
+        prior frame as the controller's reference so the diff is correct even
+        on the first update after switching into DU mode."""
         epd = self._epd_instance()
         if epd is None:
             return
         try:
+            # No known prior frame (cold start / post-sleep): establish a clean
+            # baseline with one full refresh, then DU-update from there on.
+            if self._hw_sleeping and self._prev_buf is None:
+                self._hw_full(image)
+                return
+
+            buf = epd.getbuffer(image)
+            # Content-adaptive DU frame count; reload the LUT only when it changes.
+            frames = self._du_frames_for(buf)
+            if not self._du_ready or frames != self._du_frames_loaded:
+                epd.init_du(frames)
+                self._du_ready = True
+                self._du_frames_loaded = frames
+                self._partial_ready = False
+                self._stats['du_frames'] = frames
+
+            old = (bytes(self._prev_buf)
+                   if self._prev_buf is not None and len(self._prev_buf) == len(buf)
+                   else None)
+            change_y = self._change_y_from_bufs(old, buf)
+            if old is not None and _HAS_NUMPY:
+                self._stats['bytes'] = int((_np.frombuffer(buf, dtype=_np.uint8)
+                                            != _np.frombuffer(old, dtype=_np.uint8)).sum())
+            self._stats['partial'] += 1
+            epd.display_du(buf, old)
+            self._prev_buf = bytearray(buf)
+            self._hw_sleeping = False
+
+            if record_partial_refresh(self._partial_refresh_limit):
+                # Ghost-clearing flash is due — flash just the changed rows.
+                if self._region_or_full_flash(image, change_y):
+                    # The flash left the panel in partial/OTP-LUT mode; force a
+                    # DU re-init before the next flash-free partial.
+                    self._du_ready = False
+                record_full_refresh()
+        except IOError as e:
+            logging.error('E-ink DU partial refresh error: %s', e)
+            self._du_ready    = False
+            self._hw_sleeping = True
+
+    def _hw_partial_diff(self, image: Image.Image):
+        """Diff against previous frame; refresh minimal per-band bounding boxes."""
+        if self._flicker_free:
+            self._hw_partial_du(image)
+            return
+        epd = self._epd_instance()
+        if epd is None:
+            return
+        try:
+            # If we just woke from a hardware sleep, the panel has lost the
+            # 0x10 back-buffer (the "what's on screen" reference the partial
+            # diff needs). With no known prior frame, do one clean full refresh
+            # to re-establish it; otherwise re-prime 0x10 from _prev_buf below.
+            if self._hw_sleeping and self._prev_buf is None:
+                self._hw_full(image)
+                return
+            # Always re-prime the panel's 0x10 back-buffer with the frame that is
+            # currently on screen (_prev_buf). The panel computes a partial update
+            # as the diff between 0x10 and the new 0x13 data and only physically
+            # drives pixels that differ. If 0x10 is stale, it drives the whole band
+            # — that is the "flash" of an updated line. Supplying the true prior
+            # frame every time keeps updates limited to genuinely-changed pixels.
+            old_prev = bytes(self._prev_buf) if self._prev_buf is not None else None
+
             if not self._partial_ready:
                 epd.init_part()
                 self._partial_ready = True
@@ -254,6 +385,7 @@ class EinkDriver:
             if self._prev_buf is None or len(self._prev_buf) != len(buf):
                 epd.display_Partial(buf, 0, 0, epd.width, epd.height)
                 self._prev_buf = bytearray(buf)
+                self._hw_sleeping = False
                 return
 
             # Diff against previous frame to find changed bytes.
@@ -265,6 +397,7 @@ class EinkDriver:
                 self._prev_buf[:] = buf  # in-place: reuse allocation
                 if len(changed) == 0:
                     return
+                self._stats['bytes'] = int(len(changed))
                 rows = changed // row_bytes
                 cols = changed % row_bytes
                 for r in _np.unique(rows):
@@ -325,8 +458,10 @@ class EinkDriver:
             total_h = sum(min(epd.height, (be + 1) * cell_h) - bs * cell_h
                           for bs, be, _, _ in bands)
             if total_h > epd.height * 0.6 or len(bands) > self._MAX_PARTIAL_SPANS:
-                epd.display_Partial(buf, 0, 0, epd.width, epd.height)
+                epd.display_Partial(buf, 0, 0, epd.width, epd.height,
+                                    old_image=old_prev)
                 self._prev_buf = bytearray(buf)
+                self._hw_sleeping = False
                 return
 
             # Collect all band patches, then flush with a single panel refresh.
@@ -350,21 +485,106 @@ class EinkDriver:
                 x_b0 = x_start // 8
                 band_w = x_end // 8 - x_b0
                 band = bytearray(band_w * (y_max - y_min))
+                old_band = bytearray(band_w * (y_max - y_min)) if old_prev else None
                 out = 0
                 for row in range(y_min, y_max):
                     src = row * row_bytes + x_b0
                     band[out:out + band_w] = buf[src:src + band_w]
+                    if old_band is not None:
+                        old_band[out:out + band_w] = old_prev[src:src + band_w]
                     out += band_w
-                patches.append((band, x_start, y_min, x_end, y_max))
+                patches.append((band, old_band, x_start, y_min, x_end, y_max))
 
             epd.display_Partial_multi(patches)
+            self._stats['partial'] += 1
+            self._hw_sleeping = False
 
             if record_partial_refresh(self._partial_refresh_limit):
-                self._hw_full(image)   # flash to clear accumulated ghosting
-                record_full_refresh()  # track it
+                # Ghost-clearing flash is due — flash just the changed rows
+                # (the portion that changed), not the whole panel.
+                cy0 = min(bs for bs, _, _, _ in bands) * cell_h
+                cy1 = min(epd.height, (max(be for _, be, _, _ in bands) + 1) * cell_h)
+                self._region_or_full_flash(image, (cy0, cy1))
+                record_full_refresh()               # reset the partial counter
 
         except IOError as e:
             logging.error('E-ink partial refresh error: %s', e)
+            self._partial_ready = False
+            self._prev_buf      = None
+
+    def _change_y_from_bufs(self, old, new) -> tuple:
+        """Pixel-row span (y_min, y_max) of bytes that differ between two frame
+        buffers, or None if identical / not comparable."""
+        epd = self._epd
+        if old is None or epd is None or len(old) != len(new):
+            return None
+        row_bytes = epd.width // 8
+        if _HAS_NUMPY:
+            a = _np.frombuffer(new, dtype=_np.uint8)
+            b = _np.frombuffer(old, dtype=_np.uint8)
+            idx = _np.where(a != b)[0]
+            if len(idx) == 0:
+                return None
+            rows = idx // row_bytes
+            return (int(rows.min()), int(rows.max()) + 1)
+        rows = [i // row_bytes for i in range(len(new)) if new[i] != old[i]]
+        if not rows:
+            return None
+        return (min(rows), max(rows) + 1)
+
+    def _region_or_full_flash(self, image: Image.Image, change_y: tuple = None) -> bool:
+        """Ghost-clearing flash for the count-based trigger. Flashes only the
+        changed rows (change_y = (y_min, y_max) in pixels) when region flashing is
+        on and the prior frame is known; otherwise flashes the whole panel.
+        Returns True (a hardware clear always happens here)."""
+        epd = self._epd_instance()
+        if epd is None:
+            return False
+        if (self._region_flash and change_y is not None
+                and change_y[1] > change_y[0]
+                and self._prev_buf is not None and not self._hw_sleeping):
+            self._hw_flash_region(image, change_y[0], change_y[1])
+        else:
+            self._hw_full(image)
+        return True
+
+    def _hw_flash_region(self, image: Image.Image, y0: int, y1: int):
+        """Clear ghosting in the horizontal band [y0, y1) only: drive the band to
+        white, then repaint the image into it — a localized flash over the full
+        width. Reuses display_Partial (no new waveforms) so it's safe on the V2.
+
+        Falls back to a whole-panel flash if the prior frame isn't known (the
+        windowed diff needs it) — e.g. straight after a hardware sleep."""
+        epd = self._epd_instance()
+        if epd is None:
+            return
+        row_bytes = epd.width // 8
+        y0 = max(0, min(epd.height, int(y0)))
+        y1 = max(y0, min(epd.height, int(y1)))
+        try:
+            buf = epd.getbuffer(image)
+            if (self._prev_buf is None or len(self._prev_buf) != len(buf)
+                    or self._hw_sleeping):
+                self._hw_full(image); return
+            if not self._partial_ready:
+                epd.init_part()
+                self._partial_ready = True
+
+            region = bytes(buf[y0 * row_bytes:y1 * row_bytes])
+            n = len(region)
+            white = b'\xff' * n   # getbuffer white = 0xFF; display_Partial inverts
+            black = b'\x00' * n
+            # Drive every pixel in the band to white (old=black ⇒ all pixels move),
+            # then paint the real image over it — a clean B/W refresh of the band.
+            epd.display_Partial(white, 0, y0, epd.width, y1, old_image=black)
+            epd.display_Partial(region, 0, y0, epd.width, y1, old_image=white)
+
+            self._stats['region'] += 1
+            self._stats['last_flash_mono'] = time.monotonic()
+            self._prev_buf[:] = buf
+            self._hw_sleeping = False
+        except IOError as e:
+            logging.error('E-ink region flash error: %s', e)
             self._partial_ready = False
             self._prev_buf      = None
 

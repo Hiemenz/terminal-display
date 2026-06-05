@@ -19,3 +19,8 @@ speedtest-cli = "^2.1"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[dependency-groups]
+dev = [
+    "pytest (>=8.3,<9.0)"
+]

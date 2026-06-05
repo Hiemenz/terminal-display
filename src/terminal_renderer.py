@@ -114,6 +114,7 @@ def render_screen(
     overlay: tuple = None,
     tab_bar: list = None,
     bar_config: dict = None,
+    cursor_style: str = 'block',
 ) -> Image.Image:
     """
     Render pyte.Screen to an 800×480 grayscale PIL Image.
@@ -164,6 +165,10 @@ def render_screen(
             char = row[col_idx]
             is_cursor    = (row_idx == screen.cursor.y and col_idx == screen.cursor.x)
             cell_inverted = bool(char.reverse)
+            # A block cursor inverts the whole cell (glyph shown in bg over an
+            # fg block); an underline cursor keeps the cell as-is and adds a bar.
+            if is_cursor and cursor_style == 'block':
+                cell_inverted = not cell_inverted
             cell_fg = bg if cell_inverted else fg
             cell_bg = fg if cell_inverted else bg
             if cell_bg != bg:
@@ -171,7 +176,7 @@ def render_screen(
             glyph = char.data
             if glyph and glyph != ' ':
                 draw.text((x, y), glyph, font=font, fill=cell_fg)
-            if is_cursor:
+            if is_cursor and cursor_style != 'block':
                 bar_h = max(2, ch // 6)
                 draw.rectangle([x, y + ch - bar_h, x + cw - 1, y + ch - 1], fill=fg)
 
@@ -372,11 +377,15 @@ def render_screen_partial(
     net_stats: dict = None,
     url_qr: str = None,
     bar_config: dict = None,
+    draw_status: bool = True,
+    cursor_style: str = 'block',
 ) -> Image.Image:
     """Redraw only changed rows onto cached_img — much faster than a full render.
 
     Repaints dirty pyte rows plus the old and new cursor rows (so the cursor
-    block appears/disappears cleanly). The status bar is always repainted.
+    block appears/disappears cleanly). The status bar is only repainted when
+    draw_status is set; otherwise its cached pixels are left untouched so it
+    doesn't trigger a partial refresh of its own (it's deprioritized/throttled).
     Mutates and returns cached_img directly; no allocation."""
     font = _find_mono_font(font_path, font_size)
     cw, ch = _char_size(font)
@@ -409,6 +418,8 @@ def render_screen_partial(
             char = row[col_idx]
             is_cursor    = (row_idx == screen.cursor.y and col_idx == screen.cursor.x)
             cell_inverted = bool(char.reverse)
+            if is_cursor and cursor_style == 'block':
+                cell_inverted = not cell_inverted
             cell_fg = bg if cell_inverted else fg
             cell_bg = fg if cell_inverted else bg
             if cell_bg != bg:
@@ -416,13 +427,14 @@ def render_screen_partial(
             glyph = char.data
             if glyph and glyph != ' ':
                 draw.text((x, y), glyph, font=font, fill=cell_fg)
-            if is_cursor:
+            if is_cursor and cursor_style != 'block':
                 bar_h = max(2, ch // 6)
                 draw.rectangle([x, y + ch - bar_h, x + cw - 1, y + ch - 1], fill=fg)
 
-    _draw_status_bar(draw, font_size, fg, bg, terminal_width,
-                     status_info=status_info, alerts=alerts, scale=1,
-                     net_stats=net_stats, bar_config=bar_config)
+    if draw_status:
+        _draw_status_bar(draw, font_size, fg, bg, terminal_width,
+                         status_info=status_info, alerts=alerts, scale=1,
+                         net_stats=net_stats, bar_config=bar_config)
 
     if url_qr:
         _draw_url_qr(cached_img, url_qr, terminal_width)
@@ -457,6 +469,7 @@ def _draw_status_bar(
     cwd      = status_info[1] if status_info and len(status_info) > 1 else ''
     branch   = status_info[2] if status_info and len(status_info) > 2 else ''
     tab_str  = status_info[3] if status_info and len(status_info) > 3 else ''
+    uptime   = status_info[4] if status_info and len(status_info) > 4 else ''
     raw_time = status_info[0] if status_info else datetime.now().strftime('%H:%M')
     time_str = (tab_str + ' ' if tab_str else '') + raw_time
 
@@ -467,6 +480,9 @@ def _draw_status_bar(
         parts = []
         if bc.get('show_time', True):
             parts.append(time_str)
+        host = bc.get('host', '')
+        if bc.get('show_host', True) and host:
+            parts.append(host)
         if bc.get('show_cwd', True) and (cwd or branch):
             parts.append((cwd + ':' + branch) if cwd and branch else (cwd or branch))
         if net_stats:
@@ -478,6 +494,8 @@ def _draw_status_bar(
                 parts.append(ip_str)
             if bc.get('show_speed', True) and (up or dn):
                 parts.append((f'↑{up}' if up else '') + (f'  ↓{dn}' if dn else ''))
+        if bc.get('show_uptime', True) and uptime:
+            parts.append(f'up {uptime}')
         if not parts:
             parts = [time_str]  # always show something
         draw.text((x_pad, y0 + pad), '  '.join(parts), font=sfont, fill=bg)

@@ -59,13 +59,43 @@ terminal_font_path: ""
 # Dark mode for the terminal — inherits global dark_mode if not set here
 terminal_dark_mode: false
 
-# Seconds of active use between full (flash) refreshes that clear ghosting.
-# Partial (no-flash) updates are used in between. 0 = disabled.
-terminal_full_refresh_interval: 120
+# Seconds of active use between whole-panel flash refreshes that clear ghosting
+# everywhere (default 300 = 5 minutes). In between, only the changed rows are
+# region-flashed (see terminal_region_flash). 0 = disabled.
+terminal_full_refresh_interval: 300
 
 # Force a full refresh after this many partial refreshes to clear ghosting,
 # regardless of how much time has elapsed.
 partial_refresh_before_full: 30
+
+# Region flash: when the count-based ghost clear fires (every
+# partial_refresh_before_full partials), flash only the rows that changed
+# instead of the whole panel — much less jarring. The periodic whole-panel
+# flash is governed by terminal_full_refresh_interval. Set false to flash the
+# whole panel for the count-based clear too.
+terminal_region_flash: true
+
+# Smart flash: once terminal_full_refresh_interval elapses, wait for this many
+# seconds of no typing before the whole-panel flash (so it never interrupts
+# active use). Forced anyway at 2× the interval. 0 = flash as soon as due.
+terminal_flash_idle_gap: 30
+
+# Content-adaptive DU waveform: heavy/inverse content (TUIs like htop/vim) is
+# driven with more frames so it fully transitions and ghosts less; light text
+# uses fewer (crisper + faster). Frames are 0x14=20 by default; bump _heavy if
+# TUIs ghost, lower it if they look slow/visible. Set adaptive false to fix the
+# frame count at _frames_text. (Experimental — tune on the panel.)
+terminal_du_adaptive: true
+terminal_du_frames_text: 20      # light text (decimal; 0x14)
+terminal_du_frames_heavy: 26     # heavy/inverse content (0x1A)
+terminal_du_heavy_threshold: 0.22  # black-pixel fraction that counts as "heavy"
+
+# Flash-free partial refresh. When true, typed characters are drawn with a
+# custom direct-update (DU) waveform so only changed pixels move — no per-cell
+# flash. Experimental: the waveform is tuned for this panel via the DU LUT /
+# _DU_FRAMES constants in src/waveshare_epd/epd7in5_V2.py. If text comes out
+# faint, ghosted, or inverted, raise/lower _DU_FRAMES or set this false.
+terminal_flicker_free_partial: true
 
 # Keyboard device path ('auto' = auto-detect, '' = stdin only).
 # Set to a specific /dev/input/eventN to force a device.
@@ -83,11 +113,39 @@ terminal_tmux_session: eink
 # with tmux, use Ctrl+B [ to enter copy mode).
 terminal_scrollback: 500
 
-# Idle screensaver: switch to stats after N seconds of no keyboard activity.
-# Set to 0 to disable.
+# Minutes of no keyboard activity before the terminal switches to the
+# screensaver AND deep-sleeps the e-ink panel (the image is retained with no
+# power; any keypress wakes it). 0 = never sleep. This takes precedence over
+# terminal_idle_timeout below and is editable from the on-display config editor.
+screensaver_sleep_minutes: 15
+
+# (legacy, seconds) Idle timeout — used only if screensaver_sleep_minutes is
+# unset. Set to 0 to disable.
 terminal_idle_timeout: 900
 
 # (removed — idle refreshes are no longer done; the display sleeps on screensaver instead)
+
+# Cursor style: 'block' (filled reverse-video cell) or 'underline' (thin bar).
+terminal_cursor_style: block
+
+# ── Custom shell prompt (PS1) ────────────────────────────────────────────────
+# When true, the app injects a PS1 into the shell (after your rc loads, so it
+# overrides it) built from the parts toggled below. Leave false to keep your
+# own shell prompt untouched.
+terminal_prompt_custom: false
+terminal_prompt_show_user: true   # \u  — username
+terminal_prompt_show_host: true   # \h  — hostname
+terminal_prompt_show_cwd: true    # \w  — working directory
+terminal_prompt_show_git: true    # show " (branch)" inside a git repo
+terminal_prompt_symbol: "$"       # trailing prompt symbol
+
+# Where new shells start:
+#   home  — your home directory (~)            [default]
+#   last  — resume the directory the last session ended in (persisted to
+#           data/last_cwd.txt; with tmux the live session also just resumes)
+#   root  — the filesystem root (/)
+#   <path> — any explicit absolute path
+terminal_start_dir: home
 
 # Show QR code in terminal corner (URL of current page or web UI link)
 terminal_show_qr: true
@@ -96,10 +154,17 @@ terminal_show_qr: true
 terminal_status_bar_extras: true
 
 # Status bar item toggles (all default on)
+terminal_status_bar_show_host: true     # machine name (device_label or hostname)
 terminal_status_bar_show_time: true
 terminal_status_bar_show_cwd: true
 terminal_status_bar_show_ip: true
 terminal_status_bar_show_speed: true
+terminal_status_bar_show_uptime: true   # uptime as "Xd Yh Zm"
+
+# Status bar is deprioritized: repaint (and refresh on-panel) at most once per
+# this many seconds, so time/uptime/network ticks don't flash the bar every few
+# seconds. Active alerts bypass this and update immediately.
+terminal_status_bar_interval: 300
 
 # Compact status bar: shorten labels (C:/M:/D:/L:) and drop uptime/sizes.
 # Full:    14:30  |  CPU 15%  |  MEM 1.2g 62%  |  Disk 12g/32g 38%  |  Load 0.52  |  Up 2h  |  192.168.1.145
