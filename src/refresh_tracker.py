@@ -9,6 +9,10 @@ STATE_FILE = os.path.join(_REPO_ROOT, 'data', 'refresh_state.json')
 FULL_REFRESH_INTERVAL    = 3600  # force full refresh after this many seconds
 PARTIAL_REFRESH_BEFORE_FULL = 30  # default; overridden at runtime via config
 
+# In-memory partial counter — avoids a disk read+write on every partial update.
+# Loaded from disk on first call so the count survives a restart.
+_partial_count: int = -1  # -1 = not yet loaded
+
 
 def _load_state():
     try:
@@ -29,6 +33,8 @@ def needs_full_refresh():
 
 def record_full_refresh():
     """Save current timestamp as last full refresh and reset partial counter."""
+    global _partial_count
+    _partial_count = 0
     state = _load_state()
     state['last_full_refresh'] = time.time()
     state['partial_count'] = 0
@@ -42,11 +48,13 @@ def record_partial_refresh(threshold=PARTIAL_REFRESH_BEFORE_FULL):
 
     Returns True when the count hits `threshold`, signalling that a full
     refresh should be done now to clear accumulated ghosting.
-    The counter is NOT reset here — call record_full_refresh() to reset it."""
-    state = _load_state()
-    count = state.get('partial_count', 0) + 1
-    state['partial_count'] = count
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    with open(STATE_FILE, 'w') as f:
-        json.dump(state, f, indent=4)
-    return count >= threshold
+    The counter is NOT reset here — call record_full_refresh() to reset it.
+
+    The count is kept in memory and only written to disk when the threshold
+    is hit (to avoid a disk read+write on every single partial update)."""
+    global _partial_count
+    if _partial_count < 0:
+        # First call: load persisted count so a restart doesn't reset the counter.
+        _partial_count = _load_state().get('partial_count', 0)
+    _partial_count += 1
+    return _partial_count >= threshold

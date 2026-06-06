@@ -131,9 +131,15 @@ def render_screen(
     bg = 0 if dark_mode else 255
     fg = 255 if dark_mode else 0
 
-    # Draw at scaled font size so glyphs are 2× larger
-    font = _find_mono_font(font_path, font_size * scale)
-    cw, ch = _char_size(font)
+    # Layout uses 1× font metrics so cell positions are identical to
+    # render_screen_partial. The scaled font is used only for glyph quality;
+    # after HQ downsample (÷scale) column i lands at exactly i*cw — matching the
+    # 1× grid — so glyphs don't accumulate sub-pixel drift across the row
+    # (previously 2× metrics drifted ~0.5px/col → ~50px gap over 100 cols).
+    font_layout = _find_mono_font(font_path, font_size)
+    cw, ch = _char_size(font_layout)
+    font = _find_mono_font(font_path, font_size * scale) if scale > 1 else font_layout
+    s_cw, s_ch = cw * scale, ch * scale   # scaled cell dimensions for drawing
 
     img = Image.new('L', (W_s, H_s), bg)
     draw = ImageDraw.Draw(img)
@@ -141,10 +147,7 @@ def render_screen(
     # ── Terminal cell grid (offset by tab bar) ───────────────────────────────
     tab_offset = TAB_BAR_H * scale
 
-    # How many rows actually fit at this render resolution. The scaled font's
-    # row height may not divide evenly into the available height, so this can be
-    # one less than what pyte was sized for — clipping the bottom (cursor) row.
-    visible_rows = max(1, TH_s // ch)
+    visible_rows = max(1, TERMINAL_H // ch)
 
     # Auto-scroll the viewport so the cursor row is always on screen. If the
     # cursor sits below the visible window, start drawing further down the
@@ -156,10 +159,10 @@ def render_screen(
     for draw_i, row_idx in enumerate(range(start_row, screen.lines)):
         if draw_i >= visible_rows:
             break
-        y = draw_i * ch + tab_offset
+        y = draw_i * s_ch + tab_offset
         row = screen.buffer[row_idx]
         for col_idx in range(screen.columns):
-            x = col_idx * cw
+            x = col_idx * s_cw
             if x >= tw_s:
                 break
             char = row[col_idx]
@@ -172,13 +175,13 @@ def render_screen(
             cell_fg = bg if cell_inverted else fg
             cell_bg = fg if cell_inverted else bg
             if cell_bg != bg:
-                draw.rectangle([x, y, x + cw - 1, y + ch - 1], fill=cell_bg)
+                draw.rectangle([x, y, x + s_cw - 1, y + s_ch - 1], fill=cell_bg)
             glyph = char.data
             if glyph and glyph != ' ':
                 draw.text((x, y), glyph, font=font, fill=cell_fg)
             if is_cursor and cursor_style != 'block':
-                bar_h = max(2, ch // 6)
-                draw.rectangle([x, y + ch - bar_h, x + cw - 1, y + ch - 1], fill=fg)
+                bar_h = max(2, s_ch // 6)
+                draw.rectangle([x, y + s_ch - bar_h, x + s_cw - 1, y + s_ch - 1], fill=fg)
 
     # ── Status bar ───────────────────────────────────────────────────────────
     _draw_status_bar(
