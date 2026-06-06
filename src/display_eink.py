@@ -104,9 +104,9 @@ class EinkDriver:
     _FULL    = 'full'
     _SLEEP   = 'sleep'
 
-    # Above this many disjoint changed regions in one frame, do a single full
-    # refresh instead of many small partial flashes.
-    _MAX_PARTIAL_SPANS = 7
+    # Above this many disjoint changed regions in one frame, collapse to a single
+    # full-screen partial instead of many small flashing patches.
+    _MAX_PARTIAL_SPANS = 4
 
     def __init__(self, local: bool = False, partial_refresh_limit: int = 30,
                  flicker_free: bool = False, region_flash: bool = True,

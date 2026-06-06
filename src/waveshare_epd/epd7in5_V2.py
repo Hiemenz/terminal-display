@@ -417,6 +417,7 @@ class EPD:
         self.send_data2(inverted)
 
         self.send_command(0x12)
+        epdconfig.delay_ms(50)   # allow panel to assert BUSY before polling
         self.ReadBusy()
 
     def display_Partial_multi(self, patches):
@@ -467,6 +468,7 @@ class EPD:
 
         # Single refresh trigger — panel settles all written regions at once.
         self.send_command(0x12)
+        epdconfig.delay_ms(50)   # allow panel to assert BUSY before polling
         self.ReadBusy()
 
     def sleep(self):
