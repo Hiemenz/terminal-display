@@ -7,8 +7,13 @@ device_label: ""
 # Dark mode: black background, white text (recommended for terminal aesthetic)
 dark_mode: false
 
-# How often to refresh (seconds)
+# How often the loop runs / the clock updates on screen (seconds)
 update_interval: 30
+
+# How often the system stat panels (CPU, memory, disk, network, etc.) are
+# re-collected and redrawn (seconds). The clock still ticks every
+# update_interval; only the heavier stats are throttled to this cadence.
+stats_display_interval: 120
 
 # Night mode: skip refreshes between night_start and night_end (24-hour format)
 night_mode: true

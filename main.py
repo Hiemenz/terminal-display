@@ -26,7 +26,7 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from config_loader import load_config, add_config_arg
-from system_stats import collect
+from system_stats import collect, collect_time
 from render import render, render_output, render_screensaver
 from display import send_to_display
 from display_eink import EinkDriver
@@ -189,12 +189,35 @@ def _run_and_render(cmd: str, config: dict, local: bool, driver=None):
         img.save(_OUTPUT_IMAGE)
 
 
+# Cached stats so the slow-changing panels only re-collect on their own cadence
+# while the clock keeps ticking each loop. (module-level: survives across calls)
+_stats_cache: dict = {}
+_stats_collected_at: float = 0.0
+
+
 def _loop_cycle(config: dict, local: bool, driver: EinkDriver):
-    """Stats fetch → render → partial (or periodic full) display cycle."""
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Collecting stats…")
-    stats = collect(config)
+    """Render → partial display cycle.
+
+    The clock updates every cycle, but the heavier system stats are only
+    re-collected every `stats_display_interval` seconds (default 120). In
+    between, we refresh just the time/date/uptime fields, so the partial diff
+    only touches the clock and the stat panels stay put until they're due.
+    """
+    global _stats_cache, _stats_collected_at
+    now = time.monotonic()
+    stats_interval = config.get('stats_display_interval', 120)
+    stats_due = (not _stats_cache) or (now - _stats_collected_at) >= stats_interval
+
+    if stats_due:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Collecting stats…")
+        _stats_cache = collect(config)
+        _stats_collected_at = now
+    else:
+        # Cheap refresh of clock fields only; stat panels reuse cached values.
+        _stats_cache.update(collect_time(config))
+
     print("Rendering image…")
-    img = render(stats, config)
+    img = render(_stats_cache, config)
     if local:
         os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
         img.save(_OUTPUT_IMAGE)
@@ -343,6 +366,10 @@ Examples:
                         img = render_screensaver(active_image, qr_url, config)
                     if not local:
                         driver.full_refresh(img, _OUTPUT_IMAGE)
+                        # Static image — deep-sleep the panel until activity or
+                        # the next MLB refresh. The next write re-inits via a
+                        # full refresh (see _hw_sleep clearing _prev_buf).
+                        driver.sleep()
                     else:
                         os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
                         img.save(_OUTPUT_IMAGE)
@@ -383,6 +410,7 @@ Examples:
         try:
             if _is_night(config):
                 print("Night mode — sleeping 5 min…")
+                driver.sleep()  # deep-sleep the panel through the night window
                 time.sleep(300)
                 continue
 
