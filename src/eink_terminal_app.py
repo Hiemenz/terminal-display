@@ -363,8 +363,13 @@ class EinkTerminal:
         # Scrollback state (only when not using tmux)
         self._scroll_pages = 0
 
-        # Idle tracking
+        # Idle tracking. _last_activity tracks ANY activity including terminal
+        # output (used for flash timing and pausing stats updates). _last_input
+        # tracks only real user input (keyboard / web) and drives the idle
+        # screensaver + panel deep-sleep — otherwise a program that prints
+        # periodically (spinner, htop, log tail) would keep the panel awake.
         self._last_activity = time.monotonic()
+        self._last_input = time.monotonic()
         self._last_full_refresh_mono = time.monotonic()
 
         # Status bar extras cache
@@ -1707,8 +1712,10 @@ class EinkTerminal:
                 if photos:
                     cycle_secs = self._config.get('screensaver_cycle_interval', 5) * 60
                     now = time.monotonic()
-                    if self._screensaver_last_cycle == 0.0 or \
-                            (now - self._screensaver_last_cycle) >= cycle_secs:
+                    if self._screensaver_last_cycle == 0.0:
+                        # First activation: show photos[idx] without advancing.
+                        self._screensaver_last_cycle = now
+                    elif (now - self._screensaver_last_cycle) >= cycle_secs:
                         self._screensaver_cycle_idx = (self._screensaver_cycle_idx + 1) % len(photos)
                         self._screensaver_last_cycle = now
                     image_path = os.path.join(photos_dir, photos[self._screensaver_cycle_idx])
@@ -2027,6 +2034,7 @@ class EinkTerminal:
             self._evdev_kb.grab()
         self._running = True
         self._last_activity = time.monotonic()
+        self._last_input = time.monotonic()
 
         # Wrap initial shell in a Tab
         self._tabs = [_Tab(screen=self._screen, stream=self._stream,
@@ -2117,7 +2125,7 @@ class EinkTerminal:
 
             # ── Idle screensaver check ────────────────────────────────────────
             if self._idle_timeout > 0:
-                idle = now - self._last_activity
+                idle = now - self._last_input
                 if idle > self._idle_timeout and not in_screensaver and not self._in_text_message:
                     in_screensaver = True
                     self._show_screensaver()
@@ -2132,6 +2140,7 @@ class EinkTerminal:
                     continue
                 if data:
                     self._last_activity = now
+                    self._last_input = now
                     grace = now - self._screensaver_show_mono < 2.0
                     if in_screensaver or self._in_text_message:
                         if not grace:
@@ -2169,6 +2178,7 @@ class EinkTerminal:
                 except OSError:
                     break
                 self._last_activity = now
+                self._last_input = now
                 grace = now - self._screensaver_show_mono < 2.0
                 if in_screensaver or self._in_text_message:
                     if not grace:
@@ -2225,6 +2235,10 @@ class EinkTerminal:
                         try: os.close(tab.pty_master)
                         except OSError: pass
                         tab.pty_master = -1
+                        if tab.child_pid:
+                            try: os.waitpid(tab.child_pid, os.WNOHANG)
+                            except (OSError, ChildProcessError): pass
+                        tab.child_pid = None
 
             # ── Web input (phone keyboard via preview server) ─────────────────
             if self._web_input_queue is not None:
@@ -2232,8 +2246,12 @@ class EinkTerminal:
                     while True:
                         text = self._web_input_queue.get_nowait()
                         if text and self._pty_master is not None:
-                            os.write(self._pty_master, text.encode('utf-8'))
+                            try:
+                                os.write(self._pty_master, text.encode('utf-8'))
+                            except OSError:
+                                continue
                             self._last_activity = now
+                            self._last_input = now
                             if in_screensaver or self._in_text_message:
                                 in_screensaver = False
                                 self._in_text_message = False
