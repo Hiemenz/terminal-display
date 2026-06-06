@@ -7,8 +7,30 @@ device_label: ""
 # Dark mode: black background, white text (recommended for terminal aesthetic)
 dark_mode: false
 
-# How often to refresh (seconds)
+# How often the loop runs / the clock updates on screen (seconds)
 update_interval: 30
+
+# How often the system stat panels (CPU, memory, disk, network, etc.) are
+# re-collected and redrawn (seconds). The clock still ticks every
+# update_interval; only the heavier stats are throttled to this cadence.
+stats_display_interval: 120
+
+# ── Sparkline trends ─────────────────────────────────────────────────────────
+# Draw a 1-hour trend line + min/avg/max badge under the CPU, Load, and Network
+# panels. One history sample is stored per stats collection.
+sparklines_enabled: true
+stats_history_minutes: 60   # how much history to keep / plot
+
+# ── Adaptive refresh cadence ─────────────────────────────────────────────────
+# Vary the refresh cadence by time of day (e.g. brisk during the day, slow
+# overnight to spare the panel). `from`/`to` are 24-hour; a window wraps
+# midnight when from > to; the first matching window wins; omitted keys fall
+# back to the base update_interval / stats_display_interval above.
+# (No brightness knob — the e-ink panel has no backlight.)
+adaptive_refresh: true
+refresh_schedule:
+  - { from: 7,  to: 23, update_interval: 30,  stats_display_interval: 120 }
+  - { from: 23, to: 7,  update_interval: 120, stats_display_interval: 600 }
 
 # Night mode: skip refreshes between night_start and night_end (24-hour format)
 night_mode: true

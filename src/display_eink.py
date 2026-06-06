@@ -597,3 +597,8 @@ class EinkDriver:
                 pass
         self._partial_ready = False
         self._hw_sleeping = True
+        # Deep sleep clears the panel's 0x10 back-buffer, so the partial-diff
+        # reference is no longer valid. Drop it: the first refresh after wake
+        # then takes the full-refresh path (which re-inits) instead of pushing
+        # a partial against a frame the panel no longer holds.
+        self._prev_buf = None

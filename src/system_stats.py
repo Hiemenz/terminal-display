@@ -79,6 +79,21 @@ def _format_bytes(n: float) -> str:
     return f"{n:.1f}PB"
 
 
+def collect_time(config: dict) -> dict:
+    """Cheap clock-only fields — no psutil sampling.
+
+    Lets the displayed time tick every loop while the heavier stats are
+    refreshed on a slower cadence.  Kept here so the time/date format lives
+    in one place and can't drift from collect().
+    """
+    now = datetime.now()
+    return {
+        'uptime': _get_uptime(),
+        'time': now.strftime('%H:%M:%S'),
+        'date': now.strftime('%a, %b %d %Y'),
+    }
+
+
 def collect(config: dict) -> dict:
     """
     Collect all system stats.
@@ -112,7 +127,6 @@ def collect(config: dict) -> dict:
             'top_processes': list[dict],
         }
     """
-    now = datetime.now()
     disk_path = config.get('disk_path', '/')
     net_iface = _get_network_interface(config.get('network_interface', ''))
 
@@ -193,9 +207,7 @@ def collect(config: dict) -> dict:
     return {
         'hostname': socket.gethostname().split('.')[0],
         'platform': platform.system(),
-        'uptime': _get_uptime(),
-        'time': now.strftime('%H:%M:%S'),
-        'date': now.strftime('%a, %b %d %Y'),
+        **collect_time(config),
         'cpu_percent': cpu_pct,
         'cpu_count': cpu_count,
         'cpu_freq_mhz': cpu_freq_mhz,

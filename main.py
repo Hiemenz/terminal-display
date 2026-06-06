@@ -26,7 +26,9 @@ from datetime import datetime
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
 from config_loader import load_config, add_config_arg
-from system_stats import collect
+from system_stats import collect, collect_time
+import stats_history
+from refresh_schedule import effective_intervals
 from render import render, render_output, render_screensaver
 from display import send_to_display
 from display_eink import EinkDriver
@@ -135,6 +137,8 @@ def run_once(config: dict, local: bool = False):
     """One fetch → render → display cycle."""
     print(f"[{datetime.now().strftime('%H:%M:%S')}] Collecting stats…")
     stats = collect(config)
+    stats_history.record(stats, config)
+    stats['history'] = stats_history.snapshot(config)
 
     print("Rendering image…")
     img = render(stats, config)
@@ -189,12 +193,41 @@ def _run_and_render(cmd: str, config: dict, local: bool, driver=None):
         img.save(_OUTPUT_IMAGE)
 
 
-def _loop_cycle(config: dict, local: bool, driver: EinkDriver):
-    """Stats fetch → render → partial (or periodic full) display cycle."""
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Collecting stats…")
-    stats = collect(config)
+# Cached stats so the slow-changing panels only re-collect on their own cadence
+# while the clock keeps ticking each loop. (module-level: survives across calls)
+_stats_cache: dict = {}
+_stats_collected_at: float = 0.0
+
+
+def _loop_cycle(config: dict, local: bool, driver: EinkDriver, stats_interval=None):
+    """Render → partial display cycle.
+
+    The clock updates every cycle, but the heavier system stats are only
+    re-collected every `stats_interval` seconds (default 120). In between, we
+    refresh just the time/date/uptime fields, so the partial diff only touches
+    the clock and the stat panels stay put until they're due. On each real
+    collection we also append a history sample for the sparkline trends.
+    """
+    global _stats_cache, _stats_collected_at
+    now = time.monotonic()
+    if stats_interval is None:
+        stats_interval = config.get('stats_display_interval', 120)
+    stats_due = (not _stats_cache) or (now - _stats_collected_at) >= stats_interval
+
+    if stats_due:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Collecting stats…")
+        _stats_cache = collect(config)
+        _stats_collected_at = now
+        stats_history.record(_stats_cache, config)
+    else:
+        # Cheap refresh of clock fields only; stat panels reuse cached values.
+        _stats_cache.update(collect_time(config))
+
+    # Attach rolling history for the sparkline panels (cheap; reads the buffer).
+    _stats_cache['history'] = stats_history.snapshot(config)
+
     print("Rendering image…")
-    img = render(stats, config)
+    img = render(_stats_cache, config)
     if local:
         os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
         img.save(_OUTPUT_IMAGE)
@@ -292,6 +325,10 @@ Examples:
 
         now = time.monotonic()
 
+        # Adaptive cadence: pick this hour's refresh intervals (slower at night,
+        # etc.). Falls back to the base config values when adaptive_refresh is off.
+        interval, cur_stats_interval = effective_intervals(config)
+
         # --- Activity detection ---
         if _has_active_sessions():
             last_active = now
@@ -343,6 +380,10 @@ Examples:
                         img = render_screensaver(active_image, qr_url, config)
                     if not local:
                         driver.full_refresh(img, _OUTPUT_IMAGE)
+                        # Static image — deep-sleep the panel until activity or
+                        # the next MLB refresh. The next write re-inits via a
+                        # full refresh (see _hw_sleep clearing _prev_buf).
+                        driver.sleep()
                     else:
                         os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
                         img.save(_OUTPUT_IMAGE)
@@ -383,10 +424,11 @@ Examples:
         try:
             if _is_night(config):
                 print("Night mode — sleeping 5 min…")
+                driver.sleep()  # deep-sleep the panel through the night window
                 time.sleep(300)
                 continue
 
-            _loop_cycle(config, local, driver)
+            _loop_cycle(config, local, driver, stats_interval=cur_stats_interval)
         except KeyboardInterrupt:
             stop_event.set()
             print("\nStopped.")
