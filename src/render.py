@@ -74,6 +74,65 @@ def _section_header(draw: ImageDraw.ImageDraw, x: int, y: int, label: str,
     return y + lh + 4
 
 
+def _fmt_rate(bps: float) -> str:
+    """Human-readable bytes/sec."""
+    v = float(bps)
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if v < 1024 or unit == 'GB':
+            return f"{v:.0f}{unit}/s" if unit == 'B' else f"{v:.1f}{unit}/s"
+        v /= 1024
+
+
+def _fmt_rate_short(bps: float) -> str:
+    """Compact bytes/sec for badges: 66KB/s → 66K, 1.2MB/s → 1.2M."""
+    v = float(bps)
+    for unit in ('B', 'K', 'M', 'G'):
+        if v < 1024 or unit == 'G':
+            return f"{v:.0f}{unit}" if unit in ('B', 'K') else f"{v:.1f}{unit}"
+        v /= 1024
+
+
+def _sparkline(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
+               vals: list, fg: int, fixed_max: float = None):
+    """Plot a polyline of `vals` inside the box (x,y)-(x+w,y+h)."""
+    # Bottom axis rule for a visual baseline.
+    draw.line([(x, y + h), (x + w, y + h)], fill=fg, width=1)
+    if len(vals) < 2:
+        return
+    vmin = 0.0
+    vmax = fixed_max if fixed_max is not None else max(vals)
+    vmax = max(vmax * 1.15, 1e-6) if fixed_max is None else vmax
+    span = (vmax - vmin) or 1e-6
+    n = len(vals)
+    pts = []
+    for i, v in enumerate(vals):
+        px = x + round(i * (w - 1) / (n - 1))
+        frac = min(max((v - vmin) / span, 0.0), 1.0)
+        py = y + round((1.0 - frac) * (h - 1))
+        pts.append((px, py))
+    draw.line(pts, fill=fg, width=1)
+
+
+def _trend_row(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, vals: list,
+               fg: int, font: ImageFont.ImageFont, fmt, win_min: int,
+               fixed_max: float = None) -> int:
+    """Sparkline on the left + min/avg/max badge on the right. Returns new y."""
+    spark_h = 16
+    spark_w = int(w * 0.42)
+    _sparkline(draw, x, y, spark_w, spark_h, vals, fg, fixed_max=fixed_max)
+
+    badge_x = x + spark_w + 8
+    if len(vals) >= 1:
+        avg = sum(vals) / len(vals)
+        badge = f"avg {fmt(avg)} · pk {fmt(max(vals))} · lo {fmt(min(vals))}"
+    else:
+        badge = f"{win_min}m collecting…"
+    # Vertically centre the badge text against the sparkline box.
+    th = font.getbbox('Mg')[3]
+    draw.text((badge_x, y + (spark_h - th) // 2), badge, font=font, fill=fg)
+    return y + spark_h + 4
+
+
 def render(stats: dict, config: dict) -> Image.Image:
     """
     Build and return an 800x480 grayscale PIL image from stats.
@@ -93,6 +152,11 @@ def render(stats: dict, config: dict) -> Image.Image:
     d = ImageDraw.Draw(img)
 
     fg = _BLACK  # drawn in black, inverted at the end for dark mode
+
+    # Sparkline history (populated by main before render; empty on first runs).
+    show_spark = config.get('sparklines_enabled', True)
+    hist = stats.get('history', {}) if show_spark else {}
+    hist_min = hist.get('window_minutes', 60)
 
     # -----------------------------------------------------------------------
     # TOP BAR: hostname + time + date
@@ -145,7 +209,11 @@ def render(stats: dict, config: dict) -> Image.Image:
         d.text((lx, ly), f"Usage: {cpu_pct:.1f}%  ({cpu_count} cores){freq_str}", font=f_body, fill=fg)
         ly += ROW_H
         _bar(d, lx, ly, COL_W, BAR_H, cpu_pct, fg, _WHITE, fg)
-        ly += BAR_H + SECTION_GAP
+        ly += BAR_H + 4
+        if show_spark and 'cpu' in hist:
+            ly = _trend_row(d, lx, ly, COL_W, hist['cpu'], fg, f_small,
+                            lambda v: f"{v:.0f}%", hist_min, fixed_max=100)
+        ly += SECTION_GAP
 
     # --- Memory ---
     if config.get('show_memory', True):
@@ -172,7 +240,11 @@ def render(stats: dict, config: dict) -> Image.Image:
         load = stats['load']
         ly = _section_header(d, lx, ly, '[ Load Average ]', f_head, fg, COL_W)
         d.text((lx, ly), f"1m: {load[0]:.2f}   5m: {load[1]:.2f}   15m: {load[2]:.2f}", font=f_body, fill=fg)
-        ly += ROW_H + SECTION_GAP
+        ly += ROW_H
+        if show_spark and hist.get('load'):
+            ly = _trend_row(d, lx, ly, COL_W, hist['load'], fg, f_small,
+                            lambda v: f"{v:.2f}", hist_min)
+        ly += SECTION_GAP
 
     # -----------------------------------------------------------------------
     # RIGHT COLUMN
@@ -189,7 +261,11 @@ def render(stats: dict, config: dict) -> Image.Image:
         d.text((rx, ry), f"↑ Sent:  {net.get('bytes_sent_str','?')}", font=f_body, fill=fg)
         ry += ROW_H
         d.text((rx, ry), f"↓ Recv:  {net.get('bytes_recv_str','?')}", font=f_body, fill=fg)
-        ry += ROW_H + SECTION_GAP
+        ry += ROW_H
+        if show_spark and 'net' in hist:
+            ry = _trend_row(d, rx, ry, COL_W, hist['net'], fg, f_small,
+                            _fmt_rate_short, hist_min)
+        ry += SECTION_GAP
 
     # --- Top Processes ---
     if config.get('show_top_processes', True):
