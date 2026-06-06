@@ -284,8 +284,6 @@ Examples:
     if not os.path.isabs(_static_screensaver):
         _static_screensaver = os.path.join(_REPO_ROOT, _static_screensaver)
     preview_port = config.get('preview_server_port', 8080)
-    screensaver_mode = config.get('screensaver_mode', 'static')
-    mlb_last_render = 0.0
 
     # Activity tracking
     last_active = time.monotonic()   # start as active (just booted)
@@ -358,31 +356,19 @@ Examples:
 
         if should_screensave:
             current_ip = _primary_ip()
-            mlb_refresh_due = (screensaver_mode == 'mlb' and (now - mlb_last_render) > 900)
-            if not in_screensaver or current_ip != screensaver_ip or mlb_refresh_due:
+            if not in_screensaver or current_ip != screensaver_ip:
                 in_screensaver = True
                 screensaver_ip = current_ip
                 qr_url = f'http://{current_ip}:{preview_port}/' if current_ip else ''
                 try:
-                    if screensaver_mode == 'mlb':
-                        from mlb_screensaver import render_mlb_screensaver
-                        img = render_mlb_screensaver(config)
-                        if img is None:
-                            print("MLB fetch failed — falling back to static screensaver")
-                            active_image = get_screensaver_path(photos_dir) or _static_screensaver
-                            img = render_screensaver(active_image, qr_url, config)
-                        else:
-                            mlb_last_render = now
-                            print(f"Screensaver (MLB) — idle {idle_secs:.0f}s")
-                    else:
-                        active_image = get_screensaver_path(photos_dir) or _static_screensaver
-                        print(f"Screensaver — idle {idle_secs:.0f}s  img={os.path.basename(active_image)}  QR→ {qr_url}")
-                        img = render_screensaver(active_image, qr_url, config)
+                    active_image = get_screensaver_path(photos_dir) or _static_screensaver
+                    print(f"Screensaver — idle {idle_secs:.0f}s  img={os.path.basename(active_image)}  QR→ {qr_url}")
+                    img = render_screensaver(active_image, qr_url, config)
                     if not local:
                         driver.full_refresh(img, _OUTPUT_IMAGE)
-                        # Static image — deep-sleep the panel until activity or
-                        # the next MLB refresh. The next write re-inits via a
-                        # full refresh (see _hw_sleep clearing _prev_buf).
+                        # Static image — deep-sleep the panel until activity. The
+                        # next write re-inits via a full refresh (see _hw_sleep
+                        # clearing _prev_buf).
                         driver.sleep()
                     else:
                         os.makedirs(os.path.dirname(_OUTPUT_IMAGE), exist_ok=True)
@@ -417,7 +403,6 @@ Examples:
         if in_screensaver:
             in_screensaver = False
             screensaver_ip = None
-            mlb_last_render = 0.0
             print("Activity detected — resuming stats display")
 
         # Normal stats render
