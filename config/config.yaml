@@ -1,70 +1,11 @@
 # Terminal Display Configuration
 # 800x480 Waveshare 7.5" V2 e-ink display
-
-# Custom label shown on stats screen (leave empty to use hostname)
-device_label: ""
-
-# Dark mode: black background, white text (recommended for terminal aesthetic)
-dark_mode: false
-
-# How often the loop runs / the clock updates on screen (seconds)
-update_interval: 30
-
-# How often the system stat panels (CPU, memory, disk, network, etc.) are
-# re-collected and redrawn (seconds). The clock still ticks every
-# update_interval; only the heavier stats are throttled to this cadence.
-stats_display_interval: 120
-
-# ── Sparkline trends ─────────────────────────────────────────────────────────
-# Draw a 1-hour trend line + min/avg/max badge under the CPU, Load, and Network
-# panels. One history sample is stored per stats collection.
-sparklines_enabled: true
-stats_history_minutes: 60   # how much history to keep / plot
-
-# ── Adaptive refresh cadence ─────────────────────────────────────────────────
-# Vary the refresh cadence by time of day (e.g. brisk during the day, slow
-# overnight to spare the panel). `from`/`to` are 24-hour; a window wraps
-# midnight when from > to; the first matching window wins; omitted keys fall
-# back to the base update_interval / stats_display_interval above.
-# (No brightness knob — the e-ink panel has no backlight.)
-adaptive_refresh: true
-refresh_schedule:
-  - { from: 7,  to: 23, update_interval: 30,  stats_display_interval: 120 }
-  - { from: 23, to: 7,  update_interval: 120, stats_display_interval: 600 }
-
-# Night mode: skip refreshes between night_start and night_end (24-hour format)
-night_mode: true
-night_start: 2
-night_end: 7
-
-# Timezone for time display (IANA string)
-timezone: America/Chicago
-
-# Which panels to show (set to false to hide)
-show_time: true
-show_cpu: true
-show_memory: true
-show_disk: true
-show_network: true
-show_top_processes: true
-show_load: true
-
-# Disk path to monitor
-disk_path: /
-
-# Network interface to monitor (empty = auto-detect)
-network_interface: ""
-
-# Speedtest interval: run a real speedtest.net test every N seconds (default 20 min)
-# Set to 0 to disable speedtest and fall back to local throughput sampling.
-speedtest_interval: 1200
-
-# Number of top processes to show
-top_process_count: 5
-
-# Font paths (falls back to PIL default if not found)
-# Leave empty to use auto-detected system monospace font
-font_path: ""
+#
+# The terminal emulator + QR / preview settings come first (the primary use of
+# this device); the stats dashboard, screensaver, and startup options follow.
+#
+# Tip: on the device you can open the on-display config editor by typing
+#      `settings` (or `eink`) in the terminal, or via F6 → ⚙ Settings.
 
 # ── Terminal emulator settings ──────────────────────────────────────────────
 # Font size for terminal text (pt). Determines cols×rows that fit on screen.
@@ -135,18 +76,6 @@ terminal_tmux_session: eink
 # with tmux, use Ctrl+B [ to enter copy mode).
 terminal_scrollback: 500
 
-# Minutes of no keyboard activity before the terminal switches to the
-# screensaver AND deep-sleeps the e-ink panel (the image is retained with no
-# power; any keypress wakes it). 0 = never sleep. This takes precedence over
-# terminal_idle_timeout below and is editable from the on-display config editor.
-screensaver_sleep_minutes: 15
-
-# (legacy, seconds) Idle timeout — used only if screensaver_sleep_minutes is
-# unset. Set to 0 to disable.
-terminal_idle_timeout: 900
-
-# (removed — idle refreshes are no longer done; the display sleeps on screensaver instead)
-
 # Cursor style: 'block' (filled reverse-video cell) or 'underline' (thin bar).
 terminal_cursor_style: block
 
@@ -169,6 +98,7 @@ terminal_prompt_symbol: "$"       # trailing prompt symbol
 #   <path> — any explicit absolute path
 terminal_start_dir: home
 
+# ── QR codes & status bar ────────────────────────────────────────────────────
 # Show QR code in terminal corner (URL of current page or web UI link)
 terminal_show_qr: true
 
@@ -215,11 +145,87 @@ terminal_paste_file: ~/eink-paste.txt
 preview_server_enabled: true
 preview_server_port: 8080
 
-# ── Stats dashboard settings ─────────────────────────────────────────────────
+# ── General display ──────────────────────────────────────────────────────────
+# Custom label shown on stats screen (leave empty to use hostname)
+device_label: ""
+
+# Dark mode: black background, white text (recommended for terminal aesthetic)
+dark_mode: false
+
+# How often the loop runs / the clock updates on screen (seconds)
+update_interval: 30
+
+# How often the system stat panels (CPU, memory, disk, network, etc.) are
+# re-collected and redrawn (seconds). The clock still ticks every
+# update_interval; only the heavier stats are throttled to this cadence.
+stats_display_interval: 120
+
+# Timezone for time display (IANA string)
+timezone: America/Chicago
+
+# Night mode: skip refreshes between night_start and night_end (24-hour format)
+night_mode: true
+night_start: 2
+night_end: 7
+
+# ── Sparkline trends ─────────────────────────────────────────────────────────
+# Draw a 1-hour trend line + min/avg/max badge under the CPU, Load, and Network
+# panels. One history sample is stored per stats collection.
+sparklines_enabled: true
+stats_history_minutes: 60   # how much history to keep / plot
+
+# ── Adaptive refresh cadence ─────────────────────────────────────────────────
+# Vary the refresh cadence by time of day (e.g. brisk during the day, slow
+# overnight to spare the panel). `from`/`to` are 24-hour; a window wraps
+# midnight when from > to; the first matching window wins; omitted keys fall
+# back to the base update_interval / stats_display_interval above.
+# (No brightness knob — the e-ink panel has no backlight.)
+adaptive_refresh: true
+refresh_schedule:
+  - { from: 7,  to: 23, update_interval: 30,  stats_display_interval: 120 }
+  - { from: 23, to: 7,  update_interval: 120, stats_display_interval: 600 }
+
+# ── Stats dashboard panels ───────────────────────────────────────────────────
+# Which panels to show (set to false to hide)
+show_time: true
+show_cpu: true
+show_memory: true
+show_disk: true
+show_network: true
+show_top_processes: true
+show_load: true
+
+# Disk path to monitor
+disk_path: /
+
+# Network interface to monitor (empty = auto-detect)
+network_interface: ""
+
+# Speedtest interval: run a real speedtest.net test every N seconds (default 20 min)
+# Set to 0 to disable speedtest and fall back to local throughput sampling.
+speedtest_interval: 1200
+
+# Number of top processes to show
+top_process_count: 5
+
+# Font paths (falls back to PIL default if not found)
+# Leave empty to use auto-detected system monospace font
+font_path: ""
+
 # Show QR code for primary IP address in the bottom-right of the stats screen.
 show_qr_code: true
 
 # ── Screensaver / idle mode ──────────────────────────────────────────────────
+# Minutes of no keyboard activity before the terminal switches to the
+# screensaver AND deep-sleeps the e-ink panel (the image is retained with no
+# power; any keypress wakes it). 0 = never sleep. This takes precedence over
+# terminal_idle_timeout below and is editable from the on-display config editor.
+screensaver_sleep_minutes: 15
+
+# (legacy, seconds) Idle timeout — used only if screensaver_sleep_minutes is
+# unset. Set to 0 to disable.
+terminal_idle_timeout: 900
+
 # When no SSH session or web activity is detected for screensaver_idle_timeout
 # seconds, switch to the screensaver image with a QR code overlay.
 # Scanning the QR code opens the web UI and immediately wakes stats display.
@@ -233,12 +239,9 @@ screensaver_idle_timeout: 3600
 # Relative paths are resolved from the project root.
 screensaver_image_path: "assets/test.jpg"
 
-# 'static' = one image, 'cycle' = rotate through gallery, 'mlb' = MLB scores & standings
+# 'static' = one image, 'cycle' = rotate through gallery
 screensaver_mode: static
 screensaver_cycle_interval: 5
-
-# MLB screensaver: favorite team abbreviation to highlight (e.g. 'CHC', 'NYY', 'LAD')
-screensaver_mlb_team: ""
 
 # ── System overlay services (F4 service manager) ─────────────────────────────
 terminal_services:

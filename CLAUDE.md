@@ -64,7 +64,7 @@ main.py
 
 ## Waveshare Driver
 
-`src/waveshare_epd/` contains the Pi hardware driver (copied from mlb_display).
+`src/waveshare_epd/` contains the Pi hardware driver for the Waveshare panel.
 On macOS the driver import is skipped — `output/terminal.bmp` is the preview.
 
 ## Dev Tips

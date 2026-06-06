@@ -100,9 +100,8 @@ _CONFIG_SCHEMA = [
         ['screensaver_sleep_minutes',   'select', 'Sleep After (min)',    [0, 5, 10, 15, 30, 60]],
         ['screensaver_enabled',         'bool',   'Enabled',              None],
         ['screensaver_idle_timeout',    'int',    'Idle Timeout (s)',      'Before screensaver activates'],
-        ['screensaver_mode',            'select', 'Mode',                 ['static', 'cycle', 'mlb']],
+        ['screensaver_mode',            'select', 'Mode',                 ['static', 'cycle']],
         ['screensaver_cycle_interval',  'int',    'Cycle Interval (min)', 'Cycle mode only'],
-        ['screensaver_mlb_team',        'str',    'MLB Team',             'e.g. CHC, NYY — empty = all'],
     ]],
     ['Startup & Web', [
         ['startup_mode',            'select', 'Startup Mode',          ['terminal', 'stats']],
