@@ -6,6 +6,7 @@
 #
 # Tip: on the device you can open the on-display config editor by typing
 #      `settings` (or `eink`) in the terminal, or via F6 → ⚙ Settings.
+#      Type `clear-eink` to wipe the screen + ghosting on demand.
 
 # ── Terminal emulator settings ──────────────────────────────────────────────
 # Font size for terminal text (pt). Determines cols×rows that fit on screen.
@@ -225,6 +226,12 @@ screensaver_sleep_minutes: 15
 # (legacy, seconds) Idle timeout — used only if screensaver_sleep_minutes is
 # unset. Set to 0 to disable.
 terminal_idle_timeout: 900
+
+# Minutes of no real input before the terminal auto-resets: the shell + tmux
+# session are killed and a brand-new shell is started, so whoever comes back
+# lands on a clean prompt. Fires once per idle period (after the screensaver).
+# 0 = never auto-reset. You can also clear on demand by typing `clear-eink`.
+terminal_reset_minutes: 60
 
 # When no SSH session or web activity is detected for screensaver_idle_timeout
 # seconds, switch to the screensaver image with a QR code overlay.
