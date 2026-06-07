@@ -20,6 +20,7 @@ Usage:
   if server:
       text = server.input_queue.get_nowait()
 """
+import base64
 import io
 import json
 import logging
@@ -31,8 +32,54 @@ import subprocess
 import threading
 import time
 import urllib.parse
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import List
+
+
+class TerminalBroadcast:
+    """Fan-out of live PTY output to web-terminal (xterm.js) subscribers.
+
+    The app feeds raw PTY bytes via feed(); each SSE client gets a queue.
+    A rolling ring buffer of recent bytes is replayed to new subscribers so a
+    freshly-opened browser tab paints the current screen instead of a blank one.
+    """
+
+    def __init__(self, ring_bytes: int = 65536):
+        self._subs: List[queue.Queue] = []
+        self._lock = threading.Lock()
+        self._ring = bytearray()
+        self._ring_max = ring_bytes
+        self.cols = 80
+        self.rows = 24
+
+    def set_size(self, cols: int, rows: int):
+        self.cols, self.rows = int(cols), int(rows)
+
+    def feed(self, data: bytes):
+        if not data:
+            return
+        with self._lock:
+            self._ring.extend(data)
+            if len(self._ring) > self._ring_max:
+                del self._ring[:-self._ring_max]
+            subs = list(self._subs)
+        for q in subs:
+            try:
+                q.put_nowait(data)
+            except queue.Full:
+                pass   # slow client — drop; ring replay recovers it on reconnect
+
+    def subscribe(self):
+        q: queue.Queue = queue.Queue(maxsize=2000)
+        with self._lock:
+            snapshot = bytes(self._ring)
+            self._subs.append(q)
+        return q, snapshot
+
+    def unsubscribe(self, q: queue.Queue):
+        with self._lock:
+            if q in self._subs:
+                self._subs.remove(q)
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +156,15 @@ _CONFIG_SCHEMA = [
         ['preview_server_port',     'int',    'Web Port',              None],
         ['speedtest_interval',      'int',    'Speedtest Interval (s)', '1200 = 20 min, 0 = disable'],
         ['command_display_seconds', 'int',    'Command Display (s)',   'Seconds to show output'],
+    ]],
+    ['Push Notifications', [
+        ['notify_provider',     'select', 'Provider',          ['none', 'ntfy', 'pushover']],
+        ['notify_min_interval', 'int',    'Min Interval (s)',  'Rate-limit repeats of the same alert'],
+        ['ntfy_server',         'str',    'ntfy Server',       'Default https://ntfy.sh'],
+        ['ntfy_topic',          'str',    'ntfy Topic',        'Subscribe to this in the ntfy app'],
+        ['ntfy_token',          'str',    'ntfy Token',        'Only for protected topics'],
+        ['pushover_token',      'str',    'Pushover App Token', None],
+        ['pushover_user',       'str',    'Pushover User Key',  None],
     ]],
 ]
 
@@ -486,6 +542,89 @@ def _crop_to_display(img):
     top = (new_h - _DISPLAY_H) // 2
     return img.crop((left, top, left + _DISPLAY_W, top + _DISPLAY_H))
 
+_TERMINAL_HTML = '''\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>e-ink terminal</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.min.css">
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.min.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; color: #ccc;
+      font-family: -apple-system, system-ui, sans-serif; }
+    #bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+      background: #111; border-bottom: 1px solid #222; font-size: 14px; }
+    #bar b { color: #fff; }
+    #status { margin-left: auto; font-size: 12px; color: #888; }
+    #status.live { color: #3fb950; }
+    #status.down { color: #f85149; }
+    a.pill { color: #ccc; text-decoration: none; background: #222;
+      padding: 4px 10px; border-radius: 6px; font-size: 13px; }
+    #term { position: absolute; top: 41px; left: 0; right: 0; bottom: 0;
+      padding: 6px; box-sizing: border-box; }
+  </style>
+</head>
+<body>
+  <div id="bar">
+    <b>e-ink terminal</b>
+    <a class="pill" href="/">&#128241; Display</a>
+    <a class="pill" href="/config">&#9881; Config</a>
+    <span id="status">connecting…</span>
+  </div>
+  <div id="term"></div>
+  <script>
+    const term = new Terminal({
+      fontSize: 13, cursorBlink: true, convertEol: false,
+      scrollback: 5000,
+      theme: { background: '#000000', foreground: '#cccccc' },
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById('term'));
+    fit.fit();
+    const status = document.getElementById('status');
+
+    // Keystrokes → the PTY via the existing /send endpoint.
+    term.onData(d => {
+      fetch('/send', { method: 'POST', body: d }).catch(() => {});
+    });
+
+    function b64ToBytes(b64) {
+      const bin = atob(b64);
+      const out = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+      return out;
+    }
+
+    let es;
+    function connect() {
+      es = new EventSource('/terminal/stream');
+      es.addEventListener('size', e => {
+        const m = String(e.data).split('x');
+        if (m.length === 2) {
+          // Match the e-ink panel geometry so output lines up.
+          term.resize(parseInt(m[0], 10) || term.cols,
+                      parseInt(m[1], 10) || term.rows);
+        }
+      });
+      es.onmessage = e => { term.write(b64ToBytes(e.data)); };
+      es.onopen = () => { status.textContent = 'live'; status.className = 'live'; };
+      es.onerror = () => {
+        status.textContent = 'reconnecting…'; status.className = 'down';
+        es.close();
+        setTimeout(connect, 1500);   // EventSource auto-retry is unreliable here
+      };
+    }
+    connect();
+    term.focus();
+  </script>
+</body>
+</html>
+'''
+
 _PAGE_HTML = '''\
 <!DOCTYPE html>
 <html lang="en">
@@ -797,6 +936,7 @@ _PAGE_HTML = '''\
     <span class="logo">e-ink</span>
     <div class="header-right">
       <a href="/config" class="pill-btn">&#9881; Config</a>
+      <a href="/terminal" class="pill-btn">&#128421; Terminal</a>
       <a href="/gallery" class="pill-btn">&#128247; Gallery</a>
       <a href="/clipboard" class="pill-btn">&#128203; Clips</a>
       <button id="mode-btn" class="pill-btn" onclick="toggleMode()">&#8644; Mode</button>
@@ -1370,13 +1510,20 @@ def _render_beam_page(text: str) -> str:
 def _make_handler(bmp_path: str, input_queue: queue.Queue,
                   activity_ref: List[float], photos_dir: str, config_path: str = '',
                   clipboard_path: str = '', display_queue: queue.Queue = None,
-                  beam_ref: List[str] = None):
+                  beam_ref: List[str] = None, term_broadcast: 'TerminalBroadcast' = None,
+                  health_ref: List[dict] = None):
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             activity_ref[0] = time.time()
             path = self.path.split('?')[0]
             if path in ('/', '/live'):
                 self._respond(200, 'text/html; charset=utf-8', _PAGE_HTML.encode())
+            elif path == '/terminal':
+                self._respond(200, 'text/html; charset=utf-8', _TERMINAL_HTML.encode())
+            elif path == '/terminal/stream':
+                self._serve_terminal_stream()
+            elif path == '/health':
+                self._serve_health()
             elif path in ('/display', '/snapshot'):
                 self._serve_display()
             elif path == '/gallery':
@@ -1452,6 +1599,53 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._respond(503, 'text/plain', b'Display not yet rendered')
             except Exception as e:
                 self._respond(500, 'text/plain', str(e).encode())
+
+        def _serve_health(self):
+            data = dict(health_ref[0]) if health_ref and health_ref[0] else {}
+            self._respond(200, 'application/json', json.dumps(data).encode())
+
+        def _serve_terminal_stream(self):
+            """SSE stream of live PTY output (base64 per event) for xterm.js."""
+            if term_broadcast is None:
+                self._respond(503, 'text/plain', b'terminal stream unavailable')
+                return
+            try:
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/event-stream')
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Connection', 'keep-alive')
+                self.send_header('X-Accel-Buffering', 'no')
+                self.end_headers()
+            except OSError:
+                return
+            q, snapshot = term_broadcast.subscribe()
+            try:
+                # Tell the client the terminal geometry, then replay the ring
+                # buffer so the page paints the current screen immediately.
+                self._sse_event('size',
+                                f'{term_broadcast.cols}x{term_broadcast.rows}')
+                if snapshot:
+                    self._sse_data(snapshot)
+                while True:
+                    try:
+                        data = q.get(timeout=15)
+                        self._sse_data(data)
+                    except queue.Empty:
+                        self.wfile.write(b': keep-alive\n\n')
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            finally:
+                term_broadcast.unsubscribe(q)
+
+        def _sse_data(self, data: bytes):
+            payload = base64.b64encode(data).decode('ascii')
+            self.wfile.write(f'data: {payload}\n\n'.encode('ascii'))
+            self.wfile.flush()
+
+        def _sse_event(self, event: str, data: str):
+            self.wfile.write(f'event: {event}\ndata: {data}\n\n'.encode('utf-8'))
+            self.wfile.flush()
 
         def _serve_photos_json(self):
             photos = _list_photos(photos_dir)
@@ -1743,10 +1937,18 @@ class PreviewServer:
         self.display_queue: queue.Queue = queue.Queue()
         self._activity_ref: List[float] = [time.time()]
         self._beam_ref:     List[str] = ['']   # latest "beam to phone" text
+        # Live PTY fan-out for the xterm.js web terminal; the app feeds it.
+        self.term_broadcast = TerminalBroadcast()
+        # App health snapshot exposed at /health (filled by the app loop).
+        self.health_ref:    List[dict] = [{}]
 
     def set_beam_text(self, text: str):
         """Store the text shown at /beam (called by the app on beam-to-phone)."""
         self._beam_ref[0] = text or ''
+
+    def set_health(self, snapshot: dict):
+        """Publish the latest app health snapshot for /health."""
+        self.health_ref[0] = snapshot
 
     @property
     def last_activity(self) -> float:
@@ -1760,8 +1962,11 @@ class PreviewServer:
             clipboard_path=self._clipboard_path,
             display_queue=self.display_queue,
             beam_ref=self._beam_ref,
+            term_broadcast=self.term_broadcast,
+            health_ref=self.health_ref,
         )
-        self._server = HTTPServer(('', self._port), handler)
+        self._server = ThreadingHTTPServer(('', self._port), handler)
+        self._server.daemon_threads = True
         self._server.allow_reuse_address = True
         t = threading.Thread(target=self._server.serve_forever, daemon=True)
         t.start()

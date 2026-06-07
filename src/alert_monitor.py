@@ -10,6 +10,11 @@ import time
 
 import psutil
 
+try:
+    import notifier
+except ImportError:   # notifier lives alongside this module on sys.path
+    notifier = None
+
 _ALERT_DURATION = 10.0  # seconds each alert is shown
 
 
@@ -42,13 +47,18 @@ class AlertMonitor:
 
     # ─── private ──────────────────────────────────────────────────────────────
 
-    def _push(self, msg: str):
+    def _push(self, msg: str, key: str = None, priority: str = 'high',
+              tags: str = 'warning'):
         # Avoid duplicating the same message while it is still active
         now = time.monotonic()
         for m, exp in self._alerts:
             if m == msg and exp > now:
                 return
         self._alerts.append((msg, now + _ALERT_DURATION))
+        # Fan out to phone push (no-op unless notify_provider is configured;
+        # notifier applies its own per-key rate limit so we don't spam).
+        if notifier is not None:
+            notifier.notify(msg, priority=priority, tags=tags, key=key)
 
     def _expire(self, now: float) -> bool:
         before = len(self._alerts)
@@ -61,7 +71,7 @@ class AlertMonitor:
             return False
         pct = psutil.cpu_percent()  # uses cached value, no blocking interval
         if pct >= threshold:
-            self._push(f'HIGH CPU {pct:.0f}%')
+            self._push(f'HIGH CPU {pct:.0f}%', key='cpu')
             return True
         return False
 
@@ -74,7 +84,7 @@ class AlertMonitor:
             usage = psutil.disk_usage(path)
             free_pct = 100.0 - usage.percent
             if free_pct <= threshold:
-                self._push(f'LOW DISK {free_pct:.0f}% free on {path}')
+                self._push(f'LOW DISK {free_pct:.0f}% free on {path}', key='disk')
                 return True
         except Exception:
             pass
@@ -92,7 +102,9 @@ class AlertMonitor:
             self._last_who = sessions
             for s in new:
                 user = s.split()[0] if s.split() else '?'
-                self._push(f'SSH LOGIN: {user}')
+                # Unique key per login line so distinct logins all notify.
+                self._push(f'SSH LOGIN: {user}', key=f'ssh:{s}',
+                           priority='high', tags='warning,key')
             return bool(new)
         except Exception:
             return False

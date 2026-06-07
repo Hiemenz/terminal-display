@@ -260,6 +260,9 @@ Examples:
     config = load_config(args.config)
     interval = config.get('update_interval', 30)
 
+    import notifier
+    notifier.configure(config)
+
     # On macOS always use local mode (no hardware)
     local = args.local or (platform.system() == 'Darwin')
 
@@ -306,7 +309,15 @@ Examples:
     )
     evdev_thread.start()
 
+    # Health watchdog: announce readiness + keep the systemd WatchdogSec timer
+    # fed so a hung stats loop is restarted. did_work=True always (this loop is
+    # interval-driven, not select-spin prone, so no spin detection needed).
+    import watchdog as _watchdog
+    _watchdog.notify_ready()
+    _wd = _watchdog.LoopWatchdog()
+
     while True:
+        _wd.tick(did_work=True)
         if switch_event.is_set():
             print("Switching to terminal mode…")
             term_py = os.path.join(_REPO_ROOT, 'eink_terminal.py')
@@ -396,6 +407,7 @@ Examples:
                     _run_and_render(cmd.strip(), config, local, driver)
                     cmd_display_until = time.monotonic() + cmd_display_secs
                     break
+                _wd.tick(did_work=True)
                 time.sleep(min(0.5, remaining))
             continue
 
@@ -410,7 +422,13 @@ Examples:
             if _is_night(config):
                 print("Night mode — sleeping 5 min…")
                 driver.sleep()  # deep-sleep the panel through the night window
-                time.sleep(300)
+                # Chunk the sleep so the systemd watchdog keeps getting fed and
+                # a mode-switch is still responsive during the night window.
+                _night_end = time.monotonic() + 300
+                while (time.monotonic() < _night_end
+                       and not stop_event.is_set() and not switch_event.is_set()):
+                    _wd.tick(did_work=True)
+                    time.sleep(min(5.0, _night_end - time.monotonic()))
                 continue
 
             _loop_cycle(config, local, driver, stats_interval=cur_stats_interval)
@@ -440,6 +458,7 @@ Examples:
                     _run_and_render(cmd, config, local, driver)
                     cmd_display_until = time.monotonic() + cmd_display_secs
                     break
+            _wd.tick(did_work=True)
             time.sleep(min(0.5, remaining))
 
 

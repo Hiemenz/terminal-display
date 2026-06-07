@@ -17,6 +17,12 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=10
 
+# Health watchdog: the app pings WATCHDOG=1 from its main loop (see
+# src/watchdog.py). If it hangs and stops pinging for this long, systemd
+# kills + restarts it. A busy-spin keeps pinging, so the app also runs its
+# own spin detector. Both run modes (terminal + stats) send pings.
+WatchdogSec=60
+
 # Ensure SPI, GPIO, and raw keyboard input are accessible (Pi-specific)
 SupplementaryGroups=spi gpio video input
 

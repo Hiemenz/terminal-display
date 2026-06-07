@@ -270,3 +270,18 @@ startup_mode: terminal
 
 # How many seconds to show command output before returning to stats dashboard
 command_display_seconds: 15
+
+# ── Push notifications ───────────────────────────────────────────────────────
+# Forward on-screen alerts (high CPU, low disk, SSH logins) to your phone.
+# Provider: none (disabled) | ntfy | pushover
+notify_provider: none
+# Don't resend the same alert key more often than this (seconds).
+notify_min_interval: 60
+# ntfy: install the ntfy app, subscribe to ntfy_topic. Self-host by changing
+# ntfy_server. ntfy_token only needed for access-protected topics.
+ntfy_server: "https://ntfy.sh"
+ntfy_topic: ""
+ntfy_token: ""
+# Pushover: create an app to get a token, find your user key in the dashboard.
+pushover_token: ""
+pushover_user: ""

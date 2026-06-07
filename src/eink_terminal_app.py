@@ -398,6 +398,14 @@ class EinkTerminal:
             config.get('terminal_paste_file', '~/eink-paste.txt')
         )
         self._alert_monitor = AlertMonitor(config)
+        try:
+            import notifier
+            notifier.configure(config)
+        except ImportError:
+            pass
+        self._watchdog = None          # set in run() (health watchdog)
+        self._last_health_push = 0.0   # throttle for /health publishing
+        self._start_mono = time.monotonic()
         self._web_input_queue = None   # set in run() when preview server starts
 
         # Split-view stats
@@ -2228,7 +2236,19 @@ class EinkTerminal:
             self._preview_server  = server
             self._web_input_queue = server.input_queue
             self._display_queue   = server.display_queue
+            # Match the web terminal's geometry to the pyte screen so output
+            # wraps identically in the browser and on the panel.
+            server.term_broadcast.set_size(self._screen.columns, self._screen.lines)
         self._render(force_full=True)
+
+        # Health watchdog: announce readiness to systemd and start the
+        # sd-ping + busy-loop detector that runs inside _loop().
+        try:
+            import watchdog
+            watchdog.notify_ready()
+            self._watchdog = watchdog.LoopWatchdog()
+        except ImportError:
+            self._watchdog = None
 
         try:
             self._loop()
@@ -2297,6 +2317,7 @@ class EinkTerminal:
                 break
 
             now = time.monotonic()
+            did_work = False   # set True when real bytes are consumed this pass
 
             # ── `settings` command requested the config editor (SIGUSR1) ──────
             if self._open_settings_requested:
@@ -2345,6 +2366,7 @@ class EinkTerminal:
                     self._evdev_disconnect()
                     continue
                 if data:
+                    did_work = True
                     self._last_activity = now
                     self._last_input = now
                     self._did_idle_reset = False
@@ -2390,6 +2412,7 @@ class EinkTerminal:
                     # is left alone; fall back to evdev hot-plug / web input.
                     self._stdin_eof = True
                     continue
+                did_work = True
                 self._last_activity = now
                 self._last_input = now
                 self._did_idle_reset = False
@@ -2432,11 +2455,15 @@ class EinkTerminal:
                 try:
                     chunk = os.read(tab.pty_master, 4096)
                     if chunk:
+                        did_work = True
                         chunk = _filter_pty_output(chunk, tab.pty_master)
                         if chunk:
                             if tab_i == self._active_tab and self._scroll_pages > 0 and not in_screensaver:
                                 self._snap_to_live()
                             tab.stream.feed(chunk)
+                            # Mirror the active tab to the web terminal (xterm.js).
+                            if tab_i == self._active_tab and self._preview_server is not None:
+                                self._preview_server.term_broadcast.feed(chunk)
                         if tab_i == self._active_tab and not in_screensaver:
                             self._last_activity = now
                             has_pending = True
@@ -2464,6 +2491,7 @@ class EinkTerminal:
                                 os.write(self._pty_master, text.encode('utf-8'))
                             except OSError:
                                 continue
+                            did_work = True
                             self._last_activity = now
                             self._last_input = now
                             self._did_idle_reset = False
@@ -2482,6 +2510,7 @@ class EinkTerminal:
                 try:
                     while True:
                         cmd = self._display_queue.get_nowait()
+                        did_work = True
                         action = cmd.get('type', '')
                         if action == 'message':
                             self._show_text_message(
@@ -2547,6 +2576,24 @@ class EinkTerminal:
                 self._render(force_flash=True)
                 self._screen.dirty.clear()
                 last_render = now
+
+            # ── Health watchdog: sd ping + busy-loop detection ────────────────
+            if self._watchdog is not None:
+                self._watchdog.tick(did_work)
+
+            # ── Publish /health snapshot (throttled) ──────────────────────────
+            if (self._preview_server is not None
+                    and now - self._last_health_push >= 2.0):
+                self._last_health_push = now
+                self._preview_server.set_health({
+                    'mode': 'terminal',
+                    'uptime_s': round(now - self._start_mono, 1),
+                    'idle_s': round(now - self._last_input, 1),
+                    'in_screensaver': in_screensaver,
+                    'spinning': bool(self._watchdog and self._watchdog.spinning),
+                    'stdin_eof': self._stdin_eof,
+                    'tabs': len(self._tabs),
+                })
 
     def _shell_exited_handler(self) -> bool:
         msg = (
