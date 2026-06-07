@@ -16,6 +16,10 @@ Hotkeys (while the terminal is active):
     F10            Force a full display refresh (clears ghosting)
     F11            Switch to stats dashboard (launches main.py)
     Ctrl+C         Kill the foreground process (forwarded to shell normally)
+
+Typeable commands (run from the shell):
+    settings / eink   Open the on-display config editor
+    clear-eink        Clear the screen + e-ink ghosting (keeps the shell)
 """
 import sys
 import os

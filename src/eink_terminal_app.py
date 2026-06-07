@@ -291,6 +291,13 @@ class EinkTerminal:
         _sleep_min = config.get('screensaver_sleep_minutes')
         self._idle_timeout = (int(_sleep_min) * 60 if _sleep_min is not None
                               else config.get('terminal_idle_timeout', 0))
+        # Idle reset: after a longer idle window, kill the shell/tmux session and
+        # start a brand-new one, so whoever returns gets a clean terminal.
+        # terminal_reset_minutes (minutes; 0 = never). Fires once per idle period.
+        self._reset_timeout = int(config.get('terminal_reset_minutes', 60) or 0) * 60
+        self._did_idle_reset = False
+        # Set by the `clear-eink` shell command (SIGUSR2); handled in the loop.
+        self._clear_requested = False
         self._split_view  = config.get('terminal_split_view', False)
         self._status_extras  = config.get('terminal_status_bar_extras', True)
         self._cursor_style   = config.get('terminal_cursor_style', 'block')
@@ -510,6 +517,24 @@ class EinkTerminal:
                 with open(path, 'w') as f:
                     f.write(script)
                 os.chmod(path, 0o755)
+            # `clear-eink` → SIGUSR2 → clear the screen + scrollback and do a
+            # whole-panel ghost-clearing refresh (keeps the running shell).
+            clear_script = (
+                '#!/bin/sh\n'
+                '# Clears the e-ink terminal (screen + ghosting). Auto-generated\n'
+                '# by eink_terminal_app.py — edits will be overwritten on launch.\n'
+                'pidfile=/tmp/eink-terminal-active\n'
+                'if [ -r "$pidfile" ] && kill -USR2 "$(cat "$pidfile")" 2>/dev/null; then\n'
+                '    exit 0\n'
+                'fi\n'
+                'echo "e-ink terminal not running (no $pidfile)" >&2\n'
+                'exit 1\n'
+            )
+            for name in ('clear-eink',):
+                path = os.path.join(bindir, name)
+                with open(path, 'w') as f:
+                    f.write(clear_script)
+                os.chmod(path, 0o755)
         except OSError as e:
             logger.warning('could not install command scripts: %s', e)
             return
@@ -523,6 +548,19 @@ class EinkTerminal:
         """SIGUSR1 handler — set a flag for the main loop. Kept minimal so it's
         safe to run from a signal context (no rendering or I/O here)."""
         self._open_settings_requested = True
+
+    def _on_clear_signal(self, signum, frame):
+        """SIGUSR2 handler (`clear-eink`) — flag a screen clear for the loop."""
+        self._clear_requested = True
+
+    def _on_shutdown_signal(self, signum, frame):
+        """SIGINT/SIGTERM — request a graceful shutdown instead of crashing.
+
+        In raw-keyboard mode Ctrl+C is forwarded to the shell as a byte and this
+        never fires; it matters when stdin is left cooked (evdev keyboard, or an
+        SSH session driving the app) so a stray Ctrl+C cleans up the panel
+        instead of killing the process mid-refresh."""
+        self._running = False
 
     # ─── Screen ──────────────────────────────────────────────────────────────
 
@@ -1715,6 +1753,68 @@ class EinkTerminal:
             self._driver.flash_refresh(self._last_image)
             self._last_full_refresh_mono = time.monotonic()
 
+    def _clear_screen(self):
+        """Clear the active terminal's screen + scrollback and ghost-clear the
+        panel, leaving the running shell intact (the `clear-eink` command)."""
+        try:
+            if self._use_tmux:
+                subprocess.run(
+                    ['tmux', 'clear-history', '-t', self._tmux_session],
+                    capture_output=True, timeout=1,
+                )
+        except Exception:
+            pass
+        try:
+            self._screen.reset()
+        except Exception:
+            pass
+        self._scroll_pages = 0
+        # Ctrl+L: ask the shell's line editor to repaint a clean prompt at the top.
+        if self._pty_master is not None:
+            try:
+                os.write(self._pty_master, b'\x0c')
+            except OSError:
+                pass
+        self._render(force_full=True)
+        if self._last_image is not None:
+            self._driver.flash_refresh(self._last_image)
+        self._last_full_refresh_mono = time.monotonic()
+
+    def _reset_session(self, render: bool = True):
+        """Kill the shell (and tmux session/tabs) and start a brand-new one, so a
+        returning user gets a fresh terminal. Used by the idle auto-reset."""
+        logger.info('Idle reset — starting a fresh shell')
+        # Tear down every tab's child + any per-tab tmux sessions.
+        for tab in self._tabs:
+            if tab.child_pid:
+                try: os.kill(tab.child_pid, signal.SIGTERM)
+                except (ProcessLookupError, OSError): pass
+            if tab.pty_master is not None and tab.pty_master >= 0:
+                try: os.close(tab.pty_master)
+                except OSError: pass
+            if self._use_tmux and tab.tmux_session:
+                try:
+                    subprocess.run(['tmux', 'kill-session', '-t', tab.tmux_session],
+                                   capture_output=True, timeout=2)
+                except Exception:
+                    pass
+        if self._use_tmux:
+            try:
+                subprocess.run(['tmux', 'kill-session', '-t', self._tmux_session],
+                               capture_output=True, timeout=2)
+            except Exception:
+                pass
+        # Fresh screen + shell, collapsed back to a single tab.
+        self._init_screen()
+        self._spawn_shell()
+        self._tabs = [_Tab(screen=self._screen, stream=self._stream,
+                           pty_master=self._pty_master, child_pid=self._child_pid,
+                           tmux_session=self._tmux_session)]
+        self._active_tab = 0
+        self._scroll_pages = 0
+        if render:
+            self._render(force_full=True)
+
     def _show_text_message(self, text: str, label: str = ''):
         """Display custom text on the e-ink screen (from web /message endpoint)."""
         try:
@@ -2089,6 +2189,11 @@ class EinkTerminal:
         # _install_command_scripts). The handler only flips a flag; the loop acts.
         try:
             signal.signal(signal.SIGUSR1, self._on_settings_signal)
+            signal.signal(signal.SIGUSR2, self._on_clear_signal)
+            # Graceful shutdown so a stray Ctrl+C / `systemctl stop` puts the
+            # panel to sleep cleanly rather than crashing mid-refresh.
+            signal.signal(signal.SIGINT, self._on_shutdown_signal)
+            signal.signal(signal.SIGTERM, self._on_shutdown_signal)
         except (ValueError, OSError):
             pass  # not on the main thread (e.g. some test harnesses) — skip
 
@@ -2198,6 +2303,17 @@ class EinkTerminal:
                     self._toggle_settings()   # opens the overlay and renders
                 continue
 
+            # ── `clear-eink` command requested a screen clear (SIGUSR2) ────────
+            if self._clear_requested:
+                self._clear_requested = False
+                self._last_input = now
+                self._did_idle_reset = False
+                if in_screensaver or self._in_text_message:
+                    in_screensaver = False
+                    self._in_text_message = False
+                self._clear_screen()
+                continue
+
             # ── Idle screensaver check ────────────────────────────────────────
             if self._idle_timeout > 0:
                 idle = now - self._last_input
@@ -2205,6 +2321,15 @@ class EinkTerminal:
                     in_screensaver = True
                     self._show_screensaver()
                     continue  # skip stale r — next iteration runs a fresh select
+
+            # ── Idle reset: after a longer window, start a brand-new shell ─────
+            # so a returning user lands on a clean terminal. Once per idle
+            # period; doesn't wake the panel if the screensaver is showing.
+            if self._reset_timeout > 0 and not self._did_idle_reset:
+                if (now - self._last_input) > self._reset_timeout:
+                    self._reset_session(render=not in_screensaver)
+                    self._did_idle_reset = True
+                    continue
 
             # ── Keyboard input (evdev path) ───────────────────────────────────
             if self._evdev_kb is not None and self._evdev_kb.fileno() in r:
@@ -2216,6 +2341,7 @@ class EinkTerminal:
                 if data:
                     self._last_activity = now
                     self._last_input = now
+                    self._did_idle_reset = False
                     grace = now - self._screensaver_show_mono < 2.0
                     if in_screensaver or self._in_text_message:
                         if not grace:
@@ -2254,6 +2380,7 @@ class EinkTerminal:
                     break
                 self._last_activity = now
                 self._last_input = now
+                self._did_idle_reset = False
                 grace = now - self._screensaver_show_mono < 2.0
                 if in_screensaver or self._in_text_message:
                     if not grace:
@@ -2327,6 +2454,7 @@ class EinkTerminal:
                                 continue
                             self._last_activity = now
                             self._last_input = now
+                            self._did_idle_reset = False
                             if in_screensaver or self._in_text_message:
                                 in_screensaver = False
                                 self._in_text_message = False
