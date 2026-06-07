@@ -338,6 +338,11 @@ class EinkTerminal:
         self._last_start_row  = 0      # viewport start row at last render
         self._stdin_fd    = sys.stdin.fileno()
         self._old_tty     = None
+        # True once stdin hits EOF (app launched detached / stdin = /dev/null).
+        # Without this, select() reports the EOF fd ready every iteration and the
+        # loop spins at 100% CPU while resetting the idle timer — the panel never
+        # sleeps. Once set, we stop watching stdin and rely on evdev/web input.
+        self._stdin_eof   = False
 
         # Status bar item visibility. 'host' is the machine name shown alongside
         # the working directory; falls back to the system hostname.
@@ -2276,7 +2281,8 @@ class EinkTerminal:
             try:
                 fds = []
                 if self._evdev_kb is None:
-                    fds.append(self._stdin_fd)
+                    if not self._stdin_eof:
+                        fds.append(self._stdin_fd)
                 else:
                     fds.append(self._evdev_kb.fileno())
                 # Monitor ALL tab PTYs so background tabs stay current
@@ -2378,6 +2384,12 @@ class EinkTerminal:
                     data = os.read(self._stdin_fd, 256)
                 except OSError:
                     break
+                if not data:
+                    # EOF: stdin is closed (detached launch / stdin = /dev/null).
+                    # Stop watching it so select() doesn't spin and the idle timer
+                    # is left alone; fall back to evdev hot-plug / web input.
+                    self._stdin_eof = True
+                    continue
                 self._last_activity = now
                 self._last_input = now
                 self._did_idle_reset = False
