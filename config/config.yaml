@@ -217,10 +217,16 @@ font_path: ""
 show_qr_code: true
 
 # ── Screensaver / idle mode ──────────────────────────────────────────────────
+# Minutes of no keyboard activity before the e-ink panel deep-sleeps: the
+# current terminal image is retained with no power and any keypress wakes it.
+# The screensaver image is NOT shown yet — that waits for
+# screensaver_sleep_minutes below. 0 = never deep-sleep early.
+display_sleep_minutes: 5
+
 # Minutes of no keyboard activity before the terminal switches to the
-# screensaver AND deep-sleeps the e-ink panel (the image is retained with no
-# power; any keypress wakes it). 0 = never sleep. This takes precedence over
-# terminal_idle_timeout below and is editable from the on-display config editor.
+# screensaver image (with QR overlay) and deep-sleeps the panel. Should be >=
+# display_sleep_minutes. 0 = never show the screensaver. This takes precedence
+# over terminal_idle_timeout below and is editable from the on-display editor.
 screensaver_sleep_minutes: 15
 
 # (legacy, seconds) Idle timeout — used only if screensaver_sleep_minutes is
