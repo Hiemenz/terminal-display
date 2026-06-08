@@ -212,7 +212,8 @@ _SETTINGS_SCHEMA = [
     ('terminal_font_size',            'select', 'Font Size',        [8, 10, 12, 14, 16, 18, 20]),
     ('terminal_font_path',            'select', 'Font',             '__FONTS__'),
     ('terminal_split_view',           'bool',   'Split View',       None),
-    ('screensaver_sleep_minutes',     'select', 'Sleep After (min)', [0, 5, 10, 15, 30, 60]),
+    ('display_sleep_minutes',         'select', 'Panel Sleep (min)', [0, 2, 5, 10, 15, 30]),
+    ('screensaver_sleep_minutes',     'select', 'Screensaver (min)', [0, 5, 10, 15, 30, 60]),
     ('terminal_start_dir',            'select', 'Start Dir',        ['home', 'last', 'root']),
     ('terminal_prompt_custom',        'bool',   'Custom Prompt',    None),
     ('terminal_prompt_show_user',     'bool',   'Prompt: User',     None),
@@ -225,7 +226,7 @@ _SETTINGS_SCHEMA = [
 _SETTINGS_LIVE = {
     'terminal_cursor_style', 'terminal_show_qr', 'terminal_dark_mode',
     'terminal_font_size', 'terminal_font_path', 'terminal_split_view',
-    'screensaver_sleep_minutes',
+    'display_sleep_minutes', 'screensaver_sleep_minutes',
 }
 # Shell-level settings only affect newly-spawned shells, so saving them
 # restarts the service to respawn. (Everything not in _SETTINGS_LIVE.)
@@ -291,6 +292,11 @@ class EinkTerminal:
         _sleep_min = config.get('screensaver_sleep_minutes')
         self._idle_timeout = (int(_sleep_min) * 60 if _sleep_min is not None
                               else config.get('terminal_idle_timeout', 0))
+        # Earlier panel deep-sleep: power the panel down (image retained) after a
+        # shorter idle window, WITHOUT showing the screensaver yet. The screensaver
+        # still waits for _idle_timeout above. 0 = disable the early sleep.
+        _disp_sleep = config.get('display_sleep_minutes')
+        self._sleep_timeout = int(_disp_sleep) * 60 if _disp_sleep is not None else 0
         # Idle reset: after a longer idle window, kill the shell/tmux session and
         # start a brand-new one, so whoever returns gets a clean terminal.
         # terminal_reset_minutes (minutes; 0 = never). Fires once per idle period.
@@ -1393,6 +1399,8 @@ class EinkTerminal:
                 self._reflow_shell()
         elif key == 'screensaver_sleep_minutes':
             self._idle_timeout = int(value) * 60
+        elif key == 'display_sleep_minutes':
+            self._sleep_timeout = int(value) * 60
         # terminal_show_qr: render reads self._config — no attribute to update.
 
     def _settings_save(self):
@@ -1852,6 +1860,21 @@ class EinkTerminal:
             start_new_session=True,
         )
 
+    def _sleep_panel(self):
+        """Deep-sleep the e-ink panel without changing what's on it.
+
+        Powers the panel down (no current draw) while retaining the current
+        terminal image. The next full/flash refresh — on user input or when the
+        screensaver finally kicks in — wakes it automatically. Unlike
+        _show_screensaver this does not render anything, so the terminal stays
+        visible behind the dark glass until someone returns.
+        """
+        try:
+            self._driver.sleep()
+            logger.info('Panel deep-sleep — image retained, awaiting input or screensaver')
+        except Exception as e:
+            logger.warning('Panel sleep error: %s', e)
+
     def _show_screensaver(self):
         """Render the screensaver to the display.
 
@@ -2265,6 +2288,7 @@ class EinkTerminal:
         has_pending = False
         last_alert_tick = 0.0
         in_screensaver = False
+        panel_asleep = False   # panel deep-slept early (image retained, no screensaver yet)
 
         while self._running:
             now = time.monotonic()
@@ -2302,8 +2326,9 @@ class EinkTerminal:
             if self._open_settings_requested:
                 self._open_settings_requested = False
                 self._last_input = now   # count as activity (don't sleep on us)
-                if in_screensaver or self._in_text_message:
+                if in_screensaver or panel_asleep or self._in_text_message:
                     in_screensaver = False
+                    panel_asleep = False
                     self._in_text_message = False
                 if not self._settings_active:
                     self._toggle_settings()   # opens the overlay and renders
@@ -2314,17 +2339,33 @@ class EinkTerminal:
                 self._clear_requested = False
                 self._last_input = now
                 self._did_idle_reset = False
-                if in_screensaver or self._in_text_message:
+                if in_screensaver or panel_asleep or self._in_text_message:
                     in_screensaver = False
+                    panel_asleep = False
                     self._in_text_message = False
                 self._clear_screen()
                 continue
+
+            # ── Early panel deep-sleep ────────────────────────────────────────
+            # Before the screensaver kicks in, power the panel down once a shorter
+            # idle window passes. The terminal image is retained behind the dark
+            # glass; any input wakes it. Skipped if it would land at/after the
+            # screensaver threshold (then the screensaver handles sleeping).
+            if (self._sleep_timeout > 0 and not panel_asleep and not in_screensaver
+                    and not self._in_text_message):
+                idle = now - self._last_input
+                if idle > self._sleep_timeout and not (
+                        self._idle_timeout > 0 and idle > self._idle_timeout):
+                    panel_asleep = True
+                    self._sleep_panel()
+                    continue
 
             # ── Idle screensaver check ────────────────────────────────────────
             if self._idle_timeout > 0:
                 idle = now - self._last_input
                 if idle > self._idle_timeout and not in_screensaver and not self._in_text_message:
                     in_screensaver = True
+                    panel_asleep = False   # screensaver supersedes the bare deep-sleep
                     self._show_screensaver()
                     continue  # skip stale r — next iteration runs a fresh select
 
@@ -2333,7 +2374,7 @@ class EinkTerminal:
             # period; doesn't wake the panel if the screensaver is showing.
             if self._reset_timeout > 0 and not self._did_idle_reset:
                 if (now - self._last_input) > self._reset_timeout:
-                    self._reset_session(render=not in_screensaver)
+                    self._reset_session(render=not (in_screensaver or panel_asleep))
                     self._did_idle_reset = True
                     continue
 
@@ -2349,9 +2390,10 @@ class EinkTerminal:
                     self._last_input = now
                     self._did_idle_reset = False
                     grace = now - self._screensaver_show_mono < 2.0
-                    if in_screensaver or self._in_text_message:
+                    if in_screensaver or panel_asleep or self._in_text_message:
                         if not grace:
                             in_screensaver = False
+                            panel_asleep = False
                             self._in_text_message = False
                             self._render(force_full=True)
                             self._last_full_refresh_mono = time.monotonic()
@@ -2394,9 +2436,10 @@ class EinkTerminal:
                 self._last_input = now
                 self._did_idle_reset = False
                 grace = now - self._screensaver_show_mono < 2.0
-                if in_screensaver or self._in_text_message:
+                if in_screensaver or panel_asleep or self._in_text_message:
                     if not grace:
                         in_screensaver = False
+                        panel_asleep = False
                         self._in_text_message = False
                         self._render(force_full=True)
                         self._last_full_refresh_mono = time.monotonic()
@@ -2467,8 +2510,9 @@ class EinkTerminal:
                             self._last_activity = now
                             self._last_input = now
                             self._did_idle_reset = False
-                            if in_screensaver or self._in_text_message:
+                            if in_screensaver or panel_asleep or self._in_text_message:
                                 in_screensaver = False
+                                panel_asleep = False
                                 self._in_text_message = False
                                 self._render(force_full=True)
                                 self._last_full_refresh_mono = time.monotonic()
@@ -2502,7 +2546,7 @@ class EinkTerminal:
             # Alerts bypass the status-bar throttle: a warning must appear (and
             # clear) promptly, so force the status bar to repaint this render.
             if now - last_alert_tick >= 1.0:
-                if self._alert_monitor.tick() and not in_screensaver:
+                if self._alert_monitor.tick() and not in_screensaver and not panel_asleep:
                     self._status_force = True
                     has_pending = True  # alert changed — re-render status bar
                 last_alert_tick = now
@@ -2510,7 +2554,7 @@ class EinkTerminal:
             _idle = now - self._last_activity
 
             # ── Split-view stats update ───────────────────────────────────────
-            if self._split_view and not in_screensaver and _idle < 60.0:
+            if self._split_view and not in_screensaver and not panel_asleep and _idle < 60.0:
                 with self._stats_lock:
                     stats_dirty = self._stats_dirty
                 if stats_dirty:
@@ -2521,7 +2565,7 @@ class EinkTerminal:
             # render on their own — they ride along on the next throttled status
             # repaint or terminal-content render. Clear the dirty flag so it
             # doesn't accumulate.
-            if not in_screensaver and _idle < 60.0:
+            if not in_screensaver and not panel_asleep and _idle < 60.0:
                 status_due = (now - self._last_status_render) >= self._status_bar_interval
                 with self._net_stats_lock:
                     if self._net_stats.get('dirty'):
@@ -2536,12 +2580,12 @@ class EinkTerminal:
                     self._show_screensaver()
 
             # ── Debounced render ──────────────────────────────────────────────
-            if has_pending and not in_screensaver and (now - last_render) >= _RENDER_DEBOUNCE:
+            if has_pending and not in_screensaver and not panel_asleep and (now - last_render) >= _RENDER_DEBOUNCE:
                 self._render()
                 self._screen.dirty.clear()
                 has_pending = False
                 last_render = now
-            elif not in_screensaver and self._periodic_flash_due(now):
+            elif not in_screensaver and not panel_asleep and self._periodic_flash_due(now):
                 # Deferred whole-panel ghost-clearing flash, fired in a quiet gap
                 # so it never interrupts active typing.
                 self._render(force_flash=True)
