@@ -28,9 +28,11 @@ import platform
 import queue
 import re
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.parse
+import yaml
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import List
 
@@ -389,6 +391,33 @@ _CONFIG_HTML = '''\
 '''
 
 
+def _atomic_write_config(config_path: str, content: str):
+    """Validate then atomically replace config_path with content.
+
+    Guards against a kill / power-loss mid-write leaving config.yaml truncated
+    (which would make the next boot load an empty config and drop every setting).
+    The new content must parse as a YAML mapping or the write is refused and the
+    existing file is left intact.
+    """
+    parsed = yaml.safe_load(content)
+    if not isinstance(parsed, dict):
+        raise ValueError("refusing to write config: content is not a YAML mapping")
+    dir_name = os.path.dirname(config_path) or '.'
+    fd, tmp = tempfile.mkstemp(dir=dir_name, prefix='.config.', suffix='.tmp')
+    try:
+        with os.fdopen(fd, 'w') as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, config_path)   # atomic on POSIX
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _save_config_values(config_path: str, updates: dict):
     """Write key-value pairs into config.yaml, replacing only the matching lines."""
     with open(config_path) as f:
@@ -407,8 +436,7 @@ def _save_config_values(config_path: str, updates: dict):
         content, n = re.subn(pattern, new_line, content, flags=re.MULTILINE)
         if n == 0:
             content += f'\n{new_line}\n'
-    with open(config_path, 'w') as f:
-        f.write(content)
+    _atomic_write_config(config_path, content)
 
 
 def _build_config_html(config_data: dict) -> str:
@@ -433,8 +461,7 @@ def _set_startup_mode(config_path: str, mode: str):
     with open(config_path) as f:
         content = f.read()
     content = re.sub(r'^startup_mode:.*$', f'startup_mode: {mode}', content, flags=re.MULTILINE)
-    with open(config_path, 'w') as f:
-        f.write(content)
+    _atomic_write_config(config_path, content)
     if platform.system() == 'Linux':
         subprocess.Popen(['sudo', 'systemctl', 'restart', 'eink-display'])
 

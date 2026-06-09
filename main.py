@@ -14,6 +14,7 @@ Flags:
 import sys
 import os
 import argparse
+import logging
 import queue as _queue
 import select
 import subprocess
@@ -21,6 +22,12 @@ import threading
 import time
 import platform
 from datetime import datetime
+
+# Route app logs (src/*.py use logging) to stderr → journald.
+logging.basicConfig(
+    level=os.environ.get('EINK_LOG_LEVEL', 'INFO').upper(),
+    format='%(levelname)s %(name)s: %(message)s',
+)
 
 # Ensure src/ is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))

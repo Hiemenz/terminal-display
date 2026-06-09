@@ -24,7 +24,15 @@ Typeable commands (run from the shell):
 import sys
 import os
 import argparse
+import logging
 import platform
+
+# Route app logs (src/*.py use logging) to stderr → journald. Without this the
+# logger has no handler and screensaver/keyboard/error events are invisible.
+logging.basicConfig(
+    level=os.environ.get('EINK_LOG_LEVEL', 'INFO').upper(),
+    format='%(levelname)s %(name)s: %(message)s',
+)
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
