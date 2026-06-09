@@ -421,6 +421,7 @@ class EinkTerminal:
         # Screensaver cycle state
         self._screensaver_cycle_idx  = 0
         self._screensaver_last_cycle = 0.0
+        self._screensaver_is_cycle   = False  # set by _show_screensaver per rotation set
         self._screensaver_show_mono  = 0.0   # when screensaver was last shown (for grace period)
 
         # Text message (send-to-display) state
@@ -1891,30 +1892,32 @@ class EinkTerminal:
         """
         try:
             from render import render_screensaver
-            from preview_server import get_screensaver_path, _list_photos
+            from preview_server import get_screensaver_images
 
-            mode = self._config.get('screensaver_mode', 'static')
             static_path = self._config.get('screensaver_image_path', 'assets/test.jpg')
             if not os.path.isabs(static_path):
                 static_path = os.path.join(_REPO_ROOT, static_path)
             photos_dir = os.path.join(_REPO_ROOT, 'assets', 'gallery')
 
-            if mode == 'cycle':
-                photos = _list_photos(photos_dir)
-                if photos:
+            # Resolve the rotation set: 2+ selected photos cycle, 1 shows static,
+            # none falls back to screensaver_mode / the static image.
+            names, is_cycle = get_screensaver_images(photos_dir, self._config)
+            self._screensaver_is_cycle = is_cycle and len(names) >= 2
+            if names:
+                if self._screensaver_is_cycle:
                     cycle_secs = self._config.get('screensaver_cycle_interval', 5) * 60
                     now = time.monotonic()
                     if self._screensaver_last_cycle == 0.0:
-                        # First activation: show photos[idx] without advancing.
+                        # First activation: show current photo without advancing.
                         self._screensaver_last_cycle = now
                     elif (now - self._screensaver_last_cycle) >= cycle_secs:
-                        self._screensaver_cycle_idx = (self._screensaver_cycle_idx + 1) % len(photos)
+                        self._screensaver_cycle_idx += 1
                         self._screensaver_last_cycle = now
-                    image_path = os.path.join(photos_dir, photos[self._screensaver_cycle_idx])
+                    image_path = os.path.join(photos_dir, names[self._screensaver_cycle_idx % len(names)])
                 else:
-                    image_path = static_path
+                    image_path = os.path.join(photos_dir, names[0])
             else:
-                image_path = get_screensaver_path(photos_dir) or static_path
+                image_path = static_path
 
             port = self._config.get('preview_server_port', 8080)
             ip = _get_local_ip()
@@ -2258,6 +2261,7 @@ class EinkTerminal:
 
         _config_path = os.path.join(_REPO_ROOT, 'config', 'config.yaml')
         server = _start_preview(self._config, os.path.join(_REPO_ROOT, 'output', 'terminal.bmp'),
+                                photos_dir=os.path.join(_REPO_ROOT, 'assets', 'gallery'),
                                 config_path=_config_path,
                                 clipboard_path=self._clipboard_path)
         if server is not None:
@@ -2588,7 +2592,9 @@ class EinkTerminal:
                             has_pending = True
 
             # ── Cycle screensaver: swap image when interval elapses ───────────
-            if in_screensaver and self._config.get('screensaver_mode', 'static') == 'cycle':
+            # _screensaver_is_cycle is set by _show_screensaver from the rotation
+            # set (2+ selected photos), so this picks up web selections live.
+            if in_screensaver and self._screensaver_is_cycle:
                 cycle_secs = self._config.get('screensaver_cycle_interval', 5) * 60
                 if self._screensaver_last_cycle > 0.0 and (now - self._screensaver_last_cycle) >= cycle_secs:
                     self._show_screensaver()

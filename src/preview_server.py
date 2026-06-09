@@ -1094,6 +1094,16 @@ _GALLERY_HTML = '''\
                 background: #1a0a0a; color: var(--danger); cursor: pointer; flex-shrink: 0; }}
     .del-btn:active {{ background: #2a1010; }}
     .empty {{ color: var(--muted); text-align: center; padding: 48px 0; font-size: 15px; }}
+
+    /* Screensaver selection status + hint */
+    .ss-status {{ background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+                  padding: 12px 14px; font-size: 14px; font-weight: 600; margin-bottom: 8px; }}
+    .ss-status .badge {{ color: var(--success); }}
+    .ss-hint {{ color: var(--muted); font-size: 13px; margin-bottom: 16px; line-height: 1.4; }}
+    .card .pick {{ position: absolute; top: 8px; left: 8px; width: 26px; height: 26px; border-radius: 50%;
+                   background: rgba(0,0,0,0.55); border: 2px solid #fff; color: #fff; font-size: 15px;
+                   display: flex; align-items: center; justify-content: center; }}
+    .card.selected .pick {{ background: var(--accent); border-color: var(--accent); }}
   </style>
 </head>
 <body>
@@ -1112,16 +1122,31 @@ _GALLERY_HTML = '''\
     <div id="upload-status"></div>
   </div>
 
+  <div id="ss-status" class="ss-status"></div>
+  <p class="ss-hint">Tap photos to choose what the screensaver shows. Pick <b>1</b> for a still
+     image, or <b>2+</b> to cycle through them.</p>
+
   <div id="gallery" class="gallery"></div>
 
   <script>
     var _selected = "";
+    var _cycle = [];
 
     function esc(s) {{ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }}
+
+    function updateStatus() {{
+      var s = document.getElementById("ss-status");
+      var n = _cycle.length;
+      if (n === 0) s.innerHTML = "No photos selected — showing the default screensaver.";
+      else if (n === 1) s.innerHTML = "Showing <span class=\\"badge\\">1 photo</span> (still).";
+      else s.innerHTML = "Cycling <span class=\\"badge\\">" + n + " photos</span>.";
+    }}
 
     function loadGallery() {{
       fetch("/photos").then(function(r){{ return r.json(); }}).then(function(data) {{
         _selected = data.selected || "";
+        _cycle = data.cycle || [];
+        updateStatus();
         var g = document.getElementById("gallery");
         if (!data.photos || !data.photos.length) {{
           g.innerHTML = "<div class=\\"empty\\">No photos yet — upload one above.</div>";
@@ -1130,16 +1155,19 @@ _GALLERY_HTML = '''\
         g.innerHTML = "";
         data.photos.forEach(function(name) {{
           var enc = encodeURIComponent(name);
-          var isSel = (name === _selected);
+          var isSel = (_cycle.indexOf(name) !== -1);
           var card = document.createElement("div");
           card.className = "card" + (isSel ? " selected" : "");
           card.innerHTML =
-            "<div class=\\"card-img\\"><img src=\\"/preview/" + enc + "?t=" + Date.now() + "\\" loading=\\"lazy\\"></div>" +
+            "<div class=\\"card-img\\" onclick=\\"toggleSelect('" + enc + "')\\">" +
+              "<img src=\\"/preview/" + enc + "?t=" + Date.now() + "\\" loading=\\"lazy\\">" +
+              "<div class=\\"pick\\">" + (isSel ? "&#10003;" : "") + "</div>" +
+            "</div>" +
             "<div class=\\"card-footer\\">" +
               "<div class=\\"card-name\\">" + esc(name) + "</div>" +
               "<div class=\\"card-actions\\">" +
-                "<button class=\\"set-btn" + (isSel ? " active" : "") + "\\" onclick=\\"setScreensaver('" + enc + "')\\">" +
-                  (isSel ? "&#10003; Active" : "Set screensaver") +
+                "<button class=\\"set-btn" + (isSel ? " active" : "") + "\\" onclick=\\"toggleSelect('" + enc + "')\\">" +
+                  (isSel ? "&#10003; Selected" : "Select") +
                 "</button>" +
                 "<button class=\\"del-btn\\" onclick=\\"deletePhoto('" + enc + "')\\">&#128465;</button>" +
               "</div>" +
@@ -1149,10 +1177,13 @@ _GALLERY_HTML = '''\
       }});
     }}
 
-    function setScreensaver(enc) {{
-      fetch("/select", {{method:"POST", headers:{{"Content-Type":"application/json"}},
-        body:JSON.stringify({{photo:decodeURIComponent(enc)}})}})
-        .then(function(r){{ return r.json(); }}).then(function(d){{ if(d.ok) loadGallery(); }});
+    function toggleSelect(enc) {{
+      var name = decodeURIComponent(enc);
+      var on = (_cycle.indexOf(name) === -1);
+      fetch("/cycle", {{method:"POST", headers:{{"Content-Type":"application/json"}},
+        body:JSON.stringify({{photo:name, on:on}})}})
+        .then(function(r){{ return r.json(); }})
+        .then(function(d){{ if(d.ok) {{ _cycle = d.cycle || []; loadGallery(); }} }});
     }}
 
     function deletePhoto(enc) {{
@@ -1237,6 +1268,53 @@ def get_screensaver_path(photos_dir: str) -> str:
     if name:
         return os.path.join(photos_dir, name)
     return ''
+
+
+_CYCLE_FILE = '.cycle'
+
+
+def _get_cycle(photos_dir: str) -> list:
+    """Names chosen for the cycle rotation (filtered to photos that still exist)."""
+    try:
+        with open(os.path.join(photos_dir, _CYCLE_FILE)) as f:
+            names = json.load(f)
+    except Exception:
+        return []
+    if not isinstance(names, list):
+        return []
+    existing = set(_list_photos(photos_dir))
+    # Preserve saved order, drop any that were deleted.
+    return [n for n in names if isinstance(n, str) and n in existing]
+
+
+def _set_cycle(photos_dir: str, names: list):
+    os.makedirs(photos_dir, exist_ok=True)
+    with open(os.path.join(photos_dir, _CYCLE_FILE), 'w') as f:
+        json.dump(list(names), f)
+
+
+def get_screensaver_images(photos_dir: str, config: dict) -> tuple:
+    """Resolve what the screensaver should display.
+
+    Returns ``(names, is_cycle)`` where ``names`` is an ordered list of photo
+    file names (basenames within photos_dir) and ``is_cycle`` says whether to
+    rotate through them.
+
+    Rotation set wins when set: 2+ chosen photos cycle, exactly 1 shows static.
+    With no rotation set, fall back to the legacy ``screensaver_mode`` config
+    (cycle = all photos, static = the single selected photo).
+    """
+    cycle = _get_cycle(photos_dir)
+    if len(cycle) >= 2:
+        return cycle, True
+    if len(cycle) == 1:
+        return [cycle[0]], False
+    mode = config.get('screensaver_mode', 'static')
+    photos = _list_photos(photos_dir)
+    if mode == 'cycle' and len(photos) >= 2:
+        return photos, True
+    sel = _get_selected(photos_dir)
+    return ([sel] if sel else []), False
 
 
 def _load_clipboard_json(clipboard_path: str) -> list:
@@ -1447,6 +1525,8 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._handle_upload()
             elif path == '/select':
                 self._handle_select()
+            elif path == '/cycle':
+                self._handle_cycle()
             elif path == '/mode':
                 self._handle_mode()
             elif path == '/config':
@@ -1483,7 +1563,9 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
         def _serve_photos_json(self):
             photos = _list_photos(photos_dir)
             selected = _get_selected(photos_dir)
-            body = json.dumps({'photos': photos, 'selected': selected}).encode()
+            cycle = _get_cycle(photos_dir)
+            body = json.dumps({'photos': photos, 'selected': selected,
+                               'cycle': cycle}).encode()
             self._respond(200, 'application/json', body)
 
         def _serve_photo(self, raw_name: str):
@@ -1544,6 +1626,9 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                         os.remove(sel_path)
                 except Exception:
                     pass
+                # Prune the cycle rotation: _get_cycle already drops the file we
+                # just removed (and any other missing ones); persist the result.
+                _set_cycle(photos_dir, _get_cycle(photos_dir))
                 self._respond(200, 'application/json', b'{"ok":true}')
             except Exception as e:
                 self._respond(500, 'application/json',
@@ -1563,6 +1648,9 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             self._respond(200, 'application/json', b'{"ok":true}')
 
         def _handle_upload(self):
+            if not photos_dir:
+                self._respond(500, 'application/json', b'{"ok":false,"error":"No gallery dir configured"}')
+                return
             os.makedirs(photos_dir, exist_ok=True)
             content_type = self.headers.get('Content-Type', '')
             length = int(self.headers.get('Content-Length', 0))
@@ -1586,6 +1674,12 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 dest = os.path.join(photos_dir, safe_name)
                 img.save(dest, format='JPEG', quality=90)
                 _set_selected(photos_dir, safe_name)
+                # Add new uploads to the rotation so they show up automatically;
+                # upload several and they cycle.
+                cycle = _get_cycle(photos_dir)
+                if safe_name not in cycle:
+                    cycle.append(safe_name)
+                    _set_cycle(photos_dir, cycle)
                 self._respond(200, 'application/json',
                               json.dumps({'ok': True, 'name': safe_name, 'auto_selected': True}).encode())
             except KeyError:
@@ -1608,6 +1702,39 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 return
             _set_selected(photos_dir, name)
             self._respond(200, 'application/json', b'{"ok":true}')
+
+        def _handle_cycle(self):
+            """Add/remove a photo from the cycle rotation, or set the whole list.
+
+            Body: {"photo": name, "on": true|false}  — toggle one, or
+                  {"photos": [name, ...]}            — replace the set.
+            Responds with the resulting cycle list.
+            """
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                data = json.loads(raw)
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+            existing = _list_photos(photos_dir)
+            cycle = _get_cycle(photos_dir)
+            if 'photos' in data and isinstance(data['photos'], list):
+                cycle = [os.path.basename(n) for n in data['photos']
+                         if os.path.basename(n) in existing]
+            else:
+                name = os.path.basename(data.get('photo', ''))
+                if not name or name not in existing:
+                    self._respond(404, 'application/json', b'{"ok":false,"error":"Photo not found"}')
+                    return
+                on = bool(data.get('on', name not in cycle))
+                if on and name not in cycle:
+                    cycle.append(name)
+                elif not on and name in cycle:
+                    cycle.remove(name)
+            _set_cycle(photos_dir, cycle)
+            self._respond(200, 'application/json',
+                          json.dumps({'ok': True, 'cycle': cycle}).encode())
 
         def _handle_message(self):
             """POST /message — display text on the e-ink screen."""
