@@ -58,6 +58,7 @@ from terminal_renderer import (
     _find_mono_font, TERMINAL_H, SPLIT_TERMINAL_W,
 )
 from display_eink import EinkDriver
+from sd_watchdog import Watchdog
 from preview_server import start_if_enabled as _start_preview
 from preview_server import _save_config_values
 from evdev_input import EvdevKeyboard, find_keyboard
@@ -297,6 +298,12 @@ class EinkTerminal:
         # still waits for _idle_timeout above. 0 = disable the early sleep.
         _disp_sleep = config.get('display_sleep_minutes')
         self._sleep_timeout = int(_disp_sleep) * 60 if _disp_sleep is not None else 0
+        # While the screensaver is showing the panel is deep-slept and never
+        # repainted. Re-flash it every screensaver_refresh_minutes so a static
+        # image doesn't slowly burn in / ghost over a long idle, and so the
+        # screensaver reclaims the panel if anything else drew to it meanwhile.
+        # 0 = never refresh (show once, then leave the panel alone until input).
+        self._screensaver_refresh = int(config.get('screensaver_refresh_minutes', 120) or 0) * 60
         # Idle reset: after a longer idle window, kill the shell/tmux session and
         # start a brand-new one, so whoever returns gets a clean terminal.
         # terminal_reset_minutes (minutes; 0 = never). Fires once per idle period.
@@ -2233,6 +2240,12 @@ class EinkTerminal:
         self._last_activity = time.monotonic()
         self._last_input = time.monotonic()
 
+        # systemd watchdog: the unit sets WatchdogSec, so we must ping or get
+        # SIGABRT'd ~every minute (which would full-refresh the panel on every
+        # restart and reset the idle timer). No-ops off-systemd. See sd_watchdog.
+        self._watchdog = Watchdog()
+        self._watchdog.ready()
+
         # Wrap initial shell in a Tab
         self._tabs = [_Tab(screen=self._screen, stream=self._stream,
                            pty_master=self._pty_master, child_pid=self._child_pid)]
@@ -2292,6 +2305,7 @@ class EinkTerminal:
 
         while self._running:
             now = time.monotonic()
+            self._watchdog.ping(now)   # keep systemd from SIGABRT-restarting us
 
             # Hot-plug: probe for keyboard every 2 s when none is present
             if self._evdev_kb is None and (now - self._last_kbd_probe) >= 2.0:
@@ -2579,6 +2593,17 @@ class EinkTerminal:
                 if self._screensaver_last_cycle > 0.0 and (now - self._screensaver_last_cycle) >= cycle_secs:
                     self._show_screensaver()
 
+            # ── Periodic screensaver refresh ──────────────────────────────────
+            # The screensaver deep-sleeps the panel and never repaints. Re-flash
+            # it every screensaver_refresh_minutes so a long idle doesn't ghost /
+            # burn in the static image, and so the screensaver reclaims the panel
+            # if something else drew to it in the meantime. _show_screensaver
+            # resets _screensaver_show_mono and re-sleeps the panel.
+            elif (in_screensaver and self._screensaver_refresh > 0
+                    and self._screensaver_show_mono > 0.0
+                    and (now - self._screensaver_show_mono) >= self._screensaver_refresh):
+                self._show_screensaver()
+
             # ── Debounced render ──────────────────────────────────────────────
             if has_pending and not in_screensaver and not panel_asleep and (now - last_render) >= _RENDER_DEBOUNCE:
                 self._render()
@@ -2613,6 +2638,7 @@ class EinkTerminal:
 
         input_fd = self._evdev_kb.fileno() if self._evdev_kb else self._stdin_fd
         while True:
+            self._watchdog.ping()   # this loop can block for a while awaiting a key
             r, _, _ = select.select([input_fd], [], [], 1.0)
             if not r:
                 continue
