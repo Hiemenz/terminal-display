@@ -233,6 +233,12 @@ screensaver_sleep_minutes: 15
 # unset. Set to 0 to disable.
 terminal_idle_timeout: 900
 
+# Once the screensaver is showing, the panel is deep-slept and not repainted.
+# Re-flash the screensaver every this many minutes so a static image doesn't
+# slowly ghost/burn in over a long idle (and so the screensaver reclaims the
+# panel if something else drew to it meanwhile). 0 = show once, never refresh.
+screensaver_refresh_minutes: 120
+
 # Minutes of no real input before the terminal auto-resets: the shell + tmux
 # session are killed and a brand-new shell is started, so whoever comes back
 # lands on a clean prompt. Fires once per idle period (after the screensaver).

@@ -33,6 +33,7 @@ from render import render, render_output, render_screensaver
 from display import send_to_display
 from display_eink import EinkDriver
 from refresh_tracker import needs_full_refresh
+from sd_watchdog import Watchdog
 from util import output_path
 from preview_server import start_if_enabled as _start_preview, get_screensaver_path
 
@@ -306,7 +307,13 @@ Examples:
     )
     evdev_thread.start()
 
+    # systemd watchdog: the unit sets WatchdogSec, so we must ping or get
+    # SIGABRT'd ~every minute. No-ops when not launched under systemd.
+    watchdog = Watchdog()
+    watchdog.ready()
+
     while True:
+        watchdog.ping()
         if switch_event.is_set():
             print("Switching to terminal mode…")
             term_py = os.path.join(_REPO_ROOT, 'eink_terminal.py')
@@ -379,6 +386,7 @@ Examples:
             # Responsive idle sleep: wake quickly on activity
             end_time = time.monotonic() + 10
             while not stop_event.is_set() and not switch_event.is_set():
+                watchdog.ping()
                 remaining = end_time - time.monotonic()
                 if remaining <= 0:
                     break
@@ -410,7 +418,12 @@ Examples:
             if _is_night(config):
                 print("Night mode — sleeping 5 min…")
                 driver.sleep()  # deep-sleep the panel through the night window
-                time.sleep(300)
+                # Sleep in short slices so the systemd watchdog keeps getting
+                # pinged (a single 300s sleep would trip the 60s watchdog).
+                night_end = time.monotonic() + 300
+                while time.monotonic() < night_end and not stop_event.is_set() and not switch_event.is_set():
+                    watchdog.ping()
+                    time.sleep(min(5.0, night_end - time.monotonic()))
                 continue
 
             _loop_cycle(config, local, driver, stats_interval=cur_stats_interval)
@@ -424,6 +437,7 @@ Examples:
         # Responsive sleep: react to Ctrl+C, F11, and incoming web commands
         end_time = time.monotonic() + interval
         while not stop_event.is_set() and not switch_event.is_set():
+            watchdog.ping()
             remaining = end_time - time.monotonic()
             if remaining <= 0:
                 break
