@@ -428,6 +428,8 @@ class EinkTerminal:
         self._in_text_message = False
         self._display_queue = None   # set in run() after server starts
         self._preview_server = None  # set in run() after server starts
+        self._last_status_pub = 0.0  # throttle for the /status panel publish
+        self._preview_server = None  # set in run() after server starts
 
         # Tab management
         self._tabs: list = []
@@ -1848,6 +1850,22 @@ class EinkTerminal:
         except Exception as e:
             logger.warning('Text message render error: %s', e)
 
+    def _show_card(self, card: dict):
+        """Render a rich card (note/countdown/todo/qr) from the web /card endpoint.
+
+        Treated like a text message: shown full-screen and dismissed by any key.
+        """
+        try:
+            from render import render_card
+            img = render_card(card, self._config)
+            self._driver.full_refresh(img)
+            self._last_image = img
+            self._in_text_message = True   # any key dismisses it, like a message
+            self._screensaver_show_mono = time.monotonic()
+            logger.info('Card shown: kind=%s', card.get('kind'))
+        except Exception as e:
+            logger.warning('Card render error: %s', e)
+
     def _switch_to_stats(self):
         self._running = False
         for tab in self._tabs:
@@ -2557,6 +2575,32 @@ class EinkTerminal:
                             self._toggle_url_qr()
                         elif action == 'force_refresh':
                             self._force_full_refresh()
+                        elif action == 'clear':
+                            in_screensaver = False; panel_asleep = False
+                            self._in_text_message = False
+                            self._last_input = now
+                            self._clear_screen()
+                        elif action == 'wake':
+                            in_screensaver = False; panel_asleep = False
+                            self._in_text_message = False
+                            self._last_input = now
+                            self._render(force_full=True)
+                            self._last_full_refresh_mono = time.monotonic()
+                        elif action == 'font_inc':
+                            in_screensaver = False; panel_asleep = False
+                            self._last_input = now
+                            self._change_font(2)
+                        elif action == 'font_dec':
+                            in_screensaver = False; panel_asleep = False
+                            self._last_input = now
+                            self._change_font(-2)
+                        elif action == 'dark_toggle':
+                            in_screensaver = False; panel_asleep = False
+                            self._last_input = now
+                            self._toggle_dark_mode()
+                        elif action == 'card':
+                            in_screensaver = False; panel_asleep = False
+                            self._show_card(cmd.get('card', {}))
                 except _queue.Empty:
                     pass
 
@@ -2609,6 +2653,28 @@ class EinkTerminal:
                     and self._screensaver_show_mono > 0.0
                     and (now - self._screensaver_show_mono) >= self._screensaver_refresh):
                 self._show_screensaver()
+
+            # ── Publish live status for the web /status panel (≤1/s) ──────────
+            if self._preview_server is not None and (now - self._last_status_pub) >= 1.0:
+                self._last_status_pub = now
+                idle = now - self._last_input
+                if in_screensaver:
+                    state = 'screensaver'
+                elif panel_asleep:
+                    state = 'asleep'
+                else:
+                    state = 'active'
+                self._preview_server.set_status({
+                    'state': state,
+                    'idle_secs': round(idle, 1),
+                    'sleep_in_secs': (round(max(0, self._sleep_timeout - idle))
+                                      if self._sleep_timeout > 0 else None),
+                    'screensaver_in_secs': (round(max(0, self._idle_timeout - idle))
+                                            if self._idle_timeout > 0 else None),
+                    'last_full_refresh_secs': round(now - self._last_full_refresh_mono),
+                    'font_size': self._font_size,
+                    'dark_mode': self._dark_mode,
+                })
 
             # ── Debounced render ──────────────────────────────────────────────
             if has_pending and not in_screensaver and not panel_asleep and (now - last_render) >= _RENDER_DEBOUNCE:
