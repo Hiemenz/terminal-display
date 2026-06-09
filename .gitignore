@@ -3,6 +3,10 @@ __pycache__/
 data/
 .env
 
+# Runtime config backups / atomic-write temp files
+config/config.yaml.bak
+config/.config.*.tmp
+
 # Rendered output images (generated at runtime)
 output/*.bmp
 output/*.png

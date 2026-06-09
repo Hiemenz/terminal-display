@@ -11,13 +11,30 @@ fires. This module sends those pings.
 It no-ops cleanly when ``NOTIFY_SOCKET`` is unset (dev machines, ``--local``,
 anything not launched under systemd), so it is always safe to construct and call.
 """
+import logging
 import os
 import socket
 import time
 
+logger = logging.getLogger(__name__)
+
+# Spin detection: ping() is called once per main-loop iteration. A healthy idle
+# loop blocks on select() each turn (tens of iterations/sec); a runaway busy-loop
+# (e.g. a perpetually-readable fd we never drain) iterates far faster. If the
+# rate stays above this for a full window, we treat it as a hang-equivalent and
+# stop pinging so systemd's watchdog restarts us. Set generously above the
+# healthy idle rate (~50 Hz) to avoid false positives during bursty I/O.
+_SPIN_THRESHOLD_HZ = 2000.0
+_SPIN_WINDOW_SEC = 10.0
+
 
 class Watchdog:
-    """Sends sd_notify keep-alive pings to systemd, throttled automatically."""
+    """Sends sd_notify keep-alive pings to systemd, throttled automatically.
+
+    Also detects a busy-spinning main loop: because pings come from the loop, a
+    spin would otherwise keep the watchdog satisfied forever. On spin we withhold
+    pings so systemd restarts the service (matching the unit's documented intent).
+    """
 
     def __init__(self):
         addr = os.environ.get('NOTIFY_SOCKET', '')
@@ -37,6 +54,11 @@ class Watchdog:
         usec = int(os.environ.get('WATCHDOG_USEC', '0') or 0)
         self._interval = (usec / 1_000_000 / 2) if usec > 0 else 30.0
         self._last_ping = 0.0
+
+        # Spin-detection window state.
+        self._win_start = time.monotonic()
+        self._win_count = 0
+        self._spinning = False
 
     @property
     def enabled(self) -> bool:
@@ -65,11 +87,29 @@ class Watchdog:
 
         Cheap to call every loop iteration: it only touches the socket once per
         half-interval. If the caller's loop hangs, pings stop and systemd
-        restarts the service — which is the whole point of the watchdog.
+        restarts the service — which is the whole point of the watchdog. Also
+        runs spin detection (see module docstring): once a spin is detected we
+        stop pinging so systemd restarts us.
         """
+        now = time.monotonic() if now is None else now
+
+        # ── Spin detection ────────────────────────────────────────────────
+        self._win_count += 1
+        elapsed = now - self._win_start
+        if elapsed >= _SPIN_WINDOW_SEC:
+            rate = self._win_count / elapsed
+            if rate > _SPIN_THRESHOLD_HZ and not self._spinning:
+                self._spinning = True
+                logger.error(
+                    'Main loop spinning at %.0f Hz over %.0fs — withholding '
+                    'watchdog pings so systemd restarts the service', rate, elapsed)
+            self._win_start = now
+            self._win_count = 0
+        if self._spinning:
+            return  # stop pinging → systemd watchdog fires and restarts us
+
         if self._sock is None:
             return
-        now = time.monotonic() if now is None else now
         if now - self._last_ping >= self._interval:
             self._last_ping = now
             self._send('WATCHDOG=1')

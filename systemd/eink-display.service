@@ -17,6 +17,17 @@ Restart=on-failure
 RestartSec=5
 TimeoutStopSec=10
 
+# Health watchdog: the app pings WATCHDOG=1 from its main loop (src/sd_watchdog.py).
+# If the loop hangs and stops pinging for this long, systemd restarts the
+# service. A busy-spin would keep pinging, so sd_watchdog also detects a spinning
+# loop and deliberately withholds pings so the watchdog still fires.
+WatchdogSec=60
+
+# Resource caps: keep a leak or runaway from taking down the whole Pi. The app's
+# steady-state RSS is well under 100M; the cap just bounds pathological growth.
+MemoryMax=256M
+CPUQuota=80%
+
 # Ensure SPI, GPIO, and raw keyboard input are accessible (Pi-specific)
 SupplementaryGroups=spi gpio video input
 

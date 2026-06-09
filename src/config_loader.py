@@ -1,6 +1,10 @@
 """Canonical config loader. Every module imports this."""
+import logging
 import os
+import shutil
 import yaml
+
+logger = logging.getLogger(__name__)
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DEFAULT_CONFIG = os.path.join(_REPO_ROOT, 'config', 'config.yaml')
@@ -27,17 +31,40 @@ _load_dotenv()
 
 
 def load_config(config_path=None):
-    """Load config.yaml from default path or given path. Returns dict."""
+    """Load config.yaml, returning a dict.
+
+    On success the file is snapshotted to ``<path>.bak`` (last-known-good). If
+    the config is corrupt (e.g. a half-written save), we fall back to that
+    backup instead of silently returning an empty config that drops every
+    setting. Both failures are logged so they're visible in journald.
+    """
     path = config_path or _DEFAULT_CONFIG
     try:
         with open(path, 'r') as f:
             data = yaml.safe_load(f)
-            return data if data else {}
+        if not isinstance(data, dict):
+            raise ValueError(f"config did not parse to a mapping (got {type(data).__name__})")
+        # Snapshot last-known-good for the fallback path below.
+        try:
+            shutil.copyfile(path, path + '.bak')
+        except OSError:
+            pass
+        return data
     except FileNotFoundError:
-        print(f"Config file not found: {path}")
+        logger.warning("Config file not found: %s — using defaults", path)
         return {}
     except Exception as e:
-        print(f"Error loading config: {e}")
+        logger.error("Error loading config %s: %s", path, e)
+        backup = path + '.bak'
+        if os.path.exists(backup):
+            try:
+                with open(backup) as f:
+                    data = yaml.safe_load(f)
+                if isinstance(data, dict):
+                    logger.warning("Recovered config from last-known-good backup %s", backup)
+                    return data
+            except Exception as be:
+                logger.error("Backup config also unreadable %s: %s", backup, be)
         return {}
 
 
