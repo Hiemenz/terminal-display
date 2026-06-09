@@ -823,6 +823,10 @@ _PAGE_HTML = '''\
   <header>
     <span class="logo">e-ink</span>
     <div class="header-right">
+      <a href="/status" class="pill-btn">&#128202; Status</a>
+      <a href="/controls" class="pill-btn">&#127918; Controls</a>
+      <a href="/card" class="pill-btn">&#128203; Card</a>
+      <a href="/logs" class="pill-btn">&#128220; Logs</a>
       <a href="/config" class="pill-btn">&#9881; Config</a>
       <a href="/gallery" class="pill-btn">&#128247; Gallery</a>
       <a href="/clipboard" class="pill-btn">&#128203; Clips</a>
@@ -1472,11 +1476,260 @@ def _render_beam_page(text: str) -> str:
     return _BEAM_HTML.replace('__TEXT__', _html.escape(text))
 
 
+def _collect_status(app_status: dict) -> dict:
+    """Merge the app's live status (idle/state) with host + service metrics."""
+    out = dict(app_status or {})
+    try:
+        import psutil
+        out['cpu_pct'] = round(psutil.cpu_percent(interval=None), 1)
+        vm = psutil.virtual_memory()
+        out['mem_pct'] = round(vm.percent, 1)
+        out['mem_used_mb'] = round(vm.used / 1048576)
+        out['mem_total_mb'] = round(vm.total / 1048576)
+        out['boot_secs'] = round(time.time() - psutil.boot_time())
+    except Exception:
+        pass
+    try:
+        out['load'] = [round(x, 2) for x in os.getloadavg()]
+    except Exception:
+        pass
+    try:
+        with open('/sys/class/thermal/thermal_zone0/temp') as f:
+            out['soc_temp_c'] = round(int(f.read().strip()) / 1000, 1)
+    except Exception:
+        pass
+    try:
+        r = subprocess.run(
+            ['systemctl', 'show', 'eink-display', '-p', 'NRestarts',
+             '-p', 'ActiveEnterTimestampMonotonic', '-p', 'MemoryCurrent'],
+            capture_output=True, text=True, timeout=3)
+        kv = dict(line.split('=', 1) for line in r.stdout.splitlines() if '=' in line)
+        if kv.get('NRestarts', '').isdigit():
+            out['restarts'] = int(kv['NRestarts'])
+        m = kv.get('ActiveEnterTimestampMonotonic', '')
+        if m.isdigit() and int(m) > 0:
+            out['service_uptime_secs'] = round(
+                time.clock_gettime(time.CLOCK_MONOTONIC) - int(m) / 1e6)
+        mc = kv.get('MemoryCurrent', '')
+        if mc.isdigit():
+            out['service_mem_mb'] = round(int(mc) / 1048576, 1)
+    except Exception:
+        pass
+    return out
+
+
+# Shared dark-theme CSS for the new sub-pages (served raw — single braces).
+_SUBPAGE_CSS = '''
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d0d0d;color:#e2e2e2;font-family:-apple-system,BlinkMacSystemFont,sans-serif;
+       padding:16px;padding-top:max(16px,env(safe-area-inset-top));min-height:100dvh}
+  header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px;gap:12px}
+  h1{font-size:20px;font-weight:700}
+  .back{color:#3b82f6;text-decoration:none;font-size:14px}
+  .card{background:#161616;border:1px solid #2a2a2a;border-radius:12px;padding:14px;margin-bottom:14px}
+  label{display:block;font-size:13px;color:#999;margin:10px 0 4px}
+  input,select,textarea{width:100%;background:#1e1e1e;border:1px solid #2a2a2a;border-radius:8px;
+       color:#e2e2e2;padding:10px;font-size:15px;font-family:inherit}
+  textarea{min-height:90px;resize:vertical}
+  button{background:#3b82f6;color:#fff;border:0;border-radius:8px;padding:11px 16px;font-size:15px;
+       font-weight:600;cursor:pointer}
+  button:active{background:#2563eb}
+  button.danger{background:#3a1212;color:#ef4444;border:1px solid #5a1a1a}
+  button.ghost{background:#1e1e1e;color:#e2e2e2;border:1px solid #2a2a2a}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  .msg{font-size:13px;color:#3b82f6;min-height:18px;margin-top:8px}
+  .kv{display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid #222;font-size:15px}
+  .kv:last-child{border-bottom:0}
+  .kv .k{color:#999}
+  .kv .v{font-weight:600}
+  pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Menlo,Consolas,monospace;
+      font-size:12px;line-height:1.45;background:#0a0a0a;border:1px solid #222;border-radius:8px;
+      padding:10px;max-height:62dvh;overflow:auto}
+'''
+
+_PIN_JS = '''
+  function getPin(){ var p=localStorage.getItem("web_pin")||""; if(!p){p=prompt("Enter web PIN")||"";
+    if(p)localStorage.setItem("web_pin",p);} return p; }
+  function clearPin(){ localStorage.removeItem("web_pin"); }
+  function pinHeaders(extra){ var h=extra||{}; h["X-Web-Pin"]=getPin(); return h; }
+'''
+
+_STATUS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Status</title><style>''' + _SUBPAGE_CSS + '''</style></head><body>
+<header><a class="back" href="/">&#8592; Back</a><h1>Status</h1><span></span></header>
+<div class="card" id="box">Loading…</div>
+<script>
+function fmtDur(s){ if(s==null)return "—"; s=Math.round(s); var d=Math.floor(s/86400);
+  var h=Math.floor(s%86400/3600); var m=Math.floor(s%3600/60); var sec=s%60;
+  if(d)return d+"d "+h+"h "+m+"m"; if(h)return h+"h "+m+"m"; if(m)return m+"m "+sec+"s"; return sec+"s"; }
+function row(k,v){ return '<div class="kv"><span class="k">'+k+'</span><span class="v">'+v+'</span></div>'; }
+function load(){
+  fetch("/status.json").then(function(r){return r.json();}).then(function(s){
+    var stateMap={active:"Active",screensaver:"Screensaver",asleep:"Panel asleep"};
+    var h="";
+    h+=row("State", stateMap[s.state]||s.state||"—");
+    h+=row("Idle", fmtDur(s.idle_secs));
+    h+=row("Panel sleep in", s.sleep_in_secs==null?"—":fmtDur(s.sleep_in_secs));
+    h+=row("Screensaver in", s.screensaver_in_secs==null?"—":fmtDur(s.screensaver_in_secs));
+    h+=row("Last full refresh", fmtDur(s.last_full_refresh_secs)+" ago");
+    if(s.cpu_pct!=null)h+=row("CPU", s.cpu_pct+"%");
+    if(s.mem_pct!=null)h+=row("Memory", s.mem_pct+"% ("+s.mem_used_mb+"/"+s.mem_total_mb+" MB)");
+    if(s.load)h+=row("Load", s.load.join("  "));
+    if(s.soc_temp_c!=null)h+=row("SoC temp", s.soc_temp_c+"°C");
+    if(s.service_mem_mb!=null)h+=row("Service RSS", s.service_mem_mb+" MB");
+    if(s.restarts!=null)h+=row("Restarts", s.restarts);
+    if(s.service_uptime_secs!=null)h+=row("Service uptime", fmtDur(s.service_uptime_secs));
+    if(s.boot_secs!=null)h+=row("Host uptime", fmtDur(s.boot_secs));
+    if(s.font_size!=null)h+=row("Font / dark", s.font_size+"pt / "+(s.dark_mode?"on":"off"));
+    document.getElementById("box").innerHTML=h;
+  }).catch(function(e){ document.getElementById("box").textContent="Error: "+e; });
+}
+load(); setInterval(load, 3000);
+</script></body></html>'''
+
+_LOGS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Logs</title><style>''' + _SUBPAGE_CSS + '''</style></head><body>
+<header><a class="back" href="/">&#8592; Back</a><h1>Logs</h1>
+<span><button class="ghost" onclick="clearPin();location.reload()">PIN</button></span></header>
+<div class="row" style="margin-bottom:10px">
+  <label style="margin:0;align-self:center">Lines</label>
+  <select id="lines" style="width:auto" onchange="load()">
+    <option>100</option><option selected>200</option><option>500</option></select>
+  <button class="ghost" onclick="load()">Refresh</button>
+  <label style="margin:0;align-self:center"><input type="checkbox" id="auto" style="width:auto"
+    onchange="toggleAuto()"> auto</label>
+</div>
+<pre id="log">Loading…</pre>
+<script>''' + _PIN_JS + '''
+var timer=null;
+function load(){
+  var n=document.getElementById("lines").value;
+  fetch("/logs.json?lines="+n,{headers:pinHeaders()}).then(function(r){return r.json();})
+   .then(function(d){
+     if(!d.ok){document.getElementById("log").textContent=d.error||"error";return;}
+     var el=document.getElementById("log"); el.textContent=d.text||"(empty)"; el.scrollTop=el.scrollHeight;
+   }).catch(function(e){document.getElementById("log").textContent="Error: "+e;});
+}
+function toggleAuto(){ if(document.getElementById("auto").checked){timer=setInterval(load,4000);}
+  else{clearInterval(timer);timer=null;} }
+load();
+</script></body></html>'''
+
+_CONTROLS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Controls</title><style>''' + _SUBPAGE_CSS + '''
+  .controls{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .controls button{padding:16px 10px}
+</style></head><body>
+<header><a class="back" href="/">&#8592; Back</a><h1>Controls</h1>
+<span><button class="ghost" onclick="clearPin();alert('PIN cleared')">PIN</button></span></header>
+<div class="card"><div class="controls">
+  <button onclick="act('force_refresh')">&#10227; Full refresh</button>
+  <button onclick="act('clear')">&#129529; Clear ghosting</button>
+  <button onclick="act('screensaver')">&#127748; Screensaver now</button>
+  <button onclick="act('wake')">&#9728; Wake</button>
+  <button onclick="act('font_inc')">A+ Font bigger</button>
+  <button onclick="act('font_dec')">A- Font smaller</button>
+  <button onclick="act('dark_toggle')">&#9680; Toggle dark</button>
+  <button onclick="act('toggle_qr')">&#9636; Toggle QR</button>
+</div></div>
+<div class="card"><div class="controls">
+  <button class="danger" onclick="confirmAct('restart','Restart the display service?')">&#8635; Restart service</button>
+  <button class="danger" onclick="confirmAct('reboot','Reboot the Pi?')">&#9211; Reboot Pi</button>
+</div><div class="msg" id="msg"></div></div>
+<script>''' + _PIN_JS + '''
+function act(a){
+  document.getElementById("msg").textContent="…";
+  fetch("/action",{method:"POST",headers:pinHeaders({"Content-Type":"application/json"}),
+    body:JSON.stringify({action:a})}).then(function(r){return r.json();})
+   .then(function(d){ document.getElementById("msg").textContent=d.ok?(a+" ✓"):("Error: "+(d.error||"?")); })
+   .catch(function(e){ document.getElementById("msg").textContent="Error: "+e; });
+}
+function confirmAct(a,m){ if(confirm(m)) act(a); }
+</script></body></html>'''
+
+_CARD_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Push a card</title><style>''' + _SUBPAGE_CSS + '''</style></head><body>
+<header><a class="back" href="/">&#8592; Back</a><h1>Push a card</h1>
+<span><button class="ghost" onclick="clearPin();alert('PIN cleared')">PIN</button></span></header>
+<div class="card">
+  <label>Card type</label>
+  <select id="kind" onchange="showFields()">
+    <option value="note">Note</option><option value="countdown">Countdown</option>
+    <option value="todo">To-do list</option><option value="qr">QR code</option>
+  </select>
+  <div id="f_note"><label>Title (optional)</label><input id="note_title">
+    <label>Text</label><textarea id="note_text" placeholder="Anything to show on the panel"></textarea></div>
+  <div id="f_countdown" style="display:none"><label>Title</label><input id="cd_title" placeholder="Launch">
+    <label>Target date/time</label><input id="cd_target" type="datetime-local"></div>
+  <div id="f_todo" style="display:none"><label>Title</label><input id="td_title" placeholder="To-do">
+    <label>Items (one per line)</label><textarea id="td_items" placeholder="Buy milk&#10;Call Sam"></textarea></div>
+  <div id="f_qr" style="display:none"><label>URL</label><input id="qr_url" placeholder="https://…">
+    <label>Caption (optional)</label><input id="qr_caption"></div>
+  <div class="row" style="margin-top:14px"><button onclick="push()">Show on e-ink</button></div>
+  <div class="msg" id="msg"></div>
+</div>
+<script>''' + _PIN_JS + '''
+function showFields(){ var k=document.getElementById("kind").value;
+  ["note","countdown","todo","qr"].forEach(function(x){
+    document.getElementById("f_"+x).style.display=(x===k)?"block":"none"; }); }
+function push(){
+  var k=document.getElementById("kind").value, c={kind:k};
+  if(k==="note"){c.title=note_title.value;c.text=note_text.value;}
+  else if(k==="countdown"){c.title=cd_title.value;c.target=cd_target.value;}
+  else if(k==="todo"){c.title=td_title.value;c.items=td_items.value.split("\\n").filter(function(s){return s.trim();});}
+  else if(k==="qr"){c.url=qr_url.value;c.caption=qr_caption.value;}
+  document.getElementById("msg").textContent="Sending…";
+  fetch("/card",{method:"POST",headers:pinHeaders({"Content-Type":"application/json"}),body:JSON.stringify(c)})
+   .then(function(r){return r.json();})
+   .then(function(d){ document.getElementById("msg").textContent=d.ok?"Pushed to the panel.":("Error: "+(d.error||"?")); })
+   .catch(function(e){ document.getElementById("msg").textContent="Error: "+e; });
+}
+</script></body></html>'''
+
+
 def _make_handler(bmp_path: str, input_queue: queue.Queue,
                   activity_ref: List[float], photos_dir: str, config_path: str = '',
                   clipboard_path: str = '', display_queue: queue.Queue = None,
-                  beam_ref: List[str] = None):
+                  beam_ref: List[str] = None, config: dict = None,
+                  status_ref: List[dict] = None):
+    config = config if config is not None else {}
+    status_ref = status_ref if status_ref is not None else [{}]
+
     class Handler(BaseHTTPRequestHandler):
+        def _pin_ok(self) -> bool:
+            """True if the request carries the configured web_pin.
+
+            PIN may arrive as the X-Web-Pin header, a ?pin= query param, or a
+            "pin" field in the JSON body (read non-destructively for POSTs).
+            An unset/empty web_pin LOCKS gated endpoints (returns False).
+            """
+            want = str(config.get('web_pin', '') or '')
+            if not want:
+                return False
+            got = self.headers.get('X-Web-Pin', '')
+            if not got:
+                q = urllib.parse.urlparse(self.path).query
+                got = urllib.parse.parse_qs(q).get('pin', [''])[0]
+            return got == want
+
+        def _require_pin(self) -> bool:
+            """Respond 401/403 and return False when the PIN is missing/wrong."""
+            if self._pin_ok():
+                return True
+            want = str(config.get('web_pin', '') or '')
+            if not want:
+                self._respond(403, 'application/json',
+                              b'{"ok":false,"error":"Locked: set web_pin in config to enable"}')
+            else:
+                self._respond(401, 'application/json',
+                              b'{"ok":false,"error":"PIN required or incorrect"}')
+            return False
+
         def do_GET(self):
             activity_ref[0] = time.time()
             path = self.path.split('?')[0]
@@ -1509,6 +1762,19 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 text = (beam_ref[0] if beam_ref else '') or '(nothing beamed yet)'
                 self._respond(200, 'text/html; charset=utf-8',
                               _render_beam_page(text).encode())
+            elif path == '/status':
+                self._respond(200, 'text/html; charset=utf-8', _STATUS_HTML.encode())
+            elif path == '/status.json':
+                body = json.dumps(_collect_status(status_ref[0])).encode()
+                self._respond(200, 'application/json', body)
+            elif path == '/logs':
+                self._respond(200, 'text/html; charset=utf-8', _LOGS_HTML.encode())
+            elif path == '/logs.json':
+                self._serve_logs()
+            elif path == '/card':
+                self._respond(200, 'text/html; charset=utf-8', _CARD_HTML.encode())
+            elif path == '/controls':
+                self._respond(200, 'text/html; charset=utf-8', _CONTROLS_HTML.encode())
             else:
                 self._respond(404, 'text/plain', b'Not found')
 
@@ -1521,6 +1787,8 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._handle_message()
             elif path == '/action':
                 self._handle_action()
+            elif path == '/card':
+                self._handle_card()
             elif path == '/upload':
                 self._handle_upload()
             elif path == '/select':
@@ -1755,20 +2023,74 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             self._respond(200, 'application/json', b'{"ok":true}')
 
         def _handle_action(self):
-            """POST /action — send a display command (screensaver, toggle_qr, force_refresh)."""
+            """POST /action — a quick action. PIN-gated.
+
+            Display actions go through the app's display queue; restart/reboot
+            run on the host.
+            """
             length = int(self.headers.get('Content-Length', 0))
-            raw = self.rfile.read(length)
+            raw = self.rfile.read(length)  # consume body even if we reject
+            if not self._require_pin():
+                return
             try:
                 action = json.loads(raw).get('action', '')
             except Exception:
                 self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
                 return
-            _VALID = {'screensaver', 'toggle_qr', 'force_refresh'}
-            if action not in _VALID:
+            # Actions the app loop handles via the display queue.
+            _DISPLAY = {'screensaver', 'toggle_qr', 'force_refresh', 'clear',
+                        'wake', 'font_inc', 'font_dec', 'dark_toggle'}
+            if action in _DISPLAY:
+                if display_queue is not None:
+                    display_queue.put({'type': action})
+                self._respond(200, 'application/json', b'{"ok":true}')
+            elif action == 'restart':
+                self._respond(200, 'application/json', b'{"ok":true}')
+                if platform.system() == 'Linux':
+                    subprocess.Popen(['sudo', 'systemctl', 'restart', 'eink-display'])
+            elif action == 'reboot':
+                self._respond(200, 'application/json', b'{"ok":true}')
+                if platform.system() == 'Linux':
+                    subprocess.Popen(['sudo', 'reboot'])
+            else:
                 self._respond(400, 'application/json', b'{"ok":false,"error":"Unknown action"}')
+
+        def _serve_logs(self):
+            """GET /logs.json?lines=N — recent journald lines for this service. PIN-gated."""
+            if not self._require_pin():
+                return
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                lines = max(1, min(500, int(q.get('lines', ['200'])[0])))
+            except ValueError:
+                lines = 200
+            try:
+                out = subprocess.run(
+                    ['journalctl', '-u', 'eink-display', '-n', str(lines),
+                     '--no-pager', '-o', 'short-iso'],
+                    capture_output=True, text=True, timeout=5).stdout
+            except Exception as e:
+                out = f'(could not read logs: {e})'
+            self._respond(200, 'application/json',
+                          json.dumps({'ok': True, 'text': out}).encode())
+
+        def _handle_card(self):
+            """POST /card — render a rich card (note/countdown/todo/qr) to e-ink. PIN-gated."""
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            if not self._require_pin():
+                return
+            try:
+                card = json.loads(raw)
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+            kind = card.get('kind', '')
+            if kind not in ('note', 'countdown', 'todo', 'qr'):
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Unknown card kind"}')
                 return
             if display_queue is not None:
-                display_queue.put({'type': action})
+                display_queue.put({'type': 'card', 'card': card})
             self._respond(200, 'application/json', b'{"ok":true}')
 
         def _handle_mode(self):
@@ -1886,21 +2208,27 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
 
 class PreviewServer:
     def __init__(self, port: int, bmp_path: str, photos_dir: str,
-                 config_path: str = '', clipboard_path: str = ''):
+                 config_path: str = '', clipboard_path: str = '', config: dict = None):
         self._port = port
         self._bmp_path = bmp_path
         self._photos_dir = photos_dir
         self._config_path = config_path
         self._clipboard_path = clipboard_path
+        self._config = config if config is not None else {}
         self._server = None
         self.input_queue:   queue.Queue = queue.Queue()
         self.display_queue: queue.Queue = queue.Queue()
         self._activity_ref: List[float] = [time.time()]
         self._beam_ref:     List[str] = ['']   # latest "beam to phone" text
+        self._status_ref:   List[dict] = [{}]  # live status from the app loop
 
     def set_beam_text(self, text: str):
         """Store the text shown at /beam (called by the app on beam-to-phone)."""
         self._beam_ref[0] = text or ''
+
+    def set_status(self, status: dict):
+        """Publish live runtime status for the /status panel (called each loop)."""
+        self._status_ref[0] = status
 
     @property
     def last_activity(self) -> float:
@@ -1914,6 +2242,8 @@ class PreviewServer:
             clipboard_path=self._clipboard_path,
             display_queue=self.display_queue,
             beam_ref=self._beam_ref,
+            config=self._config,
+            status_ref=self._status_ref,
         )
         self._server = HTTPServer(('', self._port), handler)
         self._server.allow_reuse_address = True
@@ -1930,7 +2260,8 @@ def start_if_enabled(config: dict, bmp_path: str, photos_dir: str = '',
         return None
     port = config.get('preview_server_port', 8080)
     try:
-        server = PreviewServer(port, bmp_path, photos_dir, config_path, clipboard_path)
+        server = PreviewServer(port, bmp_path, photos_dir, config_path,
+                               clipboard_path, config=config)
         server.start()
         return server
     except OSError as e:

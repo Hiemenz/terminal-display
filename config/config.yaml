@@ -146,6 +146,12 @@ terminal_paste_file: ~/eink-paste.txt
 preview_server_enabled: true
 preview_server_port: 8080
 
+# PIN that gates the powerful web endpoints (logs, quick actions incl.
+# restart/reboot, and push-a-card). The live view, status panel, and gallery
+# stay open. Empty = those gated features are LOCKED (safe default) until you
+# set a PIN here. Use a short numeric PIN; the server is on your LAN only.
+web_pin: ""
+
 # ── General display ──────────────────────────────────────────────────────────
 # Custom label shown on stats screen (leave empty to use hostname)
 device_label: ""
