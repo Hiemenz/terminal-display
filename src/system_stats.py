@@ -108,6 +108,7 @@ def collect(config: dict) -> dict:
             'cpu_percent': float,
             'cpu_count': int,
             'cpu_freq_mhz': float | None,
+            'cpu_temp_c': float | None,
             'memory': {
                 'used': int, 'total': int, 'percent': float,
                 'used_str': str, 'total_str': str,
@@ -138,6 +139,22 @@ def collect(config: dict) -> dict:
         cpu_freq_mhz = cpu_freq.current if cpu_freq else None
     except Exception:
         cpu_freq_mhz = None
+
+    # CPU temperature (Pi/Linux; None where unsupported, e.g. macOS)
+    cpu_temp_c = None
+    try:
+        temps = psutil.sensors_temperatures()
+        for key in ('cpu_thermal', 'cpu-thermal', 'coretemp', 'soc_thermal'):
+            if temps.get(key):
+                cpu_temp_c = temps[key][0].current
+                break
+        else:
+            for entries in temps.values():
+                if entries:
+                    cpu_temp_c = entries[0].current
+                    break
+    except Exception:
+        pass
 
     # Memory
     mem = psutil.virtual_memory()
@@ -211,6 +228,7 @@ def collect(config: dict) -> dict:
         'cpu_percent': cpu_pct,
         'cpu_count': cpu_count,
         'cpu_freq_mhz': cpu_freq_mhz,
+        'cpu_temp_c': cpu_temp_c,
         'memory': memory,
         'disk': disk_info,
         'network': net_info,

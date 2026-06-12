@@ -38,19 +38,19 @@ main.py
 
 ```
 ┌────────────────── TOP BAR ──────────────────────┐
-│              HH:MM:SS  (52pt clock)              │
-│              Day, Mon DD YYYY                    │
-│ hostname                              up Xh Ym   │
+│ hostname        HH:MM:SS (54pt)       up Xh Ym   │
+│ platform      Day, Mon DD YYYY        IP addr    │
 ├──────────────────────────────────────────────────┤
 │   LEFT COLUMN (377px)   │  RIGHT COLUMN (377px)  │
-│   [ CPU ]               │  [ Network ]           │
-│   [ Memory ]            │  [ Top Processes ]     │
-│   [ Disk ]              │                        │
-│   [ Load Average ]      │                        │
-├──────────────────────────────────────────────────┤
-│ platform: Darwin/Linux                           │
+│   (CPU + load card)     │  (Network card + QR)   │
+│   (Memory card)         │  (Processes card)      │
+│   (Disk card)           │                        │
 └──────────────────────────────────────────────────┘
 ```
+
+Panels are rounded "cards" with filled title chips; headline metrics are
+drawn big and right-aligned. Load average folds into the CPU card and the
+web-UI QR code sits inside the Network card.
 
 ## Config Options
 
