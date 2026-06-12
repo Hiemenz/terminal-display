@@ -73,6 +73,11 @@ terminal_keyboard_prefer_bluetooth: false
 terminal_use_tmux: true
 terminal_tmux_session: eink
 
+# Wake on SSH: typing in any attached tmux client (e.g. `ssh` in and run
+# `tmux attach -t eink`) counts as input — it wakes the panel from deep sleep
+# or the screensaver and keeps it awake while the remote session is active.
+terminal_wake_on_ssh: true
+
 # Scrollback history (lines). PgUp/PgDn to scroll (no-tmux mode only;
 # with tmux, use Ctrl+B [ to enter copy mode).
 terminal_scrollback: 500

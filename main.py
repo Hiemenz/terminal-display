@@ -61,13 +61,25 @@ def _primary_ip() -> str:
         return ''
 
 
+_who_checked_at = 0.0
+_who_result = False
+
+
 def _has_active_sessions() -> bool:
-    """Return True if any users are currently logged in (SSH or local tty)."""
-    try:
-        result = subprocess.run(['who'], capture_output=True, text=True, timeout=3)
-        return bool(result.stdout.strip())
-    except Exception:
-        return False
+    """Return True if any users are currently logged in (SSH or local tty).
+
+    Callers poll this from tight 0.5 s loops, so the `who` subprocess is
+    spawned at most once every 5 s and the result cached in between."""
+    global _who_checked_at, _who_result
+    now = time.monotonic()
+    if now - _who_checked_at >= 5.0:
+        _who_checked_at = now
+        try:
+            result = subprocess.run(['who'], capture_output=True, text=True, timeout=3)
+            _who_result = bool(result.stdout.strip())
+        except Exception:
+            _who_result = False
+    return _who_result
 
 
 def _keyboard_watcher(switch_event: threading.Event, stop_event: threading.Event):

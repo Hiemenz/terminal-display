@@ -331,6 +331,12 @@ class EinkTerminal:
         # tmux
         self._use_tmux     = config.get('terminal_use_tmux', False) and bool(shutil.which('tmux'))
         self._tmux_session = config.get('terminal_tmux_session', 'eink')
+        # Wake on SSH: typing in any attached tmux client (e.g. `tmux attach`
+        # over SSH) counts as user input — it wakes the panel from deep sleep /
+        # screensaver and keeps it awake while the remote session is active.
+        self._wake_on_ssh        = config.get('terminal_wake_on_ssh', True)
+        self._tmux_activity_seen = 0.0   # newest #{client_activity} handled
+        self._tmux_poll_mono     = 0.0   # last poll (throttled to every 2 s)
 
         self._driver      = EinkDriver(local=local,
                                        partial_refresh_limit=config.get('partial_refresh_before_full', 30),
@@ -1693,8 +1699,18 @@ class EinkTerminal:
             self._last_url = ''
         self._render(force_full=False)
 
-    def _scan_for_url(self) -> str:
-        """Scan visible screen buffer bottom-to-top, return first URL found."""
+    def _scan_for_url(self, rows=None) -> str:
+        """Scan visible screen buffer bottom-to-top, return first URL found.
+        `rows` limits the scan to those row indices (e.g. pyte's dirty set)."""
+        if rows is not None:
+            for row_idx in sorted((r for r in rows if 0 <= r < self._screen.lines),
+                                  reverse=True):
+                row = self._screen.buffer[row_idx]
+                line = ''.join(row[c].data for c in range(self._screen.columns))
+                m = _URL_RE.search(line)
+                if m:
+                    return m.group(0)
+            return ''
         for row_idx in range(self._screen.lines - 1, -1, -1):
             row = self._screen.buffer[row_idx]
             line = ''.join(row[c].data for c in range(self._screen.columns))
@@ -1929,11 +1945,47 @@ class EinkTerminal:
             # the screensaver would never reach the panel.
             self._driver.flash_refresh(img)
             self._last_image = img
-            self._screensaver_show_mono = time.monotonic()
-            logger.info('Screensaver activated — img=%s mode=%s', os.path.basename(image_path), mode)
-            self._driver.sleep()   # power down panel; wakes automatically on next full_refresh
+            logger.info('Screensaver activated — img=%s cycle=%s',
+                        os.path.basename(image_path), self._screensaver_is_cycle)
         except Exception as e:
             logger.warning('Screensaver render error: %s', e)
+        finally:
+            # Even if the render failed, record the activation and power the
+            # panel down — otherwise the loop believes the screensaver is up
+            # while the panel stays awake on a stale frame.
+            self._screensaver_show_mono = time.monotonic()
+            self._driver.sleep()   # wakes automatically on next full_refresh
+
+    # ─── SSH / tmux input detection ───────────────────────────────────────────
+
+    def _tmux_input_seen(self, now: float) -> bool:
+        """True when an attached tmux client sent input since the last check.
+
+        This is how SSH'ing in and typing into the shared tmux session wakes
+        the e-ink: #{client_activity} bumps only on client *input* (never on
+        program output), so a spinner or log tail can't hold the panel awake.
+        Polled at most every 2 s, and skipped while local input is fresh
+        (local keys already reset the idle timer)."""
+        if not (self._use_tmux and self._wake_on_ssh):
+            return False
+        if (now - self._tmux_poll_mono) < 2.0 or (now - self._last_input) < 2.0:
+            return False
+        self._tmux_poll_mono = now
+        try:
+            r = subprocess.run(['tmux', 'list-clients', '-F', '#{client_activity}'],
+                               capture_output=True, text=True, timeout=1)
+            newest = max((float(s) for s in r.stdout.split()), default=0.0)
+        except Exception:
+            return False
+        if newest <= 0.0:
+            return False
+        if self._tmux_activity_seen == 0.0:
+            self._tmux_activity_seen = newest    # baseline on first poll
+            return False
+        if newest > self._tmux_activity_seen:
+            self._tmux_activity_seen = newest
+            return True
+        return False
 
     # ─── Status bar info ──────────────────────────────────────────────────────
 
@@ -2056,11 +2108,6 @@ class EinkTerminal:
 
     def _render(self, force_full: bool = False, force_flash: bool = False):
         tw = SPLIT_TERMINAL_W if self._split_view else 800
-        status_info = self._get_status_info()
-        if status_info is not None:
-            tab_str = self._tab_indicator()
-            uptime  = status_info[3] if len(status_info) > 3 else ''
-            status_info = (status_info[0], status_info[1], status_info[2], tab_str, uptime)
         alerts = self._alert_monitor.active()
 
         # The status bar is deprioritized: only repaint it on a full render, when
@@ -2074,7 +2121,12 @@ class EinkTerminal:
             self._last_status_render = now_m
             self._status_force = False
 
-        found = self._scan_for_url()
+        # Scan only the rows that changed since the last render — a URL can
+        # only appear on a changed line, and a full-buffer scan per keystroke
+        # is wasteful. Cold cache / full repaints still scan everything.
+        dirty_rows = (None if force_full or self._img_cache is None
+                      else self._screen.dirty)
+        found = self._scan_for_url(dirty_rows)
         if found:
             self._last_url = found
         elif not self._last_url:
@@ -2144,6 +2196,17 @@ class EinkTerminal:
             and not self._show_refresh_hud   # HUD repaints a corner each frame
             and start_row == self._last_start_row
         )
+
+        # Status info spawns subprocesses (tmux cwd, git branch) — gather it
+        # only when the status bar will actually be repainted this frame.
+        status_info = None
+        if draw_status or not use_incremental:
+            status_info = self._get_status_info()
+            if status_info is not None:
+                tab_str = self._tab_indicator()
+                uptime  = status_info[3] if len(status_info) > 3 else ''
+                status_info = (status_info[0], status_info[1], status_info[2],
+                               tab_str, uptime)
 
         if use_incremental:
             img = render_screen_partial(
@@ -2331,7 +2394,18 @@ class EinkTerminal:
                 for tab in self._tabs:
                     if tab.pty_master is not None and tab.pty_master >= 0:
                         fds.append(tab.pty_master)
-                r, _, _ = select.select(fds, [], [], _RENDER_DEBOUNCE)
+                # Adaptive tick: poll fast only while output/renders are
+                # pending or input was seen in the last couple of seconds;
+                # otherwise relax so an idle terminal doesn't spin at 50 Hz.
+                # select() still returns instantly on any fd activity, so
+                # keystrokes and PTY output stay snappy.
+                if has_pending or (now - self._last_activity) < 2.0:
+                    timeout = _RENDER_DEBOUNCE
+                elif in_screensaver or panel_asleep:
+                    timeout = 1.0
+                else:
+                    timeout = 0.5
+                r, _, _ = select.select(fds, [], [], timeout)
             except (ValueError, OSError):
                 if self._evdev_kb is not None:
                     self._evdev_disconnect()
@@ -2538,6 +2612,18 @@ class EinkTerminal:
                                 has_pending = True
                 except _queue.Empty:
                     pass
+
+            # ── SSH / tmux input (wake from sleep, keep awake while active) ────
+            if self._tmux_input_seen(now):
+                self._last_activity = now
+                self._last_input = now
+                self._did_idle_reset = False
+                if in_screensaver or panel_asleep or self._in_text_message:
+                    in_screensaver = False
+                    panel_asleep = False
+                    self._in_text_message = False
+                    self._render(force_full=True)
+                    self._last_full_refresh_mono = time.monotonic()
 
             # ── Display command queue (from web server) ───────────────────────
             if self._display_queue is not None:

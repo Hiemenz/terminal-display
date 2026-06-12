@@ -26,10 +26,12 @@ _BLACK = 0
 PAD = 14          # outer padding
 COL_GAP = 16      # gap between left and right columns
 COL_W = (W - PAD * 2 - COL_GAP) // 2   # ~377 px each column
-ROW_H = 28        # base row height
-SECTION_GAP = 10  # gap between sections
-BAR_H = 16        # progress bar height
-BAR_RADIUS = 3    # bar corner radius
+ROW_H = 24        # base row height
+SECTION_GAP = 12  # gap between cards
+BAR_H = 12        # progress bar height
+CHIP_H = 22       # card title chip height
+CARD_RADIUS = 10  # card corner radius
+CARD_INSET = 14   # horizontal content inset inside a card
 
 
 def _find_font(path: str, size: int) -> ImageFont.ImageFont:
@@ -54,24 +56,62 @@ def _find_font(path: str, size: int) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
+def _find_sans(path: str, size: int, bold: bool = False) -> ImageFont.ImageFont:
+    """Sans-serif UI font for the dashboard chrome (headings, metrics, clock).
+    Falls back to the mono stack, then the PIL default."""
+    if bold:
+        candidates = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf',
+            '/System/Library/Fonts/Supplemental/Arial Bold.ttf',
+            '/System/Library/Fonts/HelveticaNeue.ttc',
+        ]
+    else:
+        candidates = [
+            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+            '/System/Library/Fonts/Supplemental/Arial.ttf',
+            '/System/Library/Fonts/Helvetica.ttc',
+        ]
+    for fp in candidates:
+        if os.path.exists(fp):
+            try:
+                return ImageFont.truetype(fp, size)
+            except Exception:
+                pass
+    return _find_font(path, size)
+
+
 def _bar(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
          pct: float, fg: int, bg: int, outline: int):
-    """Draw a filled progress bar. pct in [0, 100]."""
-    # Background
-    draw.rectangle([x, y, x + w, y + h], fill=bg, outline=outline)
-    # Fill
+    """Draw a rounded progress bar. pct in [0, 100]."""
+    r = h // 2
+    draw.rounded_rectangle([x, y, x + w, y + h], radius=r, fill=bg,
+                           outline=outline, width=1)
     fill_w = max(0, int(w * min(pct, 100) / 100))
-    if fill_w > 0:
-        draw.rectangle([x, y, x + fill_w, y + h], fill=fg)
+    if fill_w >= h:
+        draw.rounded_rectangle([x, y, x + fill_w, y + h], radius=r, fill=fg)
+    elif fill_w > 0:
+        # Too narrow for rounded corners — draw a leading dot.
+        draw.ellipse([x, y, x + h, y + h], fill=fg)
 
 
-def _section_header(draw: ImageDraw.ImageDraw, x: int, y: int, label: str,
-                    font: ImageFont.ImageFont, color: int, width: int) -> int:
-    """Draw a section header with underline. Returns new y."""
-    draw.text((x, y), label, font=font, fill=color)
-    lh = font.getbbox(label)[3] + 2
-    draw.line([(x, y + lh), (x + width, y + lh)], fill=color, width=1)
-    return y + lh + 4
+def _card_frame(draw: ImageDraw.ImageDraw, x: int, y0: int, w: int, y_end: int,
+                title: str, font: ImageFont.ImageFont, fg: int, bg: int):
+    """Card outline + filled title chip (fieldset-legend style).
+
+    Content is drawn first, between y0 + CHIP_H and y_end; the frame and chip
+    are painted afterwards so the chip sits over the frame's top edge."""
+    top = y0 + CHIP_H // 2
+    draw.rounded_rectangle([x, top, x + w, y_end], radius=CARD_RADIUS,
+                           outline=fg, width=1)
+    label = title.upper()
+    tw = int(draw.textlength(label, font=font))
+    cx0 = x + CARD_INSET
+    draw.rounded_rectangle([cx0, y0, cx0 + tw + 18, y0 + CHIP_H],
+                           radius=CHIP_H // 2, fill=fg)
+    draw.text((cx0 + 9, y0 + CHIP_H // 2 + 1), label, font=font, fill=bg,
+              anchor='lm')
 
 
 def _fmt_rate(bps: float) -> str:
@@ -141,12 +181,15 @@ def render(stats: dict, config: dict) -> Image.Image:
     dark = config.get('dark_mode', True)
     font_path = config.get('font_path', '')
 
-    # Fonts (all monospace)
-    f_time = _find_font(font_path, 52)   # big clock
-    f_date = _find_font(font_path, 20)
-    f_head = _find_font(font_path, 18)   # section headers
-    f_body = _find_font(font_path, 16)   # body text
-    f_small = _find_font(font_path, 14)  # small labels
+    # Sans-serif for the chrome (clock, chips, metrics); mono for the table.
+    f_time     = _find_sans(font_path, 54, bold=True)
+    f_date     = _find_sans(font_path, 17)
+    f_chip     = _find_sans(font_path, 12, bold=True)
+    f_metric   = _find_sans(font_path, 32, bold=True)
+    f_metric_s = _find_sans(font_path, 22, bold=True)
+    f_body     = _find_sans(font_path, 15)
+    f_small    = _find_sans(font_path, 12)
+    f_mono     = _find_font(font_path, 13)
 
     img = Image.new('L', (W, H), color=_WHITE)
     d = ImageDraw.Draw(img)
@@ -159,92 +202,112 @@ def render(stats: dict, config: dict) -> Image.Image:
     hist_min = hist.get('window_minutes', 60)
 
     # -----------------------------------------------------------------------
-    # TOP BAR: hostname + time + date
+    # TOP BAR: centred clock + date, host/platform left, uptime/IP right
     # -----------------------------------------------------------------------
-    y = PAD
+    y = PAD - 4
     device_label = config.get('device_label', '').strip()
     hostname = device_label if device_label else stats.get('hostname', 'unknown')
     time_str = stats.get('time', '--:--:--')
     date_str = stats.get('date', '')
     uptime = stats.get('uptime', '')
+    primary_ip = stats.get('primary_ip', '')
+    platform_str = stats.get('platform', '')
 
-    # Time (big, centred)
-    tw = d.textlength(time_str, font=f_time) if hasattr(d, 'textlength') else f_time.getlength(time_str)
-    d.text(((W - tw) // 2, y), time_str, font=f_time, fill=fg)
+    d.text((W // 2, y), time_str, font=f_time, fill=fg, anchor='ma')
     time_h = f_time.getbbox(time_str)[3]
-    y += time_h + 2
+    d.text((W // 2, y + time_h + 6), date_str, font=f_date, fill=fg, anchor='ma')
 
-    # Date centred below
-    dw = d.textlength(date_str, font=f_date) if hasattr(d, 'textlength') else f_date.getlength(date_str)
-    d.text(((W - dw) // 2, y), date_str, font=f_date, fill=fg)
-    date_h = f_date.getbbox(date_str)[3]
-    y += date_h + 2
+    # Left block: hostname + platform; right block: uptime + IP.
+    d.text((PAD, y + 10), hostname, font=f_body, fill=fg)
+    d.text((PAD, y + 32), platform_str, font=f_small, fill=fg)
+    d.text((W - PAD, y + 10), f"up {uptime}", font=f_body, fill=fg, anchor='ra')
+    if primary_ip:
+        d.text((W - PAD, y + 32), primary_ip, font=f_small, fill=fg, anchor='ra')
 
-    # Hostname left, uptime right
-    d.text((PAD, y), hostname, font=f_small, fill=fg)
-    up_label = f"up {uptime}"
-    upw = d.textlength(up_label, font=f_small) if hasattr(d, 'textlength') else f_small.getlength(up_label)
-    d.text((W - PAD - upw, y), up_label, font=f_small, fill=fg)
-    y += f_small.getbbox(up_label)[3] + 4
-
-    # Divider line below top bar
+    y += time_h + 6 + f_date.getbbox('Mg')[3] + 8
     d.line([(PAD, y), (W - PAD, y)], fill=fg, width=1)
     y += SECTION_GAP
 
-    top_y = y  # save for right column
+    top_y = y  # both columns start here
 
     # -----------------------------------------------------------------------
     # LEFT COLUMN
     # -----------------------------------------------------------------------
     lx = PAD
     ly = top_y
+    load = stats.get('load')
+    show_load = config.get('show_load', True) and load
 
-    # --- CPU ---
+    # --- CPU (load average folded in) ---
     if config.get('show_cpu', True):
-        ly = _section_header(d, lx, ly, '[ CPU ]', f_head, fg, COL_W)
+        y0 = ly
+        cx = lx + CARD_INSET
+        cw = COL_W - CARD_INSET * 2
+        cy = y0 + CHIP_H + 6
         cpu_pct = stats.get('cpu_percent', 0)
-        cpu_count = stats.get('cpu_count', 0)
+        parts = [f"{stats.get('cpu_count', 0)} cores"]
         freq = stats.get('cpu_freq_mhz')
-        freq_str = f"  {freq:.0f}MHz" if freq else ''
-        d.text((lx, ly), f"Usage: {cpu_pct:.1f}%  ({cpu_count} cores){freq_str}", font=f_body, fill=fg)
-        ly += ROW_H
-        _bar(d, lx, ly, COL_W, BAR_H, cpu_pct, fg, _WHITE, fg)
-        ly += BAR_H + 4
+        if freq:
+            parts.append(f"{freq / 1000:.1f} GHz" if freq >= 1000 else f"{freq:.0f} MHz")
+        temp = stats.get('cpu_temp_c')
+        if temp is not None:
+            parts.append(f"{temp:.0f}°C")
+        d.text((lx + COL_W - CARD_INSET, cy - 6), f"{cpu_pct:.0f}%",
+               font=f_metric, fill=fg, anchor='ra')
+        d.text((cx, cy + 4), '  ·  '.join(parts), font=f_body, fill=fg)
+        cy += 34
+        _bar(d, cx, cy, cw, BAR_H, cpu_pct, fg, _WHITE, fg)
+        cy += BAR_H + 8
         if show_spark and 'cpu' in hist:
-            ly = _trend_row(d, lx, ly, COL_W, hist['cpu'], fg, f_small,
+            cy = _trend_row(d, cx, cy, cw, hist['cpu'], fg, f_small,
                             lambda v: f"{v:.0f}%", hist_min, fixed_max=100)
-        ly += SECTION_GAP
-
-    # --- Memory ---
-    if config.get('show_memory', True):
-        ly = _section_header(d, lx, ly, '[ Memory ]', f_head, fg, COL_W)
-        mem = stats.get('memory', {})
-        mem_pct = mem.get('percent', 0)
-        d.text((lx, ly), f"Used: {mem.get('used_str','?')} / {mem.get('total_str','?')}  ({mem_pct:.1f}%)", font=f_body, fill=fg)
-        ly += ROW_H
-        _bar(d, lx, ly, COL_W, BAR_H, mem_pct, fg, _WHITE, fg)
-        ly += BAR_H + SECTION_GAP
-
-    # --- Disk ---
-    if config.get('show_disk', True):
-        ly = _section_header(d, lx, ly, '[ Disk ]', f_head, fg, COL_W)
-        disk = stats.get('disk', {})
-        disk_pct = disk.get('percent', 0)
-        d.text((lx, ly), f"{disk.get('path','/')}  {disk.get('used_str','?')} / {disk.get('total_str','?')}  ({disk_pct:.1f}%)", font=f_body, fill=fg)
-        ly += ROW_H
-        _bar(d, lx, ly, COL_W, BAR_H, disk_pct, fg, _WHITE, fg)
-        ly += BAR_H + SECTION_GAP
-
-    # --- Load ---
-    if config.get('show_load', True) and stats.get('load'):
-        load = stats['load']
-        ly = _section_header(d, lx, ly, '[ Load Average ]', f_head, fg, COL_W)
-        d.text((lx, ly), f"1m: {load[0]:.2f}   5m: {load[1]:.2f}   15m: {load[2]:.2f}", font=f_body, fill=fg)
-        ly += ROW_H
+        if show_load:
+            d.text((cx, cy), f"load  {load[0]:.2f}  ·  {load[1]:.2f}  ·  {load[2]:.2f}",
+                   font=f_small, fill=fg)
+            cy += 18
+        y_end = cy + 6
+        _card_frame(d, lx, y0, COL_W, y_end, 'CPU', f_chip, fg, _WHITE)
+        ly = y_end + SECTION_GAP
+    elif show_load:
+        # CPU panel hidden — show load in its own small card.
+        y0 = ly
+        cx = lx + CARD_INSET
+        cy = y0 + CHIP_H + 6
+        d.text((cx, cy), f"1m {load[0]:.2f}   5m {load[1]:.2f}   15m {load[2]:.2f}",
+               font=f_body, fill=fg)
+        cy += ROW_H
         if show_spark and hist.get('load'):
-            ly = _trend_row(d, lx, ly, COL_W, hist['load'], fg, f_small,
-                            lambda v: f"{v:.2f}", hist_min)
-        ly += SECTION_GAP
+            cy = _trend_row(d, cx, cy, COL_W - CARD_INSET * 2, hist['load'],
+                            fg, f_small, lambda v: f"{v:.2f}", hist_min)
+        y_end = cy + 6
+        _card_frame(d, lx, y0, COL_W, y_end, 'LOAD', f_chip, fg, _WHITE)
+        ly = y_end + SECTION_GAP
+
+    # --- Memory / Disk: same compact card pattern ---
+    def _usage_card(y0: int, title: str, detail: str, pct: float) -> int:
+        cx = lx + CARD_INSET
+        cw = COL_W - CARD_INSET * 2
+        cy = y0 + CHIP_H + 6
+        d.text((lx + COL_W - CARD_INSET, cy - 2), f"{pct:.0f}%",
+               font=f_metric_s, fill=fg, anchor='ra')
+        d.text((cx, cy + 2), detail, font=f_body, fill=fg)
+        cy += 28
+        _bar(d, cx, cy, cw, BAR_H, pct, fg, _WHITE, fg)
+        y_end = cy + BAR_H + 8
+        _card_frame(d, lx, y0, COL_W, y_end, title, f_chip, fg, _WHITE)
+        return y_end + SECTION_GAP
+
+    if config.get('show_memory', True):
+        mem = stats.get('memory', {})
+        ly = _usage_card(ly, 'Memory',
+                         f"{mem.get('used_str', '?')} / {mem.get('total_str', '?')}",
+                         mem.get('percent', 0))
+
+    if config.get('show_disk', True):
+        disk = stats.get('disk', {})
+        ly = _usage_card(ly, 'Disk',
+                         f"{disk.get('path', '/')}   {disk.get('used_str', '?')} / {disk.get('total_str', '?')}",
+                         disk.get('percent', 0))
 
     # -----------------------------------------------------------------------
     # RIGHT COLUMN
@@ -252,65 +315,64 @@ def render(stats: dict, config: dict) -> Image.Image:
     rx = PAD + COL_W + COL_GAP
     ry = top_y
 
-    # --- Network ---
+    # --- Network (QR for the web UI lives in its right half) ---
     if config.get('show_network', True):
-        ry = _section_header(d, rx, ry, '[ Network ]', f_head, fg, COL_W)
+        y0 = ry
+        cx = rx + CARD_INSET
+        cw = COL_W - CARD_INSET * 2
+        cy = y0 + CHIP_H + 6
         net = stats.get('network', {})
-        d.text((rx, ry), f"Interface: {net.get('interface','?')}", font=f_body, fill=fg)
-        ry += ROW_H
-        d.text((rx, ry), f"↑ Sent:  {net.get('bytes_sent_str','?')}", font=f_body, fill=fg)
-        ry += ROW_H
-        d.text((rx, ry), f"↓ Recv:  {net.get('bytes_recv_str','?')}", font=f_body, fill=fg)
-        ry += ROW_H
+
+        qr_size = 0
+        if primary_ip and _HAS_QRCODE and config.get('show_qr_code', True):
+            try:
+                port = config.get('preview_server_port', 8080)
+                qr = _qrcode.QRCode(
+                    error_correction=_qrcode.constants.ERROR_CORRECT_L,
+                    box_size=3, border=2,
+                )
+                qr.add_data(f'http://{primary_ip}:{port}/config')
+                qr.make(fit=True)
+                qr_img = qr.make_image(fill_color='black', back_color='white').get_image().convert('L')
+                qr_size = qr_img.width
+                img.paste(qr_img, (rx + COL_W - CARD_INSET - qr_size, cy))
+            except Exception:
+                qr_size = 0
+
+        text_w = cw - (qr_size + 10 if qr_size else 0)
+        d.text((cx, cy), net.get('interface', '?'), font=f_metric_s, fill=fg)
+        cy += 30
+        d.text((cx, cy), f"↑ {net.get('bytes_sent_str', '?')} sent", font=f_body, fill=fg)
+        cy += ROW_H
+        d.text((cx, cy), f"↓ {net.get('bytes_recv_str', '?')} received", font=f_body, fill=fg)
+        cy += ROW_H
+        if qr_size:
+            cy = max(cy, y0 + CHIP_H + 6 + qr_size + 4)
         if show_spark and 'net' in hist:
-            ry = _trend_row(d, rx, ry, COL_W, hist['net'], fg, f_small,
+            cy = _trend_row(d, cx, cy, cw, hist['net'], fg, f_small,
                             _fmt_rate_short, hist_min)
-        ry += SECTION_GAP
+        y_end = cy + 6
+        _card_frame(d, rx, y0, COL_W, y_end, 'Network', f_chip, fg, _WHITE)
+        ry = y_end + SECTION_GAP
 
     # --- Top Processes ---
     if config.get('show_top_processes', True):
-        ry = _section_header(d, rx, ry, '[ Top Processes ]', f_head, fg, COL_W)
-        # header row
-        d.text((rx, ry), f"{'PID':>6}  {'CPU%':>5}  {'MEM%':>5}  NAME", font=f_small, fill=fg)
-        ry += ROW_H - 4
+        y0 = ry
+        cx = rx + CARD_INSET
+        cy = y0 + CHIP_H + 6
+        d.text((cx, cy), f"{'PID':>6}  {'CPU%':>5}  {'MEM%':>5}  NAME",
+               font=f_mono, fill=fg)
+        cy += 20
         for proc in stats.get('top_processes', []):
             pid = proc.get('pid', '?')
-            name = (proc.get('name') or '?')[:18]
+            name = (proc.get('name') or '?')[:20]
             cpu = proc.get('cpu_percent') or 0
             mem = proc.get('memory_percent') or 0
-            line = f"{pid:>6}  {cpu:>5.1f}  {mem:>5.1f}  {name}"
-            d.text((rx, ry), line, font=f_small, fill=fg)
-            ry += ROW_H - 4
-
-    # QR code (config URL) — bottom-right of right column, before dark inversion
-    primary_ip = stats.get('primary_ip', '')
-    if primary_ip and _HAS_QRCODE and config.get('show_qr_code', True):
-        try:
-            port = config.get('preview_server_port', 8080)
-            qr_url = f'http://{primary_ip}:{port}/config'
-            qr = _qrcode.QRCode(
-                error_correction=_qrcode.constants.ERROR_CORRECT_L,
-                box_size=4, border=2,
-            )
-            qr.add_data(qr_url)
-            qr.make(fit=True)
-            qr_img = qr.make_image(fill_color='black', back_color='white').get_image().convert('L')
-            sz = qr_img.width
-            qr_x = W - PAD - sz
-            qr_y = H - 18 - sz - 4
-            img.paste(qr_img, (qr_x, qr_y))
-        except Exception:
-            pass
-
-    # -----------------------------------------------------------------------
-    # Bottom status bar
-    # -----------------------------------------------------------------------
-    bar_y = H - 18
-    d.line([(PAD, bar_y), (W - PAD, bar_y)], fill=fg, width=1)
-    bar_y += 4
-    platform_str = stats.get('platform', '')
-    ip_label = f'  |  {primary_ip}' if primary_ip else ''
-    d.text((PAD, bar_y), f"platform: {platform_str}{ip_label}", font=f_small, fill=fg)
+            d.text((cx, cy), f"{pid:>6}  {cpu:>5.1f}  {mem:>5.1f}  {name}",
+                   font=f_mono, fill=fg)
+            cy += 19
+        y_end = min(cy + 6, H - PAD)
+        _card_frame(d, rx, y0, COL_W, y_end, 'Processes', f_chip, fg, _WHITE)
 
     # -----------------------------------------------------------------------
     # Dark mode inversion
