@@ -506,6 +506,139 @@ def render_text_message(text: str, label: str, config: dict) -> Image.Image:
     return img
 
 
+def _wrap_lines(d, text, font, max_px):
+    """Greedy word-wrap `text` to lines no wider than max_px."""
+    out = []
+    for para in text.split('\n'):
+        words = para.split()
+        if not words:
+            out.append('')
+            continue
+        cur = ''
+        for w in words:
+            test = (cur + ' ' + w).strip()
+            try:
+                tw = int(d.textlength(test, font=font)) if hasattr(d, 'textlength') else font.getbbox(test)[2]
+            except Exception:
+                tw = len(test) * 12
+            if tw <= max_px or not cur:
+                cur = test
+            else:
+                out.append(cur)
+                cur = w
+        out.append(cur)
+    return out
+
+
+def render_card(card: dict, config: dict) -> Image.Image:
+    """Render a 'pushed card' to the panel: note / countdown / todo / qr.
+
+    `card` is the dict from the web /card endpoint. Dismissed by any key, so a
+    'Press any key to return' hint is drawn at the bottom (like text messages).
+    """
+    from datetime import datetime
+
+    dark = config.get('dark_mode', False)
+    font_path = config.get('font_path', '')
+    bg = _BLACK if dark else _WHITE
+    fg = _WHITE if dark else _BLACK
+    kind = card.get('kind', 'note')
+
+    img = Image.new('L', (W, H), color=bg)
+    d = ImageDraw.Draw(img)
+    max_px = W - PAD * 2
+
+    def draw_title(title, y):
+        if not title:
+            return y
+        f = _find_font(font_path, 30)
+        d.text((PAD, y), title, font=f, fill=fg)
+        y += f.getbbox('Mg')[3] + 6
+        d.line([(PAD, y), (W - PAD, y)], fill=fg, width=1)
+        return y + 12
+
+    if kind == 'countdown':
+        title = card.get('title', '') or 'Countdown'
+        y = draw_title(title, PAD)
+        target = card.get('target', '')
+        big = _find_font(font_path, 76)
+        sub = _find_font(font_path, 20)
+        try:
+            tgt = datetime.fromisoformat(target)
+            delta = tgt - datetime.now()
+            secs = int(delta.total_seconds())
+            if secs < 0:
+                main_txt, sub_txt = 'Done', tgt.strftime('%a %b %d, %H:%M')
+            else:
+                dd, rem = divmod(secs, 86400)
+                hh, rem = divmod(rem, 3600)
+                mm, _ = divmod(rem, 60)
+                main_txt = (f'{dd}d {hh}h {mm}m' if dd else
+                            (f'{hh}h {mm}m' if hh else f'{mm}m'))
+                sub_txt = 'until ' + tgt.strftime('%a %b %d, %H:%M')
+        except Exception:
+            main_txt, sub_txt = '—', 'set a valid date/time'
+        bb = big.getbbox(main_txt)
+        cy = y + max(0, (H - y - PAD - 80) // 2)
+        d.text(((W - (bb[2] - bb[0])) // 2, cy), main_txt, font=big, fill=fg)
+        sw = int(d.textlength(sub_txt, font=sub)) if hasattr(d, 'textlength') else sub.getbbox(sub_txt)[2]
+        d.text(((W - sw) // 2, cy + (bb[3] - bb[1]) + 18), sub_txt, font=sub, fill=fg)
+
+    elif kind == 'todo':
+        y = draw_title(card.get('title', '') or 'To-do', PAD)
+        f = _find_font(font_path, 26)
+        lh = f.getbbox('Mg')[3] + 14
+        for item in card.get('items', [])[:12]:
+            if y + lh > H - PAD - 22:
+                break
+            d.rectangle([PAD, y + 2, PAD + 20, y + 22], outline=fg, width=2)
+            for ln in _wrap_lines(d, str(item), f, max_px - 36)[:1]:
+                d.text((PAD + 32, y), ln, font=f, fill=fg)
+            y += lh
+
+    elif kind == 'qr':
+        url = card.get('url', '')
+        caption = card.get('caption', '')
+        if url and _HAS_QRCODE:
+            try:
+                qr = _qrcode.QRCode(error_correction=_qrcode.constants.ERROR_CORRECT_M,
+                                    box_size=10, border=2)
+                qr.add_data(url)
+                qr.make(fit=True)
+                qr_img = qr.make_image(fill_color='black', back_color='white').get_image().convert('L')
+                side = min(300, H - PAD * 2 - 60)
+                qr_img = qr_img.resize((side, side))
+                qx = (W - side) // 2
+                img.paste(qr_img, (qx, PAD + 10))
+                cap = caption or url
+                f = _find_font(font_path, 20)
+                for i, ln in enumerate(_wrap_lines(d, cap, f, max_px)[:2]):
+                    lw = int(d.textlength(ln, font=f)) if hasattr(d, 'textlength') else f.getbbox(ln)[2]
+                    d.text(((W - lw) // 2, PAD + 20 + side + i * 26), ln, font=f, fill=fg)
+            except Exception:
+                pass
+        else:
+            d.text((PAD, PAD), 'No URL / QR unavailable', font=_find_font(font_path, 24), fill=fg)
+
+    else:  # note
+        y = draw_title(card.get('title', ''), PAD)
+        f = _find_font(font_path, 34)
+        lh = f.getbbox('Mg')[3] + 8
+        lines = _wrap_lines(d, card.get('text', ''), f, max_px)
+        total = len(lines) * lh
+        y = y + max(0, (H - y - PAD - total) // 2)
+        for ln in lines:
+            if y + lh > H - PAD - 22:
+                break
+            d.text((PAD, y), ln, font=f, fill=fg)
+            y += lh
+
+    hint = 'Press any key to return'
+    fh = _find_font(font_path, 13)
+    d.text((PAD, H - PAD - fh.getbbox(hint)[3]), hint, font=fh, fill=fg)
+    return img
+
+
 def render_output(cmd: str, output_lines: list, exit_code: int, config: dict) -> Image.Image:
     """Render shell command output as a full-screen image."""
     dark = config.get('dark_mode', True)
