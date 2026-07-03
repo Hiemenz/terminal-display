@@ -306,6 +306,13 @@ class EvdevKeyboard:
             if key == ecodes.KEY_RIGHT: return _SPECIAL['ctrl_right']
             if key == ecodes.KEY_LEFT:  return _SPECIAL['ctrl_left']
 
+        # Shift+Tab (back-tab): must come before the plain-Tab lookup in
+        # _SPECIAL below, which has no shift awareness of its own. CSI Z is
+        # the standard back-tab sequence shells and TUIs (incl. Claude Code's
+        # mode-cycling) expect for reverse tab navigation.
+        if key == ecodes.KEY_TAB and self._shift:
+            return b'\x1b[Z'
+
         # Non-printable specials
         if key in _SPECIAL:
             return _SPECIAL[key]

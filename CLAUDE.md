@@ -1,6 +1,20 @@
 # Terminal Display
 
-System stats dashboard for an 800×480 Waveshare 7.5" V2 e-ink display on Raspberry Pi.
+Two things live on the same 800×480 Waveshare 7.5" V2 e-ink display on a
+Raspberry Pi, and you switch between them with F11:
+
+1. **Stats dashboard** (`main.py`) — CPU/RAM/disk/network cards.
+2. **Terminal emulator** (`eink_terminal.py`) — a real shell (optionally
+   inside tmux) rendered to the e-ink panel, driven by an attached USB/BT
+   keyboard (`src/evdev_input.py`) or an SSH session typing into the same
+   tmux session. This is the one you'd run `claude` or any other long-lived
+   CLI session inside.
+
+`local=True` throughout the codebase means **dev preview** (macOS, or
+`--local`): no real e-ink push, frames saved to `output/*.bmp`. `local=False`
+is the **live** production path on real Pi hardware. Several behaviors
+(e.g. the terminal's ambient QR overlay) are deliberately dev-preview-only —
+see `src/eink_terminal_app.py`'s `self._local`.
 
 ## Quick Start
 
@@ -9,9 +23,12 @@ poetry install
 python main.py --once --local   # render once, view output/terminal.bmp
 python main.py --local          # loop forever (macOS dev mode)
 python main.py                  # loop forever + push to e-ink (Pi)
+
+python eink_terminal.py --local # terminal emulator, dev preview
+python eink_terminal.py         # terminal emulator, live on Pi hardware
 ```
 
-## Key Files
+## Key Files — Stats Dashboard
 
 | File | Purpose |
 |------|---------|
@@ -19,11 +36,38 @@ python main.py                  # loop forever + push to e-ink (Pi)
 | `src/system_stats.py` | Collects CPU, RAM, disk, network, load, top procs via psutil |
 | `src/render.py` | Renders 800×480 PIL image from stats dict. `render(stats, config)` |
 | `src/display.py` | Thin CLI wrapper; calls `display_eink.display_image()` |
-| `src/display_eink.py` | Hardware driver. macOS: saves BMP only. Pi: pushes to Waveshare panel |
+| `src/display_eink.py` | Hardware driver (`EinkDriver`). macOS/local: saves BMP only. Pi: pushes to Waveshare panel |
 | `src/config_loader.py` | `load_config(path=None)` — canonical config loader |
 | `src/refresh_tracker.py` | Tracks last full e-ink refresh (avoids burn-in) |
+| `src/refresh_schedule.py` | Adaptive refresh cadence by time of day |
+| `src/stats_history.py` | Disk-persisted ring buffer of stats samples, for sparklines |
+| `src/sd_watchdog.py` | systemd watchdog pings + readiness notification |
+| `src/util.py` | Shared filesystem helpers (repo/data/config paths) |
 | `config/config.yaml` | All tunable settings |
 | `output/terminal.bmp` | Most recent rendered image |
+
+## Key Files — Terminal Emulator
+
+| File | Purpose |
+|------|---------|
+| `eink_terminal.py` | CLI entrypoint. Parses `--local`/`--font-size`/`--config`, builds `EinkTerminal`, calls `.run()` |
+| `src/eink_terminal_app.py` | The app itself: `pty.fork()`'d shell (optionally via tmux), `pyte` screen buffer, hotkeys, tabs, idle-reset/screensaver state machine, main select() loop |
+| `src/evdev_input.py` | Reads raw keycodes from `/dev/input/eventX` (bypasses X11/Wayland), translates to terminal byte sequences — used when a physical keyboard is attached to the Pi directly |
+| `src/terminal_renderer.py` | Renders the `pyte` screen buffer to a PIL image; draws the ambient URL QR overlay, tab bar |
+| `src/alert_monitor.py` | Polls for system conditions, feeds short-lived alerts into the terminal status bar |
+| `src/preview_server.py` | HTTP server: mirrors the display image over LAN, accepts remote/mobile keyboard input into the PTY, serves the on-device settings editor |
+
+Hotkeys: F1 SSH picker, F2 close tab, Ctrl+Left/Right switch tabs, F3 kill
+process, F4 service manager, F5 power menu, F6 command palette, F7 dark
+mode, F8 clipboard, F9/F12 font size, F10 full refresh, F11 switch to stats
+dashboard, PgUp/PgDn scroll.
+
+Idle behavior (all configurable, `terminal_*` keys in `config/config.yaml`):
+panel deep-sleep → screensaver → **idle reset** (kills and respawns the
+shell/tmux session after `terminal_reset_minutes` of no keyboard input).
+Idle reset skips tabs with a busy foreground process (checked via
+`EinkTerminal._tab_is_busy`) so a long-running session — `claude`, `vim`, a
+build — never gets silently killed just because no key was pressed.
 
 ## Architecture
 
