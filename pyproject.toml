@@ -15,6 +15,7 @@ pyte = "^0.8"
 qrcode = "^8.2"
 evdev = "^1.9.3"
 speedtest-cli = "^2.1"
+numpy = "^2.0"
 
 [build-system]
 requires = ["poetry-core"]

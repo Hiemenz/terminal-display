@@ -279,6 +279,9 @@ class EinkTerminal:
 
     def __init__(self, config: dict, local: bool = False):
         self._config    = config
+        # local=True means dev preview (macOS / --local): no real e-ink push.
+        # local=False is the live/production display on real hardware.
+        self._local     = local
         self._font_size = config.get('terminal_font_size', 14)
         self._font_path = config.get('terminal_font_path', '')
         self._dark_mode = config.get('terminal_dark_mode', config.get('dark_mode', False))
@@ -309,6 +312,8 @@ class EinkTerminal:
         # terminal_reset_minutes (minutes; 0 = never). Fires once per idle period.
         self._reset_timeout = int(config.get('terminal_reset_minutes', 60) or 0) * 60
         self._did_idle_reset = False
+        self._busy_check_mono = 0.0
+        self._reset_deferred_busy = False
         # Set by the `clear-eink` shell command (SIGUSR2); handled in the loop.
         self._clear_requested = False
         self._split_view  = config.get('terminal_split_view', False)
@@ -1817,6 +1822,32 @@ class EinkTerminal:
             self._driver.flash_refresh(self._last_image)
         self._last_full_refresh_mono = time.monotonic()
 
+    _SHELL_COMMANDS = {'bash', 'zsh', 'sh', 'dash', 'fish', 'tmux'}
+
+    def _tab_is_busy(self, tab: '_Tab') -> bool:
+        """True if the tab's foreground process is something other than the
+        login shell — e.g. `claude`, vim, a long build. Idle-reset must not
+        kill a tab like this out from under the user just because no key was
+        pressed for a while; the process itself may still be working."""
+        if self._use_tmux and tab.tmux_session:
+            try:
+                r = subprocess.run(
+                    ['tmux', 'list-panes', '-t', tab.tmux_session,
+                     '-F', '#{pane_current_command}'],
+                    capture_output=True, text=True, timeout=2,
+                )
+                names = r.stdout.split()
+                return any(n not in self._SHELL_COMMANDS for n in names)
+            except Exception:
+                return False
+        if tab.pty_master is not None and tab.pty_master >= 0 and tab.child_pid:
+            try:
+                fg_pgid = os.tcgetpgrp(tab.pty_master)
+                return fg_pgid != os.getpgid(tab.child_pid)
+            except (OSError, ProcessLookupError):
+                return False
+        return False
+
     def _reset_session(self, render: bool = True):
         """Kill the shell (and tmux session/tabs) and start a brand-new one, so a
         returning user gets a fresh terminal. Used by the idle auto-reset."""
@@ -2139,7 +2170,11 @@ class EinkTerminal:
             url_qr = self._beam_url
         else:
             self._beam_url = ''
-            show_qr = self._show_url_qr and self._config.get('terminal_show_qr', True)
+            # Ambient QR overlay is dev-preview only: it obscures terminal
+            # content underneath, so the live display keeps that space for
+            # actual shell output instead.
+            show_qr = (self._local and self._show_url_qr
+                       and self._config.get('terminal_show_qr', True))
             url_qr = self._last_url if show_qr else None
 
         with self._net_stats_lock:
@@ -2464,11 +2499,20 @@ class EinkTerminal:
             # ── Idle reset: after a longer window, start a brand-new shell ─────
             # so a returning user lands on a clean terminal. Once per idle
             # period; doesn't wake the panel if the screensaver is showing.
+            # Skipped entirely while a foreground process (e.g. `claude`, a
+            # long build) is still running — only an idle shell prompt gets
+            # reset, so a session like Claude Code never gets killed just for
+            # sitting untouched.
             if self._reset_timeout > 0 and not self._did_idle_reset:
                 if (now - self._last_input) > self._reset_timeout:
-                    self._reset_session(render=not (in_screensaver or panel_asleep))
-                    self._did_idle_reset = True
-                    continue
+                    if (now - self._busy_check_mono) >= 2.0:
+                        self._busy_check_mono = now
+                        self._reset_deferred_busy = any(
+                            self._tab_is_busy(t) for t in self._tabs)
+                    if not self._reset_deferred_busy:
+                        self._reset_session(render=not (in_screensaver or panel_asleep))
+                        self._did_idle_reset = True
+                        continue
 
             # ── Keyboard input (evdev path) ───────────────────────────────────
             if self._evdev_kb is not None and self._evdev_kb.fileno() in r:
