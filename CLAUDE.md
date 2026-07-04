@@ -101,10 +101,11 @@ web-UI QR code sits inside the Network card.
 - `dark_mode: true` — white text on black background
 - `update_interval: 30` — seconds between refreshes
 - `night_mode: true` / `night_start` / `night_end` — skip night hours
-- `show_cpu/memory/disk/network/load/top_processes: true` — toggle panels
+- `show_cpu/memory/disk/network/load/top_processes/updates: true` — toggle panels
 - `disk_path: "/"` — disk to monitor
 - `network_interface: ""` — auto-detect, or set e.g. `eth0`
 - `top_process_count: 5` — how many processes to list
+- `updates_check_interval_minutes: 60` — how often to re-poll `apt list --upgradable` for the pending-updates badge (apt-based Linux only)
 
 ## Waveshare Driver
 
