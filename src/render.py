@@ -224,6 +224,13 @@ def render(stats: dict, config: dict) -> Image.Image:
     if primary_ip:
         d.text((W - PAD, y + 32), primary_ip, font=f_small, fill=fg, anchor='ra')
 
+    # Pending apt updates — only shown when there's something to act on, so a
+    # headless Pi you rarely SSH into surfaces it without adding daily clutter.
+    updates = stats.get('pending_updates')
+    if config.get('show_updates', True) and updates:
+        label = '1 update' if updates == 1 else f'{updates} updates'
+        d.text((W - PAD, y + 52), label, font=f_small, fill=fg, anchor='ra')
+
     y += time_h + 6 + f_date.getbbox('Mg')[3] + 8
     d.line([(PAD, y), (W - PAD, y)], fill=fg, width=1)
     y += SECTION_GAP

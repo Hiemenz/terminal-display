@@ -7,10 +7,17 @@ Requires: psutil
 import os
 import time
 import platform
+import shutil
 import socket
+import subprocess
 from datetime import datetime, timedelta
 
 import psutil
+
+# Cache for _get_pending_updates: polling apt's package lists isn't free, and
+# the answer doesn't change faster than an `apt update` runs, so we re-check
+# on a slow independent timer rather than every collect() cycle.
+_updates_cache = {'count': None, 'checked_at': 0.0}
 
 
 def _get_uptime() -> str:
@@ -77,6 +84,29 @@ def _format_bytes(n: float) -> str:
             return f"{n:.1f}{unit}"
         n /= 1024
     return f"{n:.1f}PB"
+
+
+def _get_pending_updates(config: dict) -> int | None:
+    """Count of upgradable apt packages, cached for
+    updates_check_interval_minutes (default 60). Returns None where apt isn't
+    available (macOS/dev, or a non-Debian Linux)."""
+    if not shutil.which('apt'):
+        return None
+    interval = config.get('updates_check_interval_minutes', 60) * 60
+    now = time.monotonic()
+    if (_updates_cache['count'] is not None
+            and (now - _updates_cache['checked_at']) < interval):
+        return _updates_cache['count']
+    try:
+        r = subprocess.run(['apt', 'list', '--upgradable'],
+                           capture_output=True, text=True, timeout=10)
+        count = sum(1 for ln in r.stdout.splitlines()
+                    if ln and not ln.startswith('Listing'))
+    except Exception:
+        count = _updates_cache['count']  # keep the stale value on a transient failure
+    _updates_cache['count'] = count
+    _updates_cache['checked_at'] = now
+    return count
 
 
 def collect_time(config: dict) -> dict:
@@ -236,4 +266,5 @@ def collect(config: dict) -> dict:
         'top_processes': top_procs,
         'ip_addresses': ip_addrs,
         'primary_ip': primary_ip,
+        'pending_updates': _get_pending_updates(config),
     }
