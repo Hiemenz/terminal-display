@@ -4,12 +4,15 @@ Collect system statistics for display.
 Returns a dict with CPU, memory, disk, network, load, uptime, and top processes.
 Requires: psutil
 """
+import json
 import os
 import time
 import platform
 import shutil
 import socket
 import subprocess
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta
 
 import psutil
@@ -18,6 +21,11 @@ import psutil
 # the answer doesn't change faster than an `apt update` runs, so we re-check
 # on a slow independent timer rather than every collect() cycle.
 _updates_cache = {'count': None, 'checked_at': 0.0}
+
+# Cache for _get_ci_status: the GitHub Actions API is rate-limited and a
+# build's conclusion doesn't change between polls, so it's checked on its
+# own slow timer rather than every collect() cycle.
+_ci_cache = {'status': None, 'checked_at': 0.0}
 
 
 def _get_uptime() -> str:
@@ -107,6 +115,38 @@ def _get_pending_updates(config: dict) -> int | None:
     _updates_cache['count'] = count
     _updates_cache['checked_at'] = now
     return count
+
+
+def _get_ci_status(config: dict) -> str | None:
+    """Conclusion of the latest completed GitHub Actions run on
+    ci_status_repo/ci_status_branch (e.g. 'success', 'failure'), cached for
+    ci_status_check_interval_minutes (default 15). Returns None when
+    unconfigured (ci_status_repo empty) or on any network/parse error —
+    a bad connection must never block the render loop."""
+    repo = config.get('ci_status_repo', '')
+    if not repo:
+        return None
+    interval = config.get('ci_status_check_interval_minutes', 15) * 60
+    now = time.monotonic()
+    if (_ci_cache['status'] is not None
+            and (now - _ci_cache['checked_at']) < interval):
+        return _ci_cache['status']
+    branch = config.get('ci_status_branch', 'main')
+    url = (f'https://api.github.com/repos/{repo}/actions/runs'
+           f'?branch={urllib.parse.quote(branch)}&status=completed&per_page=1')
+    try:
+        req = urllib.request.Request(
+            url, headers={'Accept': 'application/vnd.github+json',
+                          'User-Agent': 'terminal-display'})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.load(resp)
+        runs = data.get('workflow_runs', [])
+        status = runs[0].get('conclusion') if runs else None
+    except Exception:
+        status = _ci_cache['status']  # keep the stale value on a transient failure
+    _ci_cache['status'] = status
+    _ci_cache['checked_at'] = now
+    return status
 
 
 def collect_time(config: dict) -> dict:
@@ -267,4 +307,5 @@ def collect(config: dict) -> dict:
         'ip_addresses': ip_addrs,
         'primary_ip': primary_ip,
         'pending_updates': _get_pending_updates(config),
+        'ci_status': _get_ci_status(config),
     }

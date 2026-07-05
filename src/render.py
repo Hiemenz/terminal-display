@@ -231,6 +231,13 @@ def render(stats: dict, config: dict) -> Image.Image:
         label = '1 update' if updates == 1 else f'{updates} updates'
         d.text((W - PAD, y + 52), label, font=f_small, fill=fg, anchor='ra')
 
+    # CI build status — only shown when the latest run didn't succeed, same
+    # "only surface what needs attention" rule as the updates badge above.
+    ci_status = stats.get('ci_status')
+    if config.get('show_ci_status', True) and ci_status and ci_status != 'success':
+        d.text((W - PAD, y + 72), f"CI {ci_status.replace('_', ' ')}",
+               font=f_small, fill=fg, anchor='ra')
+
     y += time_h + 6 + f_date.getbbox('Mg')[3] + 8
     d.line([(PAD, y), (W - PAD, y)], fill=fg, width=1)
     y += SECTION_GAP

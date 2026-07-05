@@ -13,6 +13,11 @@ Endpoints:
   GET /preview/<n> → photo cropped to 800×480 grayscale (display preview)
   POST /upload     → multipart upload a new photo
   POST /select     → JSON {"photo": "name.jpg"} — set active screensaver
+  GET  /config/snapshots → JSON list of saved config snapshots
+  POST /config/restore   → JSON {"name": "config-....yaml"} — restore a snapshot
+  GET  /login  → PIN entry page (only relevant when preview_server_pin is set)
+  POST /login  → JSON {"pin": "..."} — establishes a session cookie
+  GET  /logout → clears the session cookie
 
 Usage:
   from preview_server import start_if_enabled
@@ -20,6 +25,7 @@ Usage:
   if server:
       text = server.input_queue.get_nowait()
 """
+import hmac
 import io
 import json
 import logging
@@ -27,16 +33,58 @@ import os
 import platform
 import queue
 import re
+import secrets
+import shutil
 import subprocess
 import tempfile
 import threading
 import time
 import urllib.parse
 import yaml
+from datetime import datetime
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import List
 
+from util import data_path
+
 logger = logging.getLogger(__name__)
+
+_CONFIG_SNAPSHOT_DIR = 'config_snapshots'
+
+# PIN auth: in-memory only (a service restart — which every config save
+# triggers — invalidates all sessions; re-entering the PIN is an acceptable
+# tradeoff for a LAN deterrent, not a bank vault).
+_active_sessions: set = set()
+_SESSION_COOKIE = 'eink_session'
+_GATED_HTML_GET = {'/config', '/clipboard', '/beam'}
+_GATED_JSON_GET = {'/clipboard/list'}
+
+
+def _get_pin(config_path: str) -> str:
+    """Read preview_server_pin fresh from disk (not cached — it's only
+    consulted on the occasional gated request, never the hot /display poll)."""
+    if not config_path:
+        return ''
+    try:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        return str(cfg.get('preview_server_pin', '') or '').strip()
+    except Exception:
+        return ''
+
+
+def _session_token(handler) -> str:
+    jar = SimpleCookie(handler.headers.get('Cookie', ''))
+    return jar[_SESSION_COOKIE].value if _SESSION_COOKIE in jar else ''
+
+
+def _is_authorized(handler, config_path: str) -> bool:
+    """True when no PIN is configured (feature off, default) or the request
+    carries a valid session cookie from a prior successful /login."""
+    if not _get_pin(config_path):
+        return True
+    return _session_token(handler) in _active_sessions
 
 _SELECTION_FILE = '.selected'
 _DISPLAY_W, _DISPLAY_H = 800, 480
@@ -232,6 +280,14 @@ _CONFIG_HTML = '''\
       background-repeat: no-repeat; background-position: right 10px center; background-size: 10px;
     }
 
+    /* History / restore */
+    .restore-btn {
+      background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+      border-radius: 8px; padding: 8px 14px; font-size: 13px; font-weight: 600;
+      cursor: pointer; flex-shrink: 0;
+    }
+    .restore-btn:active { background: #2a2a2a; }
+
     /* Toast */
     #toast {
       position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
@@ -276,8 +332,9 @@ _CONFIG_HTML = '''\
     <div class="ov-sub">Page reloads automatically</div>
   </div>
   <script>
-    var CFG    = __CONFIG_JSON__;
-    var SCHEMA = __SCHEMA_JSON__;
+    var CFG       = __CONFIG_JSON__;
+    var SCHEMA    = __SCHEMA_JSON__;
+    var SNAPSHOTS = __SNAPSHOTS_JSON__;
 
     var root = document.getElementById("root");
     SCHEMA.forEach(function(sec) {
@@ -286,6 +343,36 @@ _CONFIG_HTML = '''\
       sec[1].forEach(function(f) { card.appendChild(makeRow(f)); });
       root.appendChild(card);
     });
+
+    if (SNAPSHOTS.length) {
+      var histCard = mk("div", {className: "card"});
+      histCard.appendChild(mk("div", {className: "card-title"}, "History"));
+      SNAPSHOTS.forEach(function(s) {
+        var row = mk("div", {className: "row"});
+        var lbl = mk("div", {className: "row-lbl"});
+        lbl.appendChild(mk("div", {className: "lbl"}, s.label));
+        row.appendChild(lbl);
+        var btn = mk("button", {className: "restore-btn", type: "button"}, "Restore");
+        btn.addEventListener("click", function() { restore(s.name); });
+        row.appendChild(btn);
+        histCard.appendChild(row);
+      });
+      root.appendChild(histCard);
+    }
+
+    function restore(name) {
+      if (!confirm("Restore config from " + name + "? Current settings will be replaced (and saved as a new snapshot).")) return;
+      fetch("/config/restore", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name: name})
+      }).then(function(r) { return r.json(); }).then(function(d) {
+        if (d.ok) startRestart();
+        else toast("Error: " + (d.error || "?"), "err");
+      }).catch(function(e) {
+        toast("Failed: " + e, "err");
+      });
+    }
 
     function makeRow(f) {
       var key = f[0], type = f[1], label = f[2], extra = f[3];
@@ -391,6 +478,67 @@ _CONFIG_HTML = '''\
 '''
 
 
+def _snapshot_config(config_path: str, keep: int = 10):
+    """Copy the current config file into data/config_snapshots/ before it's
+    overwritten, then prune to the newest `keep`. Best-effort: a snapshot
+    failure must never block the actual config write, and there's nothing
+    to snapshot yet on the very first save (no existing file)."""
+    if keep <= 0 or not os.path.isfile(config_path):
+        return
+    try:
+        snap_dir = data_path(_CONFIG_SNAPSHOT_DIR)
+        os.makedirs(snap_dir, exist_ok=True)
+        stamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+        dest = os.path.join(snap_dir, f'config-{stamp}.yaml')
+        if os.path.exists(dest):
+            dest = os.path.join(snap_dir, f'config-{stamp}-{os.getpid()}.yaml')
+        shutil.copy2(config_path, dest)
+        snaps = sorted(f for f in os.listdir(snap_dir)
+                       if f.startswith('config-') and f.endswith('.yaml'))
+        for old in snaps[:-keep]:
+            try:
+                os.remove(os.path.join(snap_dir, old))
+            except OSError:
+                pass
+    except Exception:
+        logger.warning('Config snapshot failed', exc_info=True)
+
+
+def _list_config_snapshots() -> list:
+    """Newest-first [{name, label}] for the settings-UI history panel."""
+    snap_dir = data_path(_CONFIG_SNAPSHOT_DIR)
+    try:
+        names = sorted((f for f in os.listdir(snap_dir)
+                        if f.startswith('config-') and f.endswith('.yaml')),
+                       reverse=True)
+    except FileNotFoundError:
+        return []
+    out = []
+    for name in names:
+        stamp = name[len('config-'):-len('.yaml')]
+        try:
+            label = datetime.strptime(stamp[:15], '%Y%m%d-%H%M%S').strftime('%b %d, %H:%M:%S')
+        except ValueError:
+            label = stamp
+        out.append({'name': name, 'label': label})
+    return out
+
+
+def _restore_config_snapshot(config_path: str, name: str):
+    """Restore config.yaml from a snapshot by name. Goes through
+    _atomic_write_config, so the pre-restore state is itself snapshotted —
+    restoring is never a one-way trip."""
+    safe_name = os.path.basename(name)
+    if not re.fullmatch(r'config-[0-9-]+\.yaml', safe_name):
+        raise ValueError('Invalid snapshot name')
+    snap_path = os.path.join(data_path(_CONFIG_SNAPSHOT_DIR), safe_name)
+    if not os.path.isfile(snap_path):
+        raise FileNotFoundError('Snapshot not found')
+    with open(snap_path) as f:
+        content = f.read()
+    _atomic_write_config(config_path, content)
+
+
 def _atomic_write_config(config_path: str, content: str):
     """Validate then atomically replace config_path with content.
 
@@ -402,6 +550,7 @@ def _atomic_write_config(config_path: str, content: str):
     parsed = yaml.safe_load(content)
     if not isinstance(parsed, dict):
         raise ValueError("refusing to write config: content is not a YAML mapping")
+    _snapshot_config(config_path, parsed.get('config_snapshot_count', 10))
     dir_name = os.path.dirname(config_path) or '.'
     fd, tmp = tempfile.mkstemp(dir=dir_name, prefix='.config.', suffix='.tmp')
     try:
@@ -443,7 +592,8 @@ def _build_config_html(config_data: dict) -> str:
     import json
     return (_CONFIG_HTML
             .replace('__CONFIG_JSON__', json.dumps(config_data))
-            .replace('__SCHEMA_JSON__', json.dumps(_CONFIG_SCHEMA)))
+            .replace('__SCHEMA_JSON__', json.dumps(_CONFIG_SCHEMA))
+            .replace('__SNAPSHOTS_JSON__', json.dumps(_list_config_snapshots())))
 
 
 def _get_startup_mode(config_path: str) -> str:
@@ -827,6 +977,7 @@ _PAGE_HTML = '''\
       <a href="/gallery" class="pill-btn">&#128247; Gallery</a>
       <a href="/clipboard" class="pill-btn">&#128203; Clips</a>
       <button id="mode-btn" class="pill-btn" onclick="toggleMode()">&#8644; Mode</button>
+      __AUTH_LINK__
     </div>
   </header>
 
@@ -1472,6 +1623,77 @@ def _render_beam_page(text: str) -> str:
     return _BEAM_HTML.replace('__TEXT__', _html.escape(text))
 
 
+_LOGIN_HTML = '''\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login — e-ink</title>
+<style>
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  body{min-height:100dvh;background:#0d0d0d;color:#e2e2e2;
+       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+       display:flex;align-items:center;justify-content:center;padding:20px}
+  .card{width:100%;max-width:320px;background:#161616;border:1px solid #2a2a2a;
+        border-radius:12px;padding:24px;text-align:center}
+  h1{font-size:18px;margin-bottom:16px}
+  input{width:100%;background:#1e1e1e;border:1px solid #2a2a2a;border-radius:8px;
+        color:#e2e2e2;font-size:20px;letter-spacing:4px;text-align:center;
+        padding:12px;outline:none;margin-bottom:12px}
+  input:focus{border-color:#3b82f6}
+  button{width:100%;background:#3b82f6;color:#fff;border:none;border-radius:8px;
+         padding:12px;font-size:15px;font-weight:600;cursor:pointer}
+  button:active{background:#2563eb}
+  .err{color:#ef4444;font-size:13px;margin-top:10px;min-height:16px}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Enter PIN</h1>
+    <input id="pin" type="password" inputmode="numeric" autocomplete="off" autofocus maxlength="16">
+    <button onclick="submitPin()" type="button">Unlock</button>
+    <div class="err" id="err"></div>
+  </div>
+  <script>
+    function submitPin() {
+      var pin = document.getElementById("pin").value;
+      fetch("/login", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({pin: pin})
+      }).then(function(r) {
+        return r.json().then(function(d) { return {ok: r.ok, d: d}; });
+      }).then(function(res) {
+        if (res.ok && res.d.ok) {
+          var params = new URLSearchParams(location.search);
+          location.href = params.get("next") || "/";
+        } else {
+          document.getElementById("err").textContent = "Invalid PIN";
+        }
+      }).catch(function() {
+        document.getElementById("err").textContent = "Failed to reach server";
+      });
+    }
+    document.getElementById("pin").addEventListener("keydown", function(e) {
+      if (e.key === "Enter") submitPin();
+    });
+  </script>
+</body>
+</html>'''
+
+
+def _build_page_html(config_path: str, handler) -> str:
+    """Main page: adds a discoverable Login link only when a PIN is
+    configured and this request hasn't authenticated yet — the page itself
+    stays public (viewing the display), but /send etc. are gated."""
+    if _get_pin(config_path) and not _is_authorized(handler, config_path):
+        link = '<a href="/login" class="pill-btn">&#128274; Login</a>'
+    else:
+        link = ''
+    return _PAGE_HTML.replace('__AUTH_LINK__', link)
+
+
 def _make_handler(bmp_path: str, input_queue: queue.Queue,
                   activity_ref: List[float], photos_dir: str, config_path: str = '',
                   clipboard_path: str = '', display_queue: queue.Queue = None,
@@ -1480,8 +1702,21 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
         def do_GET(self):
             activity_ref[0] = time.time()
             path = self.path.split('?')[0]
+            if path == '/login':
+                self._respond(200, 'text/html; charset=utf-8', _LOGIN_HTML.encode())
+                return
+            if path == '/logout':
+                self._handle_logout()
+                return
+            if path in _GATED_HTML_GET and not _is_authorized(self, config_path):
+                self._redirect_login(path)
+                return
+            if path in _GATED_JSON_GET and not _is_authorized(self, config_path):
+                self._respond(401, 'application/json', b'{"ok":false,"error":"PIN required"}')
+                return
             if path in ('/', '/live'):
-                self._respond(200, 'text/html; charset=utf-8', _PAGE_HTML.encode())
+                self._respond(200, 'text/html; charset=utf-8',
+                              _build_page_html(config_path, self).encode())
             elif path in ('/display', '/snapshot'):
                 self._serve_display()
             elif path == '/gallery':
@@ -1497,6 +1732,9 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._respond(200, 'application/json', json.dumps({'mode': mode}).encode())
             elif path == '/config':
                 self._serve_config()
+            elif path == '/config/snapshots':
+                self._respond(200, 'application/json',
+                              json.dumps(_list_config_snapshots()).encode())
             elif path == '/wifi-info':
                 info = _get_wifi_info()
                 self._respond(200, 'application/json', json.dumps(info).encode())
@@ -1515,6 +1753,12 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
         def do_POST(self):
             activity_ref[0] = time.time()
             path = self.path.split('?')[0]
+            if path == '/login':
+                self._handle_login()
+                return
+            if not _is_authorized(self, config_path):
+                self._respond(401, 'application/json', b'{"ok":false,"error":"PIN required"}')
+                return
             if path == '/send':
                 self._handle_send()
             elif path == '/message':
@@ -1531,6 +1775,8 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._handle_mode()
             elif path == '/config':
                 self._handle_config_post()
+            elif path == '/config/restore':
+                self._handle_config_restore()
             elif path == '/clipboard/add':
                 self._handle_clipboard_add()
             else:
@@ -1539,12 +1785,50 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
         def do_DELETE(self):
             activity_ref[0] = time.time()
             path = self.path.split('?')[0]
+            if not _is_authorized(self, config_path):
+                self._respond(401, 'application/json', b'{"ok":false,"error":"PIN required"}')
+                return
             if path.startswith('/clipboard/'):
                 self._handle_clipboard_delete(path[len('/clipboard/'):])
             elif path.startswith('/photo/'):
                 self._handle_photo_delete(path[7:])
             else:
                 self._respond(404, 'text/plain', b'Not found')
+
+        # ── Auth handlers ───────────────────────────────────────────────────
+
+        def _redirect_login(self, next_path: str):
+            self.send_response(302)
+            self.send_header('Location', '/login?next=' + urllib.parse.quote(next_path))
+            self.end_headers()
+
+        def _handle_login(self):
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                pin = str(json.loads(raw).get('pin', ''))
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+            expected = _get_pin(config_path)
+            if not expected or not hmac.compare_digest(pin, expected):
+                self._respond(403, 'application/json', b'{"ok":false,"error":"Invalid PIN"}')
+                return
+            token = secrets.token_urlsafe(24)
+            _active_sessions.add(token)
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Set-Cookie',
+                             f'{_SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800')
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+
+        def _handle_logout(self):
+            _active_sessions.discard(_session_token(self))
+            self.send_response(302)
+            self.send_header('Location', '/login')
+            self.send_header('Set-Cookie', f'{_SESSION_COOKIE}=; Path=/; Max-Age=0')
+            self.end_headers()
 
         # ── GET handlers ────────────────────────────────────────────────────
 
@@ -1820,6 +2104,26 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 return
             try:
                 _save_config_values(config_path, updates)
+                self._respond(200, 'application/json', b'{"ok":true}')
+                if platform.system() == 'Linux':
+                    subprocess.Popen(['sudo', 'systemctl', 'restart', 'eink-display'])
+            except Exception as e:
+                self._respond(500, 'application/json',
+                              json.dumps({'ok': False, 'error': str(e)}).encode())
+
+        def _handle_config_restore(self):
+            if not config_path:
+                self._respond(500, 'application/json', b'{"ok":false,"error":"No config path"}')
+                return
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                name = json.loads(raw).get('name', '')
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+            try:
+                _restore_config_snapshot(config_path, name)
                 self._respond(200, 'application/json', b'{"ok":true}')
                 if platform.system() == 'Linux':
                     subprocess.Popen(['sudo', 'systemctl', 'restart', 'eink-display'])

@@ -101,11 +101,15 @@ web-UI QR code sits inside the Network card.
 - `dark_mode: true` — white text on black background
 - `update_interval: 30` — seconds between refreshes
 - `night_mode: true` / `night_start` / `night_end` — skip night hours
-- `show_cpu/memory/disk/network/load/top_processes/updates: true` — toggle panels
+- `show_cpu/memory/disk/network/load/top_processes/updates/ci_status: true` — toggle panels
 - `disk_path: "/"` — disk to monitor
 - `network_interface: ""` — auto-detect, or set e.g. `eth0`
 - `top_process_count: 5` — how many processes to list
 - `updates_check_interval_minutes: 60` — how often to re-poll `apt list --upgradable` for the pending-updates badge (apt-based Linux only)
+- `ci_status_repo` / `ci_status_branch` / `ci_status_check_interval_minutes: 15` — GitHub Actions build-status badge, shown only when the latest run didn't succeed
+- `config_snapshot_count: 10` — config saves keep this many timestamped snapshots in `data/config_snapshots/`, restorable from the settings page's History list
+- `terminal_alert_health_interval: 30` / `terminal_alert_throttle` / `terminal_alert_failed_units` / `terminal_alert_storage_health` / `terminal_alert_network` / `terminal_alert_network_host` / `terminal_alert_network_fails` — system-health alerts (thermal throttle, failed systemd units, SD card read-only remount, dead network) shown in the terminal status bar
+- `preview_server_pin: ""` — PIN-gates the preview server's mutating/sensitive endpoints (settings, remote input, uploads, clipboard); empty disables the gate (default, matches prior behavior)
 
 ## Waveshare Driver
 
