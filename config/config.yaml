@@ -137,6 +137,19 @@ terminal_alert_cpu_threshold: 90
 terminal_alert_disk_free_threshold: 10
 terminal_alert_ssh_logins: true
 
+# System-health alerts: throttling, failed services, a dying SD card, and a
+# dead network — the things this device has no other way to tell you about.
+# These run on their own slower timer (terminal_alert_health_interval,
+# seconds) instead of terminal_alert_check_interval, since each one shells
+# out to a system command.
+terminal_alert_health_interval: 30
+terminal_alert_throttle: true          # vcgencmd under-voltage/throttle/temp-limit
+terminal_alert_failed_units: true      # systemctl --failed
+terminal_alert_storage_health: true    # rootfs remounted read-only (SD card dying)
+terminal_alert_network: true           # ping the gateway (or terminal_alert_network_host)
+terminal_alert_network_host: ""        # empty = auto-detect the default gateway
+terminal_alert_network_fails: 3        # consecutive misses required before alerting
+
 # High-quality rendering: render at 2× then downsample (sharper text on e-ink).
 # Adds ~15ms to render time — negligible vs. display refresh time.
 terminal_hq_render: true
@@ -150,6 +163,21 @@ terminal_paste_file: ~/eink-paste.txt
 # in any browser to see a live auto-refreshing view of the e-ink display.
 preview_server_enabled: true
 preview_server_port: 8080
+
+# PIN gate for the preview server's mutating/sensitive endpoints (settings
+# save & restore, remote keyboard input, uploads, clipboard, gallery
+# selection, the beamed-text page). Empty (default) = no gate, matching
+# prior behavior. Set a PIN to require it once per browser session before
+# any of those actions are allowed; viewing the live display image itself
+# stays open. Sessions are in-memory only, so a settings save (which
+# restarts the service) or app restart requires re-entering the PIN.
+preview_server_pin: ""
+
+# Config snapshot history: every settings save (and the on-device editor's
+# saves) keeps a timestamped copy in data/config_snapshots/ before writing,
+# so a bad edit can be undone from the settings page's History list.
+# 0 disables snapshotting entirely.
+config_snapshot_count: 10
 
 # ── General display ──────────────────────────────────────────────────────────
 # Custom label shown on stats screen (leave empty to use hostname)
@@ -220,6 +248,16 @@ top_process_count: 5
 # updates_check_interval_minutes since polling apt's lists isn't free and the
 # answer only changes as often as `apt update` runs.
 updates_check_interval_minutes: 60
+
+# CI build-status badge (top bar, right side) — shows the conclusion of the
+# latest completed GitHub Actions run when it isn't a success (e.g. "CI
+# failure"); hidden otherwise. ci_status_repo empty disables the check
+# entirely. Uses the unauthenticated GitHub API, so keep the poll interval
+# generous (60 req/hour limit).
+show_ci_status: true
+ci_status_repo: "Hiemenz/terminal-display"
+ci_status_branch: main
+ci_status_check_interval_minutes: 15
 
 # Font paths (falls back to PIL default if not found)
 # Leave empty to use auto-detected system monospace font
