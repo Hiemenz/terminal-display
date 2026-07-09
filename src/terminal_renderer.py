@@ -93,11 +93,12 @@ def terminal_dimensions(
     font_size: int,
     font_path: str = '',
     terminal_width: int = W,
+    terminal_height: int = TERMINAL_H,
 ) -> tuple:
     """Return (cols, rows, char_w, char_h) using the 1× font (logical dimensions)."""
     font = _find_mono_font(font_path, font_size)
     cw, ch = _char_size(font)
-    return terminal_width // cw, TERMINAL_H // ch, cw, ch
+    return terminal_width // cw, terminal_height // ch, cw, ch
 
 
 def render_screen(
@@ -443,6 +444,98 @@ def render_screen_partial(
         _draw_url_qr(cached_img, url_qr, terminal_width)
 
     return cached_img
+
+
+# ── Split pane rendering ──────────────────────────────────────────────────────
+
+def render_pane(
+    screen: pyte.Screen,
+    pane_w: int,
+    pane_h: int,
+    font_size: int,
+    dark_mode: bool = True,
+    font_path: str = '',
+    focused: bool = True,
+    cursor_style: str = 'block',
+) -> 'Image.Image':
+    """Render a pyte screen into a (pane_w × pane_h) PIL image for split-pane display."""
+    font = _find_mono_font(font_path, font_size)
+    cw, ch = _char_size(font)
+    bg = 0 if dark_mode else 255
+    fg = 255 if dark_mode else 0
+    img = Image.new('L', (pane_w, pane_h), bg)
+    draw = ImageDraw.Draw(img)
+    visible_rows = max(1, pane_h // ch)
+    start_row = 0
+    if screen.cursor.y >= visible_rows:
+        start_row = screen.cursor.y - visible_rows + 1
+    for draw_i, row_idx in enumerate(range(start_row, screen.lines)):
+        if draw_i >= visible_rows:
+            break
+        y = draw_i * ch
+        row = screen.buffer[row_idx]
+        for col_idx in range(screen.columns):
+            x = col_idx * cw
+            if x >= pane_w:
+                break
+            char = row[col_idx]
+            is_cursor = (focused and row_idx == screen.cursor.y and col_idx == screen.cursor.x)
+            cell_inverted = bool(char.reverse)
+            if is_cursor and cursor_style == 'block':
+                cell_inverted = not cell_inverted
+            cell_fg = bg if cell_inverted else fg
+            cell_bg = fg if cell_inverted else bg
+            if cell_bg != bg:
+                draw.rectangle([x, y, x + cw - 1, y + ch - 1], fill=cell_bg)
+            glyph = char.data
+            if glyph and glyph != ' ':
+                draw.text((x, y), glyph, font=font, fill=cell_fg)
+            if is_cursor and cursor_style != 'block':
+                bar_h = max(2, ch // 6)
+                draw.rectangle([x, y + ch - bar_h, x + cw - 1, y + ch - 1], fill=fg)
+    return img
+
+
+SPLIT_DIVIDER_W = 2
+
+def render_split_lr(
+    pane0: pyte.Screen,
+    pane1: pyte.Screen,
+    focus: int,
+    font_size: int,
+    dark_mode: bool = True,
+    font_path: str = '',
+    status_info: tuple = None,
+    alerts: list = None,
+    bar_config: dict = None,
+    cursor_style: str = 'block',
+) -> 'Image.Image':
+    """Render two panes side-by-side (left/right) into an 800×480 image."""
+    bg = 0 if dark_mode else 255
+    fg = 255 if dark_mode else 0
+    img = Image.new('L', (W, H), bg)
+    half_w = (W - SPLIT_DIVIDER_W) // 2
+    pane_h = TERMINAL_H
+
+    p0 = render_pane(pane0, half_w, pane_h, font_size, dark_mode, font_path,
+                     focused=(focus == 0), cursor_style=cursor_style)
+    p1 = render_pane(pane1, half_w, pane_h, font_size, dark_mode, font_path,
+                     focused=(focus == 1), cursor_style=cursor_style)
+
+    img.paste(p0, (0, 0))
+    img.paste(p1, (half_w + SPLIT_DIVIDER_W, 0))
+
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([half_w, 0, half_w + SPLIT_DIVIDER_W - 1, pane_h - 1], fill=fg)
+
+    # Focus indicator: thin inner border on the active pane
+    bx = 0 if focus == 0 else half_w + SPLIT_DIVIDER_W
+    draw.rectangle([bx, 0, bx + half_w - 1, pane_h - 1], outline=fg)
+
+    _draw_status_bar(draw, font_size, fg, bg, W,
+                     status_info=status_info, alerts=alerts, scale=1,
+                     bar_config=bar_config)
+    return img
 
 
 # ── Status bar ────────────────────────────────────────────────────────────────

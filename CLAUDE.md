@@ -60,7 +60,8 @@ python eink_terminal.py         # terminal emulator, live on Pi hardware
 Hotkeys: F1 SSH picker, F2 close tab, Ctrl+Left/Right switch tabs, F3 kill
 process, F4 service manager, F5 power menu, F6 command palette, F7 dark
 mode, F8 clipboard, F9/F12 font size, F10 full refresh, F11 switch to stats
-dashboard, PgUp/PgDn scroll.
+dashboard, PgUp/PgDn scroll, Ctrl+F scrollback search, Ctrl+\ toggle split
+pane (left/right), Ctrl+] swap split-pane focus.
 
 Idle behavior (all configurable, `terminal_*` keys in `config/config.yaml`):
 panel deep-sleep → screensaver → **idle reset** (kills and respawns the

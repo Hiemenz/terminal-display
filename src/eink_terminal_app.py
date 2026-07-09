@@ -55,6 +55,7 @@ from alert_monitor import AlertMonitor
 from PIL import ImageDraw
 from terminal_renderer import (
     render_screen, render_screen_partial, render_mini_stats, terminal_dimensions,
+    render_split_lr,
     _find_mono_font, TERMINAL_H, SPLIT_TERMINAL_W,
 )
 from display_eink import EinkDriver
@@ -74,6 +75,14 @@ class _Tab:
     title: str = ''
     scroll_pages: int = 0
     tmux_session: str = ''
+    # Split pane (left/right, separate PTY)
+    pane2_screen: 'pyte.Screen' = None
+    pane2_stream: 'pyte.ByteStream' = None
+    pane2_master: int = -1
+    pane2_pid: int = 0
+    pane2_tmux: str = ''
+    pane_focus: int = 0    # 0 = primary (left), 1 = secondary (right)
+    split_dir: str = ''    # 'h' = left/right split; '' = no split
 
 
 _RENDER_DEBOUNCE  = 0.02   # seconds — lower now that hw writes are async
@@ -248,6 +257,9 @@ _CTRL_LEFT  = b'\x1b[1;5D'   # cycle tabs
 _CTRL_RIGHT = b'\x1b[1;5C'
 _PGUP = b'\x1b[5~'
 _PGDN = b'\x1b[6~'
+_CTRL_F            = b'\x06'   # scrollback search
+_CTRL_BACKSLASH    = b'\x1c'   # toggle left/right split pane
+_CTRL_BRACKETRIGHT = b'\x1d'   # swap split pane focus
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -502,6 +514,13 @@ class EinkTerminal:
         self._clipboard_active: bool = False
         self._clipboard_path = os.path.join(_REPO_ROOT, 'data', 'clipboard.json')
         self._clipboard = self._load_clipboard()
+
+        # Scrollback search (Ctrl+F)
+        self._search_active: bool = False
+        self._search_query: str = ''
+        # Each entry: (display_text, is_history, history_idx)
+        self._search_results: list = []
+        self._search_idx: int = 0
 
         # URL QR overlay
         self._last_url: str = ''
@@ -979,6 +998,15 @@ class EinkTerminal:
         if _PGDN in data:
             self._scroll_down()
             data = data.replace(_PGDN, b'')
+        if _CTRL_F in data:
+            self._toggle_search()
+            data = data.replace(_CTRL_F, b'')
+        if _CTRL_BACKSLASH in data:
+            self._toggle_split_pane()
+            data = data.replace(_CTRL_BACKSLASH, b'')
+        if _CTRL_BRACKETRIGHT in data:
+            self._swap_pane_focus()
+            data = data.replace(_CTRL_BRACKETRIGHT, b'')
         return data
 
     def _toggle_dark_mode(self):
@@ -1018,12 +1046,28 @@ class EinkTerminal:
                 os.kill(self._child_pid, signal.SIGWINCH)
             except ProcessLookupError:
                 pass
+        # Resize split pane if open on the active tab
+        tab = self._current_tab()
+        if tab and tab.split_dir and tab.pane2_master >= 0:
+            half_w = self._split_half_w()
+            cols, rows, _, _ = terminal_dimensions(self._font_size, self._font_path, half_w)
+            tab.pane2_screen = pyte.Screen(cols, rows)
+            tab.pane2_stream = pyte.ByteStream(tab.pane2_screen)
+            winsize = struct.pack('HHHH', rows, cols, 0, 0)
+            try:
+                fcntl.ioctl(tab.pane2_master, termios.TIOCSWINSZ, winsize)
+            except Exception:
+                pass
+            if tab.pane2_pid:
+                try: os.kill(tab.pane2_pid, signal.SIGWINCH)
+                except (ProcessLookupError, OSError): pass
 
     # ─── Tab management ──────────────────────────────────────────────────────
 
     def _current_tab(self):
-        if self._tabs and 0 <= self._active_tab < len(self._tabs):
-            return self._tabs[self._active_tab]
+        tabs = getattr(self, '_tabs', None)
+        if tabs and 0 <= self._active_tab < len(tabs):
+            return tabs[self._active_tab]
         return None
 
     def _tab_title(self, tab) -> str:
@@ -1083,6 +1127,14 @@ class EinkTerminal:
         if t.pty_master is not None and t.pty_master >= 0:
             try: os.close(t.pty_master)
             except OSError: pass
+        # Clean up split pane if open
+        if t.split_dir:
+            if t.pane2_pid:
+                try: os.kill(t.pane2_pid, signal.SIGTERM)
+                except (ProcessLookupError, OSError): pass
+            if t.pane2_master >= 0:
+                try: os.close(t.pane2_master)
+                except OSError: pass
         del self._tabs[self._active_tab]
         self._active_tab = min(self._active_tab, len(self._tabs) - 1)
         t2 = self._tabs[self._active_tab]
@@ -1698,6 +1750,203 @@ class EinkTerminal:
         self._clipboard_active = False; self._render()
         return data
 
+    # ─── Scrollback search (Ctrl+F) ───────────────────────────────────────────
+
+    def _toggle_search(self):
+        if self._search_active:
+            self._search_active = False
+            self._search_query = ''
+            self._search_results = []
+        else:
+            self._search_active = True
+            self._search_query = ''
+            self._search_results = []
+            self._search_idx = 0
+            self._palette_active = self._clipboard_active = False
+            self._prockill_active = self._svcmgr_active = self._power_active = False
+            self._sshpick_active = False
+        self._render()
+
+    def _build_search_results(self) -> list:
+        """Scan current visible buffer + pyte history for _search_query matches."""
+        if not self._search_query:
+            return []
+        q = self._search_query.lower()
+        results = []
+        # History lines (oldest → newest = index 0 → N-1 in history.top)
+        if hasattr(self._screen, 'history'):
+            try:
+                hist_top = list(self._screen.history.top)
+                for i, row in enumerate(hist_top):
+                    line = ''.join(row[c].data for c in range(self._screen.columns)).rstrip()
+                    if q in line.lower() and line.strip():
+                        results.append((f'H: {line[:68]}', True, i))
+            except (AttributeError, TypeError):
+                pass
+        # Current visible buffer
+        for r in range(self._screen.lines):
+            row = self._screen.buffer[r]
+            line = ''.join(row[c].data for c in range(self._screen.columns)).rstrip()
+            if q in line.lower() and line.strip():
+                results.append((f'   {line[:68]}', False, r))
+        return results
+
+    def _handle_search_key(self, data: bytes) -> bytes:
+        if not self._search_active:
+            return data
+        if b'\x1b[A' in data:
+            self._search_idx = max(0, self._search_idx - 1)
+            self._render(); return b''
+        if b'\x1b[B' in data:
+            self._search_idx = min(max(0, len(self._search_results) - 1), self._search_idx + 1)
+            self._render(); return b''
+        if b'\r' in data or b'\n' in data:
+            self._search_confirm(); return b''
+        if b'\x1b' in data:
+            self._search_active = False
+            self._search_query = ''
+            self._search_results = []
+            self._render(); return b''
+        if data in (b'\x7f', b'\x08'):
+            self._search_query = self._search_query[:-1]
+            self._search_idx = 0
+            self._search_results = self._build_search_results()
+            self._render(); return b''
+        try:
+            ch = data.decode('utf-8', errors='ignore')
+            printable = ''.join(c for c in ch if c >= ' ' and c != '\x7f')
+            if printable:
+                self._search_query += printable
+                self._search_idx = 0
+                self._search_results = self._build_search_results()
+                self._render()
+        except Exception:
+            pass
+        return b''
+
+    def _search_confirm(self):
+        """Jump to selected search result and close the overlay."""
+        if self._search_results and 0 <= self._search_idx < len(self._search_results):
+            _, is_history, idx = self._search_results[self._search_idx]
+            if is_history:
+                self._search_scroll_to_history(idx)
+        self._search_active = False
+        self._search_query = ''
+        self._search_results = []
+        self._render(force_full=True)
+
+    def _search_scroll_to_history(self, history_idx: int):
+        """Scroll so that the history line at history_idx becomes visible."""
+        if not hasattr(self._screen, 'history') or not hasattr(self._screen, 'prev_page'):
+            return
+        n_hist = len(self._screen.history.top)
+        if n_hist == 0:
+            return
+        self._snap_to_live()
+        scroll_step = max(1, int(self._screen.history.ratio * self._screen.lines))
+        # history_idx 0 = oldest (furthest up), n_hist-1 = newest (one scroll up)
+        distance = n_hist - 1 - history_idx
+        pages = max(1, distance // scroll_step + 1)
+        for _ in range(pages):
+            if not hasattr(self._screen, 'prev_page'):
+                break
+            self._screen.prev_page()
+            self._scroll_pages += 1
+
+    # ─── Split pane (Ctrl+\  toggle  /  Ctrl+]  focus swap) ──────────────────
+
+    def _split_half_w(self) -> int:
+        from terminal_renderer import SPLIT_DIVIDER_W
+        return (800 - SPLIT_DIVIDER_W) // 2
+
+    def _init_split_pane(self):
+        """Spawn a second shell in a new PTY for left/right split view."""
+        tab = self._current_tab()
+        if tab is None or tab.split_dir:
+            return
+        half_w = self._split_half_w()
+        cols, rows, _, _ = terminal_dimensions(self._font_size, self._font_path, half_w)
+        tab.pane2_screen = pyte.Screen(cols, rows)
+        tab.pane2_stream = pyte.ByteStream(tab.pane2_screen)
+        new_session = f'{self._tmux_session}-p2'
+        pid, master_fd = pty.fork()
+        if pid == 0:
+            os.environ['TERM'] = 'xterm-256color'
+            start_dir = self._resolve_start_dir()
+            if self._use_tmux:
+                os.execvp('tmux', self._tmux_launch_argv(new_session, start_dir,
+                                                          self._build_prompt_command()))
+            else:
+                if start_dir:
+                    try: os.chdir(start_dir)
+                    except OSError: pass
+                promptcmd = self._build_prompt_command()
+                if promptcmd:
+                    os.execvp('/bin/sh', ['/bin/sh', '-c', promptcmd])
+                shell = (os.environ.get('SHELL')
+                         or pwd.getpwuid(os.getuid()).pw_shell or '/bin/bash')
+                os.execvp(shell, ['-' + os.path.basename(shell)])
+            os._exit(1)
+        tab.pane2_pid = pid
+        tab.pane2_master = master_fd
+        tab.pane2_tmux = new_session
+        tab.split_dir = 'h'
+        tab.pane_focus = 0
+        winsize = struct.pack('HHHH', rows, cols, 0, 0)
+        try:
+            fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize)
+        except Exception:
+            pass
+
+    def _close_split_pane(self):
+        tab = self._current_tab()
+        if tab is None or not tab.split_dir:
+            return
+        if tab.pane2_pid:
+            try: os.kill(tab.pane2_pid, signal.SIGTERM)
+            except (ProcessLookupError, OSError): pass
+        if tab.pane2_master >= 0:
+            try: os.close(tab.pane2_master)
+            except OSError: pass
+        if self._use_tmux and tab.pane2_tmux:
+            try:
+                subprocess.run(['tmux', 'kill-session', '-t', tab.pane2_tmux],
+                               capture_output=True, timeout=2)
+            except Exception:
+                pass
+        tab.pane2_screen = None
+        tab.pane2_stream = None
+        tab.pane2_master = -1
+        tab.pane2_pid = 0
+        tab.pane2_tmux = ''
+        tab.split_dir = ''
+        tab.pane_focus = 0
+
+    def _toggle_split_pane(self):
+        tab = self._current_tab()
+        if tab is None:
+            return
+        if tab.split_dir:
+            self._close_split_pane()
+        else:
+            self._init_split_pane()
+        self._img_cache = None
+        self._render(force_full=True)
+
+    def _swap_pane_focus(self):
+        tab = self._current_tab()
+        if tab is None or not tab.split_dir:
+            return
+        tab.pane_focus = 1 - tab.pane_focus
+        self._render()
+
+    def _get_focused_pty(self) -> int | None:
+        """Return the PTY fd that should receive keyboard input."""
+        tab = self._current_tab()
+        if tab and tab.split_dir and tab.pane_focus == 1 and tab.pane2_master >= 0:
+            return tab.pane2_master
+        return self._pty_master
+
     def _toggle_url_qr(self):
         self._show_url_qr = not self._show_url_qr
         if not self._show_url_qr:
@@ -1866,6 +2115,13 @@ class EinkTerminal:
                                    capture_output=True, timeout=2)
                 except Exception:
                     pass
+            if tab.split_dir:
+                if tab.pane2_pid:
+                    try: os.kill(tab.pane2_pid, signal.SIGTERM)
+                    except (ProcessLookupError, OSError): pass
+                if tab.pane2_master >= 0:
+                    try: os.close(tab.pane2_master)
+                    except OSError: pass
         if self._use_tmux:
             try:
                 subprocess.run(['tmux', 'kill-session', '-t', self._tmux_session],
@@ -2205,11 +2461,54 @@ class EinkTerminal:
         elif self._sshpick_active and self._sshpick_items:
             overlay = (self._sshpick_items, self._sshpick_idx,
                        'SSH Bookmarks  [Enter=connect  Esc=cancel]')
+        elif self._search_active:
+            items = ([r[0] for r in self._search_results]
+                     if self._search_results else ['(no matches)'])
+            q = self._search_query or ''
+            n = len(self._search_results)
+            title = (f'Find: {q}  [{n} match{"es" if n != 1 else ""}]  '
+                     f'[Enter=jump  ↑↓ navigate  Esc=close]')
+            overlay = (items, self._search_idx, title)
         else:
             overlay = None
 
         tab_bar = [(self._tab_title(t), i == self._active_tab)
                    for i, t in enumerate(self._tabs)] if self._tabs else None
+
+        # ── Split-pane render (left/right, two separate PTYs) ─────────────────
+        cur_tab = self._current_tab()
+        if cur_tab and cur_tab.split_dir == 'h' and cur_tab.pane2_screen is not None:
+            status_info = self._get_status_info()
+            if status_info is not None:
+                tab_str = self._tab_indicator()
+                pane_str = '[L]' if cur_tab.pane_focus == 0 else '[R]'
+                uptime = status_info[3] if len(status_info) > 3 else ''
+                status_info = (status_info[0], status_info[1], status_info[2],
+                               (pane_str + ' ' + tab_str).strip(), uptime)
+            img = render_split_lr(
+                self._screen,
+                cur_tab.pane2_screen,
+                focus=cur_tab.pane_focus,
+                font_size=self._font_size,
+                dark_mode=self._dark_mode,
+                font_path=self._font_path,
+                status_info=status_info,
+                alerts=alerts if alerts else None,
+                bar_config=self._bar_config,
+                cursor_style=self._cursor_style,
+            )
+            self._img_cache = None   # split bypasses incremental cache
+            self._last_cursor_row = self._screen.cursor.y
+            self._last_image = img
+            kind = self._refresh_kind(force_full, force_flash, heavy_change=False)
+            if kind in ('full', 'flash'):
+                self._driver.full_refresh(img)
+                self._last_full_refresh_mono = time.monotonic()
+                self._needs_periodic_flash = False
+            else:
+                self._driver.partial_refresh_diff(img)
+                self._needs_periodic_flash = True
+            return
 
         # Compute viewport start_row (for scroll detection).
         _, vis_rows, _, _ = terminal_dimensions(self._font_size, self._font_path, tw)
@@ -2425,10 +2724,13 @@ class EinkTerminal:
                         fds.append(self._stdin_fd)
                 else:
                     fds.append(self._evdev_kb.fileno())
-                # Monitor ALL tab PTYs so background tabs stay current
+                # Monitor ALL tab PTYs (primary + split pane secondary) so
+                # background tabs and split panes stay current.
                 for tab in self._tabs:
                     if tab.pty_master is not None and tab.pty_master >= 0:
                         fds.append(tab.pty_master)
+                    if tab.pane2_master >= 0:
+                        fds.append(tab.pane2_master)
                 # Adaptive tick: poll fast only while output/renders are
                 # pending or input was seen in the last couple of seconds;
                 # otherwise relax so an idle terminal doesn't spin at 50 Hz.
@@ -2545,6 +2847,7 @@ class EinkTerminal:
                             self._snap_to_live()
                             has_pending = True
                         data = self._handle_hotkeys(data)
+                        data = self._handle_search_key(data)
                         data = self._handle_prockill_key(data)
                         data = self._handle_svcmgr_key(data)
                         data = self._handle_power_key(data)
@@ -2553,11 +2856,13 @@ class EinkTerminal:
                         data = self._handle_palette_key(data)
                         data = self._handle_clipboard_key(data)
                         data = self._handle_sshpick_key(data)
-                        if data and self._pty_master is not None:
-                            try:
-                                os.write(self._pty_master, data)
-                            except OSError:
-                                pass
+                        if data:
+                            pty_dest = self._get_focused_pty()
+                            if pty_dest is not None:
+                                try:
+                                    os.write(pty_dest, data)
+                                except OSError:
+                                    pass
 
             # ── Keyboard input (stdin / TTY path) ────────────────────────────
             elif self._evdev_kb is None and self._stdin_fd in r:
@@ -2591,6 +2896,7 @@ class EinkTerminal:
                         self._snap_to_live()
                         has_pending = True
                     data = self._handle_hotkeys(data)
+                    data = self._handle_search_key(data)
                     data = self._handle_prockill_key(data)
                     data = self._handle_svcmgr_key(data)
                     data = self._handle_power_key(data)
@@ -2599,11 +2905,13 @@ class EinkTerminal:
                     data = self._handle_palette_key(data)
                     data = self._handle_clipboard_key(data)
                     data = self._handle_sshpick_key(data)
-                    if data and self._pty_master is not None:
-                        try:
-                            os.write(self._pty_master, data)
-                        except OSError:
-                            pass
+                    if data:
+                        pty_dest = self._get_focused_pty()
+                        if pty_dest is not None:
+                            try:
+                                os.write(pty_dest, data)
+                            except OSError:
+                                pass
 
             # ── PTY output (all tabs) ─────────────────────────────────────────
             for tab_i, tab in enumerate(self._tabs):
@@ -2635,17 +2943,42 @@ class EinkTerminal:
                             try: os.waitpid(tab.child_pid, os.WNOHANG)
                             except (OSError, ChildProcessError): pass
                         tab.child_pid = None
+                # ── Split pane secondary PTY output ──────────────────────────
+                if tab.pane2_master >= 0 and tab.pane2_master in r:
+                    try:
+                        chunk = os.read(tab.pane2_master, 4096)
+                        if chunk:
+                            chunk = _filter_pty_output(chunk, tab.pane2_master)
+                            if chunk and tab.pane2_stream:
+                                tab.pane2_stream.feed(chunk)
+                            if tab_i == self._active_tab and not in_screensaver:
+                                self._last_activity = now
+                                has_pending = True
+                    except OSError:
+                        try: os.close(tab.pane2_master)
+                        except OSError: pass
+                        tab.pane2_master = -1
+                        if tab.pane2_pid:
+                            try: os.waitpid(tab.pane2_pid, os.WNOHANG)
+                            except (OSError, ChildProcessError): pass
+                        tab.pane2_pid = 0
+                        if tab_i == self._active_tab:
+                            tab.split_dir = ''
+                            tab.pane_focus = 0
+                            self._render(force_full=True)
 
             # ── Web input (phone keyboard via preview server) ─────────────────
             if self._web_input_queue is not None:
                 try:
                     while True:
                         text = self._web_input_queue.get_nowait()
-                        if text and self._pty_master is not None:
-                            try:
-                                os.write(self._pty_master, text.encode('utf-8'))
-                            except OSError:
-                                continue
+                        if text:
+                            pty_dest = self._get_focused_pty()
+                            if pty_dest is not None:
+                                try:
+                                    os.write(pty_dest, text.encode('utf-8'))
+                                except OSError:
+                                    pass
                             self._last_activity = now
                             self._last_input = now
                             self._did_idle_reset = False
@@ -2747,6 +3080,9 @@ class EinkTerminal:
             if has_pending and not in_screensaver and not panel_asleep and (now - last_render) >= _RENDER_DEBOUNCE:
                 self._render()
                 self._screen.dirty.clear()
+                _ct = self._current_tab()
+                if _ct and _ct.pane2_screen:
+                    _ct.pane2_screen.dirty.clear()
                 has_pending = False
                 last_render = now
             elif not in_screensaver and not panel_asleep and self._periodic_flash_due(now):
@@ -2754,6 +3090,9 @@ class EinkTerminal:
                 # so it never interrupts active typing.
                 self._render(force_flash=True)
                 self._screen.dirty.clear()
+                _ct = self._current_tab()
+                if _ct and _ct.pane2_screen:
+                    _ct.pane2_screen.dirty.clear()
                 last_render = now
 
     def _shell_exited_handler(self) -> bool:
