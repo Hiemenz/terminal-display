@@ -2784,7 +2784,10 @@ class EinkTerminal:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break   # auto-restart after timeout
-            r, _, _ = select.select([input_fd], [], [], min(1.0, remaining))
+            try:
+                r, _, _ = select.select([input_fd], [], [], min(1.0, remaining))
+            except OSError:
+                break   # bad fd — auto-restart
             if not r:
                 continue
             # Use the evdev wrapper so raw input-event structs are decoded to
