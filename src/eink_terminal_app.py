@@ -2510,7 +2510,10 @@ class EinkTerminal:
                         self._reset_deferred_busy = any(
                             self._tab_is_busy(t) for t in self._tabs)
                     if not self._reset_deferred_busy:
-                        self._reset_session(render=not (in_screensaver or panel_asleep))
+                        try:
+                            self._reset_session(render=not (in_screensaver or panel_asleep))
+                        except Exception as e:
+                            logger.error('Idle reset failed: %s', e)
                         self._did_idle_reset = True
                         continue
 
@@ -2754,9 +2757,11 @@ class EinkTerminal:
                 last_render = now
 
     def _shell_exited_handler(self) -> bool:
+        _AUTO_RESTART_SECS = 10
         msg = (
             b'\r\n\x1b[7m  Shell exited. '
-            b'Press Enter to restart or Ctrl+C to quit.  \x1b[0m\r\n'
+            b'Press Enter to restart, Ctrl+C to quit, '
+            b'or wait 10 s for auto-restart.  \x1b[0m\r\n'
         )
         self._stream.feed(msg)
         self._render(force_full=True)
@@ -2773,24 +2778,40 @@ class EinkTerminal:
             self._tabs[self._active_tab].child_pid = None
 
         input_fd = self._evdev_kb.fileno() if self._evdev_kb else self._stdin_fd
+        deadline = time.monotonic() + _AUTO_RESTART_SECS
         while True:
-            self._watchdog.ping()   # this loop can block for a while awaiting a key
-            r, _, _ = select.select([input_fd], [], [], 1.0)
+            self._watchdog.ping()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break   # auto-restart after timeout
+            r, _, _ = select.select([input_fd], [], [], min(1.0, remaining))
             if not r:
                 continue
-            try:
-                key = os.read(input_fd, 10)
-            except OSError:
-                return False
+            # Use the evdev wrapper so raw input-event structs are decoded to
+            # terminal bytes (e.g. Enter → b'\r'). Fall back to os.read for stdin.
+            if self._evdev_kb is not None:
+                try:
+                    key = self._evdev_kb.read()
+                except OSError:
+                    break   # keyboard disconnected — auto-restart
+            else:
+                try:
+                    key = os.read(input_fd, 10)
+                except OSError:
+                    break   # stdin closed — auto-restart
+            if not key:
+                break       # stdin EOF — auto-restart
             if b'\r' in key or b'\n' in key:
-                self._init_screen()
-                self._spawn_shell()
-                if self._tabs and 0 <= self._active_tab < len(self._tabs):
-                    t = self._tabs[self._active_tab]
-                    t.screen = self._screen; t.stream = self._stream
-                    t.pty_master = self._pty_master; t.child_pid = self._child_pid
-                self._render(force_full=True)
-                return True
+                break       # user pressed Enter — restart immediately
             if b'\x03' in key:
                 self._running = False
                 return False
+
+        self._init_screen()
+        self._spawn_shell()
+        if self._tabs and 0 <= self._active_tab < len(self._tabs):
+            t = self._tabs[self._active_tab]
+            t.screen = self._screen; t.stream = self._stream
+            t.pty_master = self._pty_master; t.child_pid = self._child_pid
+        self._render(force_full=True)
+        return True
