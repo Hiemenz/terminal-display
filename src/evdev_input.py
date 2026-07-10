@@ -331,6 +331,14 @@ class EvdevKeyboard:
                     return bytes([c - ord('A') + 1])
                 if c == ord(' '):
                     return b'\x00'
+                # Ctrl+[ \ ] ^ _ : standard C0 masking (used by the split-pane
+                # hotkeys Ctrl+\ / Ctrl+]). Ctrl+/ is the one xterm-convention
+                # exception — terminals send 0x1F (== Ctrl+_) for it rather
+                # than the raw mask of '/' (0x2F), so it's special-cased.
+                if ord('[') <= c <= ord('_'):
+                    return bytes([c & 0x1f])
+                if c == ord('/'):
+                    return b'\x1f'
             if self._alt:
                 return b'\x1b' + char
             return char

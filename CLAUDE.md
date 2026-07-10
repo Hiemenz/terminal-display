@@ -62,7 +62,9 @@ tabs, F3 kill process, F4 service manager, F5 power menu, F6 command palette
 (includes "Rename tab"), F7 dark mode, F8 clipboard, F9/F12 font size, F10
 full refresh, F11 switch to stats dashboard, PgUp/PgDn scroll, Ctrl+F
 scrollback search, Ctrl+\ toggle split pane (left/right), Ctrl+] swap
-split-pane focus.
+split-pane focus, Ctrl+/ help overlay (lists every hotkey; ↑↓ to browse,
+Enter runs the selected one, Esc closes — see `_HELP_ITEMS` /
+`_run_help_action` in `src/eink_terminal_app.py`).
 
 Idle behavior (all configurable, `terminal_*` keys in `config/config.yaml`):
 panel deep-sleep → screensaver → **idle reset** (kills and respawns the
