@@ -25,6 +25,9 @@ Hotkeys:
   PgUp      — scroll up through history (no-tmux mode only)
   PgDn      — scroll down / return to live
   Ctrl+C    — kill foreground process (forwarded normally)
+  Ctrl+/    — help overlay: every hotkey, one line each; ↑↓ to browse,
+              Enter to run the selected one (new tab, close tab, toggle
+              split, next/prev tab, ...), Esc to close without acting
 """
 import fcntl
 import getpass
@@ -262,6 +265,34 @@ _CTRL_F            = b'\x06'   # scrollback search
 _CTRL_T            = b'\x14'   # new tab
 _CTRL_BACKSLASH    = b'\x1c'   # toggle left/right split pane
 _CTRL_BRACKETRIGHT = b'\x1d'   # swap split pane focus
+_CTRL_SLASH        = b'\x1f'   # help overlay (lists every hotkey, Enter runs it)
+
+# Help overlay (Ctrl+/): every hotkey with a one-line label. Enter runs the
+# selected item; see _run_help_action for the label → method mapping. Ordered
+# with tab/split management first since that's what people ask about most.
+_HELP_ITEMS = [
+    ('New Tab',             'Ctrl+T'),
+    ('Close Tab',           'F2'),
+    ('Next Tab',            'Ctrl+Right'),
+    ('Prev Tab',            'Ctrl+Left'),
+    ('Toggle Split Pane',   'Ctrl+\\'),
+    ('Swap Split Focus',    'Ctrl+]'),
+    ('Rename Tab',          'F6 > Rename'),
+    ('SSH Picker',          'F1'),
+    ('Command Palette',     'F6'),
+    ('Kill Process',        'F3'),
+    ('Service Manager',     'F4'),
+    ('Power Menu',          'F5'),
+    ('Dark Mode',           'F7'),
+    ('Clipboard',           'F8'),
+    ('Font Smaller',        'F9'),
+    ('Font Larger',         'F12'),
+    ('Full Refresh',        'F10'),
+    ('Switch to Dashboard', 'F11'),
+    ('Scrollback Search',   'Ctrl+F'),
+    ('Scroll Up',           'PgUp'),
+    ('Scroll Down',         'PgDn'),
+]
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -479,6 +510,10 @@ class EinkTerminal:
         # Power menu (F5)
         self._power_active = False
         self._power_idx: int = 2  # Cancel selected by default
+
+        # Help overlay (Ctrl+/)
+        self._help_active = False
+        self._help_idx: int = 0
 
         # Command palette
         self._palette_active = False
@@ -1016,6 +1051,9 @@ class EinkTerminal:
         if _CTRL_BRACKETRIGHT in data:
             self._swap_pane_focus()
             data = data.replace(_CTRL_BRACKETRIGHT, b'')
+        if _CTRL_SLASH in data:
+            self._toggle_help()
+            data = data.replace(_CTRL_SLASH, b'')
         return data
 
     def _toggle_dark_mode(self):
@@ -1202,6 +1240,7 @@ class EinkTerminal:
         self._sshpick_active = True
         self._palette_active = self._clipboard_active = False
         self._prockill_active = self._svcmgr_active = self._power_active = False
+        self._help_active = False
         self._render()
 
     def _handle_sshpick_key(self, data: bytes) -> bytes:
@@ -1255,6 +1294,7 @@ class EinkTerminal:
             self._prockill_active = True
             self._palette_active = self._clipboard_active = False
             self._svcmgr_active = self._power_active = False
+            self._help_active = False
         self._render()
 
     def _handle_prockill_key(self, data: bytes) -> bytes:
@@ -1305,6 +1345,7 @@ class EinkTerminal:
             self._svcmgr_active = True
             self._palette_active = self._clipboard_active = False
             self._prockill_active = self._power_active = False
+            self._help_active = False
         self._render()
 
     def _handle_svcmgr_key(self, data: bytes) -> bytes:
@@ -1348,6 +1389,7 @@ class EinkTerminal:
             self._power_idx = 2  # Cancel default — safest
             self._palette_active = self._clipboard_active = False
             self._prockill_active = self._svcmgr_active = False
+            self._help_active = False
         self._render()
 
     def _handle_power_key(self, data: bytes) -> bytes:
@@ -1436,6 +1478,7 @@ class EinkTerminal:
             self._palette_active = self._clipboard_active = False
             self._prockill_active = self._svcmgr_active = False
             self._power_active = self._sshpick_active = False
+            self._help_active = False
         self._render()
 
     def _settings_change(self, delta: int):
@@ -1555,6 +1598,92 @@ class EinkTerminal:
         elif action == _RENAME_TAB:
             self._start_rename()
 
+    # ─── Help overlay (Ctrl+/) ─────────────────────────────────────────────────
+
+    @staticmethod
+    def _format_help_row(label: str, keys: str) -> str:
+        return f'{label:<22}{keys:>12}'
+
+    def _toggle_help(self):
+        if self._help_active:
+            self._help_active = False
+        else:
+            self._help_idx = 0
+            self._help_active = True
+            self._palette_active = self._clipboard_active = False
+            self._prockill_active = self._svcmgr_active = self._power_active = False
+            self._sshpick_active = self._search_active = False
+        self._render()
+
+    def _handle_help_key(self, data: bytes) -> bytes:
+        if not self._help_active:
+            return data
+        if b'\x1b[A' in data:
+            self._help_idx = max(0, self._help_idx - 1)
+            self._render(); return b''
+        if b'\x1b[B' in data:
+            self._help_idx = min(len(_HELP_ITEMS) - 1, self._help_idx + 1)
+            self._render(); return b''
+        if b'\r' in data or b'\n' in data:
+            if _HELP_ITEMS:
+                label, _keys = _HELP_ITEMS[self._help_idx]
+                self._help_active = False
+                self._run_help_action(label)
+            return b''
+        if b'\x1b' in data:
+            self._help_active = False; self._render(); return b''
+        return b''
+
+    def _run_help_action(self, label: str):
+        # Mirrors _handle_hotkeys' dispatch for the same key — each target
+        # method already renders itself, except the two special-cased below.
+        if label == 'New Tab':
+            self._new_tab()
+        elif label == 'Close Tab':
+            self._close_tab()
+            self._render()   # unlike the F2 path, the overlay needs clearing
+        elif label == 'Next Tab':
+            self._switch_tab(+1)
+        elif label == 'Prev Tab':
+            self._switch_tab(-1)
+        elif label == 'Toggle Split Pane':
+            self._toggle_split_pane()
+        elif label == 'Swap Split Focus':
+            self._swap_pane_focus()
+        elif label == 'Rename Tab':
+            self._start_rename()
+        elif label == 'SSH Picker':
+            self._toggle_sshpick()
+        elif label == 'Command Palette':
+            self._toggle_palette()
+        elif label == 'Kill Process':
+            self._toggle_prockill()
+        elif label == 'Service Manager':
+            self._toggle_svcmgr()
+        elif label == 'Power Menu':
+            self._toggle_power()
+        elif label == 'Dark Mode':
+            self._toggle_dark_mode()
+        elif label == 'Clipboard':
+            self._toggle_clipboard()
+        elif label == 'Font Smaller':
+            self._change_font(-2)
+        elif label == 'Font Larger':
+            self._change_font(+2)
+        elif label == 'Full Refresh':
+            # Not _force_full_refresh(): that flashes self._last_image, which
+            # at this point is still the cached frame with the help overlay
+            # baked in. Re-render first so the flash shows a clean screen.
+            self._render(force_full=True)
+        elif label == 'Switch to Dashboard':
+            self._switch_to_stats()
+        elif label == 'Scrollback Search':
+            self._toggle_search()
+        elif label == 'Scroll Up':
+            self._scroll_up()
+        elif label == 'Scroll Down':
+            self._scroll_down()
+
     # ─── Snippets picker (curated saved_commands.txt) ─────────────────────────
 
     def _snippets_path(self) -> str:
@@ -1579,6 +1708,7 @@ class EinkTerminal:
             self._snippets_idx = 0
             self._snippets_active = True
             self._palette_active = self._clipboard_active = False
+            self._help_active = False
         self._render()
 
     def _handle_snippets_key(self, data: bytes) -> bytes:
@@ -1613,6 +1743,7 @@ class EinkTerminal:
         self._palette_active = self._clipboard_active = False
         self._prockill_active = self._svcmgr_active = self._power_active = False
         self._sshpick_active = self._search_active = False
+        self._help_active = False
         self._render()
 
     def _handle_rename_key(self, data: bytes) -> bytes:
@@ -1735,6 +1866,7 @@ class EinkTerminal:
             self._palette_idx = 0
             self._palette_active = True
             self._clipboard_active = False
+            self._help_active = False
         self._render()
 
     def _handle_palette_key(self, data: bytes) -> bytes:
@@ -1778,6 +1910,7 @@ class EinkTerminal:
             self._clipboard_idx = 0
             self._clipboard_active = True
             self._palette_active = False
+            self._help_active = False
         else:
             self._paste_from_file()
         self._render()
@@ -1819,6 +1952,7 @@ class EinkTerminal:
             self._palette_active = self._clipboard_active = False
             self._prockill_active = self._svcmgr_active = self._power_active = False
             self._sshpick_active = False
+            self._help_active = False
         self._render()
 
     def _build_search_results(self) -> list:
@@ -2490,7 +2624,11 @@ class EinkTerminal:
         with self._net_stats_lock:
             net_stats = dict(self._net_stats) if self._net_stats else None
 
-        if self._palette_active and self._palette_items:
+        if self._help_active:
+            items = [self._format_help_row(label, keys) for label, keys in _HELP_ITEMS]
+            overlay = (items, self._help_idx,
+                       'Help  [Enter=run  ↑↓ navigate  Esc=close]')
+        elif self._palette_active and self._palette_items:
             overlay = (self._palette_items, self._palette_idx, 'Commands')
         elif self._snippets_active and self._snippets_items:
             overlay = (self._snippets_items, self._snippets_idx,
@@ -2905,6 +3043,7 @@ class EinkTerminal:
                             self._snap_to_live()
                             has_pending = True
                         data = self._handle_hotkeys(data)
+                        data = self._handle_help_key(data)
                         data = self._handle_search_key(data)
                         data = self._handle_rename_key(data)
                         data = self._handle_prockill_key(data)
@@ -2955,6 +3094,7 @@ class EinkTerminal:
                         self._snap_to_live()
                         has_pending = True
                     data = self._handle_hotkeys(data)
+                    data = self._handle_help_key(data)
                     data = self._handle_search_key(data)
                     data = self._handle_rename_key(data)
                     data = self._handle_prockill_key(data)
