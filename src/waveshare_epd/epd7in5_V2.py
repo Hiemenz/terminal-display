@@ -378,15 +378,8 @@ class EPD:
             else:
                 Xend = Xend // 8 * 8 + 1
 
-        # Register 0x50 (CDI) controls the border pin during refresh. The
-        # original OTP partial code used 0xA9 (D7=1 = Hi-Z), letting the border
-        # float and pick up stray charge, which reads as a dark edge. Changing
-        # D7 to 0 (active) is necessary but not sufficient: D[5:4] (VB bits)
-        # select the border drive voltage — 0x29 has VB=10 which drives border
-        # to VDL (dark), while 0x10 has VB=01 matching the full-init setting
-        # which drives the border to VDH (white). Use 0x10 to match init().
         self.send_command(0x50)
-        self.send_data(0x10)
+        self.send_data(0xA9)
         self.send_data(0x07)
 
         self.send_command(0x91)		#This command makes the display enter partial mode
@@ -440,10 +433,8 @@ class EPD:
         All regions are written to the controller RAM before the 0x12 refresh
         command is issued, so the panel settles once regardless of band count.
         """
-        # See display_Partial() above: use 0x10 (VB=01, VDH/white drive) not
-        # 0xA9 (Hi-Z, floats dark) or 0x29 (VB=10, VDL/dark drive).
         self.send_command(0x50)
-        self.send_data(0x10)
+        self.send_data(0xA9)
         self.send_data(0x07)
 
         for image, old_image, Xstart, Ystart, Xend, Yend in patches:
