@@ -250,14 +250,16 @@ _SNIPPETS_OPEN = '✎ Snippets (saved commands)'
 _BIGTEXT_OPEN  = '🔍 Big text (read mode)'
 _BEAM_OPEN     = '📱 Beam screen to phone'
 _HUD_TOGGLE    = '📊 Toggle refresh stats HUD'
+_RENAME_TAB    = '✏ Rename tab'
 # Palette actions that open an overlay / run in-app instead of typing a command.
-_PALETTE_ACTIONS = (_SETTINGS_OPEN, _SNIPPETS_OPEN, _BIGTEXT_OPEN, _BEAM_OPEN, _HUD_TOGGLE)
+_PALETTE_ACTIONS = (_SETTINGS_OPEN, _SNIPPETS_OPEN, _BIGTEXT_OPEN, _BEAM_OPEN, _HUD_TOGGLE, _RENAME_TAB)
 _F12  = b'\x1b[24~'
 _CTRL_LEFT  = b'\x1b[1;5D'   # cycle tabs
 _CTRL_RIGHT = b'\x1b[1;5C'
 _PGUP = b'\x1b[5~'
 _PGDN = b'\x1b[6~'
 _CTRL_F            = b'\x06'   # scrollback search
+_CTRL_T            = b'\x14'   # new tab
 _CTRL_BACKSLASH    = b'\x1c'   # toggle left/right split pane
 _CTRL_BRACKETRIGHT = b'\x1d'   # swap split pane focus
 
@@ -521,6 +523,10 @@ class EinkTerminal:
         # Each entry: (display_text, is_history, history_idx)
         self._search_results: list = []
         self._search_idx: int = 0
+
+        # Tab rename overlay
+        self._rename_active: bool = False
+        self._rename_query: str = ''
 
         # URL QR overlay
         self._last_url: str = ''
@@ -1001,6 +1007,9 @@ class EinkTerminal:
         if _CTRL_F in data:
             self._toggle_search()
             data = data.replace(_CTRL_F, b'')
+        if _CTRL_T in data:
+            self._new_tab()
+            data = data.replace(_CTRL_T, b'')
         if _CTRL_BACKSLASH in data:
             self._toggle_split_pane()
             data = data.replace(_CTRL_BACKSLASH, b'')
@@ -1543,6 +1552,8 @@ class EinkTerminal:
         elif action == _HUD_TOGGLE:
             self._show_refresh_hud = not self._show_refresh_hud
             self._render(force_full=True)
+        elif action == _RENAME_TAB:
+            self._start_rename()
 
     # ─── Snippets picker (curated saved_commands.txt) ─────────────────────────
 
@@ -1589,6 +1600,49 @@ class EinkTerminal:
             return b''
         if b'\x1b' in data:
             self._snippets_active = False; self._render(); return b''
+        return b''
+
+    # ─── Tab rename overlay ───────────────────────────────────────────────────
+
+    def _start_rename(self):
+        tab = self._current_tab()
+        if tab is None:
+            return
+        self._rename_query = tab.title or ''
+        self._rename_active = True
+        self._palette_active = self._clipboard_active = False
+        self._prockill_active = self._svcmgr_active = self._power_active = False
+        self._sshpick_active = self._search_active = False
+        self._render()
+
+    def _handle_rename_key(self, data: bytes) -> bytes:
+        if not self._rename_active:
+            return data
+        if b'\r' in data or b'\n' in data:
+            tab = self._current_tab()
+            if tab is not None:
+                tab.title = self._rename_query.strip()
+            self._rename_active = False
+            self._rename_query = ''
+            self._render(force_full=True)
+            return b''
+        if b'\x1b' in data:
+            self._rename_active = False
+            self._rename_query = ''
+            self._render()
+            return b''
+        if data in (b'\x7f', b'\x08'):
+            self._rename_query = self._rename_query[:-1]
+            self._render()
+            return b''
+        try:
+            ch = data.decode('utf-8', errors='ignore')
+            printable = ''.join(c for c in ch if c >= ' ' and c != '\x7f')
+            if printable:
+                self._rename_query += printable
+                self._render()
+        except Exception:
+            pass
         return b''
 
     # ─── Big text (momentary read mode) ───────────────────────────────────────
@@ -2469,6 +2523,10 @@ class EinkTerminal:
             title = (f'Find: {q}  [{n} match{"es" if n != 1 else ""}]  '
                      f'[Enter=jump  ↑↓ navigate  Esc=close]')
             overlay = (items, self._search_idx, title)
+        elif self._rename_active:
+            q = self._rename_query
+            overlay = ([f'New name: {q}█'], 0,
+                       'Rename Tab  [Enter=confirm  Esc=cancel  Backspace=delete]')
         else:
             overlay = None
 
@@ -2848,6 +2906,7 @@ class EinkTerminal:
                             has_pending = True
                         data = self._handle_hotkeys(data)
                         data = self._handle_search_key(data)
+                        data = self._handle_rename_key(data)
                         data = self._handle_prockill_key(data)
                         data = self._handle_svcmgr_key(data)
                         data = self._handle_power_key(data)
@@ -2897,6 +2956,7 @@ class EinkTerminal:
                         has_pending = True
                     data = self._handle_hotkeys(data)
                     data = self._handle_search_key(data)
+                    data = self._handle_rename_key(data)
                     data = self._handle_prockill_key(data)
                     data = self._handle_svcmgr_key(data)
                     data = self._handle_power_key(data)
