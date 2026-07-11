@@ -71,6 +71,20 @@ def _find_mono_font(font_path: str, size: int) -> ImageFont.ImageFont:
     return font
 
 
+def _in_select_range(row_idx: int, col_idx: int, select: tuple) -> bool:
+    """select = (r1, c1, r2, c2), reading-order-normalized (copy mode)."""
+    r1, c1, r2, c2 = select
+    if row_idx < r1 or row_idx > r2:
+        return False
+    if r1 == r2:
+        return c1 <= col_idx <= c2
+    if row_idx == r1:
+        return col_idx >= c1
+    if row_idx == r2:
+        return col_idx <= c2
+    return True
+
+
 def _char_size(font: ImageFont.ImageFont) -> tuple:
     try:
         cw = int(font.getlength('M'))
@@ -116,6 +130,7 @@ def render_screen(
     tab_bar: list = None,
     bar_config: dict = None,
     cursor_style: str = 'block',
+    select: tuple = None,
 ) -> Image.Image:
     """
     Render pyte.Screen to an 800×480 grayscale PIL Image.
@@ -169,6 +184,8 @@ def render_screen(
             char = row[col_idx]
             is_cursor    = (row_idx == screen.cursor.y and col_idx == screen.cursor.x)
             cell_inverted = bool(char.reverse)
+            if select is not None and _in_select_range(row_idx, col_idx, select):
+                cell_inverted = not cell_inverted
             # A block cursor inverts the whole cell (glyph shown in bg over an
             # fg block); an underline cursor keeps the cell as-is and adds a bar.
             if is_cursor and cursor_style == 'block':

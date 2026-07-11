@@ -4,9 +4,10 @@ from PIL import Image
 
 
 class _StubTab:
-    def __init__(self, title='', child_pid=0):
+    def __init__(self, title='', child_pid=0, activity=False):
         self.title = title
         self.child_pid = child_pid
+        self.activity = activity
 
 
 # ── Per-tab cwd indicator ─────────────────────────────────────────────────────
