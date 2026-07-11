@@ -28,6 +28,12 @@ Hotkeys:
   Ctrl+/    — help overlay: every hotkey, one line each; ↑↓ to browse,
               Enter to run the selected one (new tab, close tab, toggle
               split, next/prev tab, ...), Esc to close without acting
+  Alt+1..9  — jump straight to tab N
+  Ctrl+Space — copy mode: arrows move a cursor over the visible screen,
+              Space drops an anchor, Enter yanks the anchor→cursor range (or
+              the whole line under the cursor with no anchor) into the F8
+              clipboard and beams it to a QR for phone copy. Esc cancels.
+              See _toggle_copy_mode / _handle_copy_key / _copy_confirm.
 """
 import fcntl
 import getpass
@@ -86,6 +92,7 @@ class _Tab:
     pane2_tmux: str = ''
     pane_focus: int = 0    # 0 = primary (left), 1 = secondary (right)
     split_dir: str = ''    # 'h' = left/right split; '' = no split
+    activity: bool = False  # produced output while in the background, unseen
 
 
 _RENDER_DEBOUNCE  = 0.02   # seconds — lower now that hw writes are async
@@ -266,6 +273,11 @@ _CTRL_T            = b'\x14'   # new tab
 _CTRL_BACKSLASH    = b'\x1c'   # toggle left/right split pane
 _CTRL_BRACKETRIGHT = b'\x1d'   # swap split pane focus
 _CTRL_SLASH        = b'\x1f'   # help overlay (lists every hotkey, Enter runs it)
+_CTRL_SPACE        = b'\x00'   # copy mode: select on-screen text, yank to clipboard/beam
+
+# Alt+1..Alt+9 → jump straight to tab N. evdev sends Meta as ESC+char (same
+# convention every terminal emulator uses), so this needs no evdev changes.
+_ALT_DIGITS = {('\x1b' + d).encode(): int(d) for d in '123456789'}
 
 # Help overlay (Ctrl+/): every hotkey with a one-line label. Enter runs the
 # selected item; see _run_help_action for the label → method mapping. Ordered
@@ -275,6 +287,7 @@ _HELP_ITEMS = [
     ('Close Tab',           'F2'),
     ('Next Tab',            'Ctrl+Right'),
     ('Prev Tab',            'Ctrl+Left'),
+    ('Jump to Tab N',       'Alt+1..9'),
     ('Toggle Split Pane',   'Ctrl+\\'),
     ('Swap Split Focus',    'Ctrl+]'),
     ('Rename Tab',          'F6 > Rename'),
@@ -285,6 +298,7 @@ _HELP_ITEMS = [
     ('Power Menu',          'F5'),
     ('Dark Mode',           'F7'),
     ('Clipboard',           'F8'),
+    ('Copy Mode',           'Ctrl+Space'),
     ('Font Smaller',        'F9'),
     ('Font Larger',         'F12'),
     ('Full Refresh',        'F10'),
@@ -562,6 +576,15 @@ class EinkTerminal:
         # Tab rename overlay
         self._rename_active: bool = False
         self._rename_query: str = ''
+
+        # Copy mode (Ctrl+Space): char-wise on-screen text selection. Cursor
+        # moves with arrows over the currently visible screen; Space drops an
+        # anchor; Enter yanks the anchor→cursor range (or the whole line under
+        # the cursor if no anchor was set) into the clipboard + beam QR.
+        self._copy_active: bool = False
+        self._copy_row: int = 0
+        self._copy_col: int = 0
+        self._copy_anchor: tuple | None = None
 
         # URL QR overlay
         self._last_url: str = ''
@@ -1054,6 +1077,14 @@ class EinkTerminal:
         if _CTRL_SLASH in data:
             self._toggle_help()
             data = data.replace(_CTRL_SLASH, b'')
+        if _CTRL_SPACE in data:
+            self._toggle_copy_mode()
+            data = data.replace(_CTRL_SPACE, b'')
+        for seq, n in _ALT_DIGITS.items():
+            if seq in data:
+                if n <= len(self._tabs):
+                    self._goto_tab(n - 1)
+                data = data.replace(seq, b'')
         return data
 
     def _toggle_dark_mode(self):
@@ -1085,6 +1116,10 @@ class EinkTerminal:
     def _reflow_shell(self):
         """Re-derive the terminal grid (after a font-size or split-view change)
         and tell the child shell its window resized."""
+        # The grid is being rebuilt — a stale copy-mode cursor/anchor could
+        # land out of bounds, so just drop the in-progress selection.
+        self._copy_active = False
+        self._copy_anchor = None
         self._init_screen()
         self._img_cache = None   # layout changed — drop the incremental cache
         self._sync_pty_winsize()
@@ -1130,14 +1165,19 @@ class EinkTerminal:
         return 'shell'
 
     def _tab_indicator(self) -> str:
-        """Status-bar tab chip: '[2/3 projdir]' — the count plus the active
-        tab's short working-dir/title. Empty when only one tab is open."""
+        """Status-bar tab chip: '[2/3 projdir] •4' — the count, the active
+        tab's short working-dir/title, and a bullet per background tab number
+        with unseen output. Empty when only one tab is open."""
         if len(self._tabs) <= 1:
             return ''
         base = f'{self._active_tab + 1}/{len(self._tabs)}'
         tab = self._current_tab()
         name = self._tab_title(tab) if tab else ''
-        return f'[{base} {name}]' if name else f'[{base}]'
+        indicator = f'[{base} {name}]' if name else f'[{base}]'
+        busy = [str(i + 1) for i, t in enumerate(self._tabs) if t.activity]
+        if busy:
+            indicator += ' •' + ','.join(busy)
+        return indicator
 
     def _sync_active_tab(self):
         if self._tabs and 0 <= self._active_tab < len(self._tabs):
@@ -1188,6 +1228,7 @@ class EinkTerminal:
         self._screen = t2.screen; self._stream = t2.stream
         self._pty_master = t2.pty_master; self._child_pid = t2.child_pid
         self._scroll_pages = t2.scroll_pages
+        t2.activity = False
         self._sync_pty_winsize()
         try: os.kill(self._child_pid, signal.SIGWINCH)
         except (ProcessLookupError, OSError): pass
@@ -1209,6 +1250,11 @@ class EinkTerminal:
         self._screen = t2.screen; self._stream = t2.stream
         self._pty_master = t2.pty_master; self._child_pid = t2.child_pid
         self._scroll_pages = t2.scroll_pages
+        t2.activity = False   # landing here counts as having seen its output
+        # A copy-mode selection points at row/col indices in the *old* tab's
+        # screen buffer — meaningless (or wrong) once we've switched away.
+        self._copy_active = False
+        self._copy_anchor = None
         self._sync_pty_winsize()
         try: os.kill(self._child_pid, signal.SIGWINCH)
         except (ProcessLookupError, OSError): pass
@@ -1240,7 +1286,7 @@ class EinkTerminal:
         self._sshpick_active = True
         self._palette_active = self._clipboard_active = False
         self._prockill_active = self._svcmgr_active = self._power_active = False
-        self._help_active = False
+        self._help_active = self._copy_active = False
         self._render()
 
     def _handle_sshpick_key(self, data: bytes) -> bytes:
@@ -1294,7 +1340,7 @@ class EinkTerminal:
             self._prockill_active = True
             self._palette_active = self._clipboard_active = False
             self._svcmgr_active = self._power_active = False
-            self._help_active = False
+            self._help_active = self._copy_active = False
         self._render()
 
     def _handle_prockill_key(self, data: bytes) -> bytes:
@@ -1345,7 +1391,7 @@ class EinkTerminal:
             self._svcmgr_active = True
             self._palette_active = self._clipboard_active = False
             self._prockill_active = self._power_active = False
-            self._help_active = False
+            self._help_active = self._copy_active = False
         self._render()
 
     def _handle_svcmgr_key(self, data: bytes) -> bytes:
@@ -1389,7 +1435,7 @@ class EinkTerminal:
             self._power_idx = 2  # Cancel default — safest
             self._palette_active = self._clipboard_active = False
             self._prockill_active = self._svcmgr_active = False
-            self._help_active = False
+            self._help_active = self._copy_active = False
         self._render()
 
     def _handle_power_key(self, data: bytes) -> bytes:
@@ -1478,7 +1524,7 @@ class EinkTerminal:
             self._palette_active = self._clipboard_active = False
             self._prockill_active = self._svcmgr_active = False
             self._power_active = self._sshpick_active = False
-            self._help_active = False
+            self._help_active = self._copy_active = False
         self._render()
 
     def _settings_change(self, delta: int):
@@ -1612,7 +1658,7 @@ class EinkTerminal:
             self._help_active = True
             self._palette_active = self._clipboard_active = False
             self._prockill_active = self._svcmgr_active = self._power_active = False
-            self._sshpick_active = self._search_active = False
+            self._sshpick_active = self._search_active = self._copy_active = False
         self._render()
 
     def _handle_help_key(self, data: bytes) -> bytes:
@@ -1646,6 +1692,8 @@ class EinkTerminal:
             self._switch_tab(+1)
         elif label == 'Prev Tab':
             self._switch_tab(-1)
+        elif label == 'Jump to Tab N':
+            self._goto_tab(0)   # picked from the menu — no N to type, default to tab 1
         elif label == 'Toggle Split Pane':
             self._toggle_split_pane()
         elif label == 'Swap Split Focus':
@@ -1666,6 +1714,8 @@ class EinkTerminal:
             self._toggle_dark_mode()
         elif label == 'Clipboard':
             self._toggle_clipboard()
+        elif label == 'Copy Mode':
+            self._toggle_copy_mode()
         elif label == 'Font Smaller':
             self._change_font(-2)
         elif label == 'Font Larger':
@@ -1708,7 +1758,7 @@ class EinkTerminal:
             self._snippets_idx = 0
             self._snippets_active = True
             self._palette_active = self._clipboard_active = False
-            self._help_active = False
+            self._help_active = self._copy_active = False
         self._render()
 
     def _handle_snippets_key(self, data: bytes) -> bytes:
@@ -1742,7 +1792,7 @@ class EinkTerminal:
         self._rename_active = True
         self._palette_active = self._clipboard_active = False
         self._prockill_active = self._svcmgr_active = self._power_active = False
-        self._sshpick_active = self._search_active = False
+        self._sshpick_active = self._search_active = self._copy_active = False
         self._help_active = False
         self._render()
 
@@ -1811,10 +1861,11 @@ class EinkTerminal:
             lines.pop()
         return '\n'.join(lines)
 
-    def _beam_to_phone(self):
-        """Capture the visible screen text, hand it to the preview server, and
-        pin a QR linking to the page that shows it (copyable on a phone)."""
-        text = self._screen_text()
+    def _beam_to_phone(self, text: str = None):
+        """Hand text to the preview server and pin a QR linking to the page
+        that shows it (copyable on a phone). Defaults to the whole visible
+        screen; copy mode passes just the selected range."""
+        text = self._screen_text() if text is None else text
         ip = _get_local_ip()
         port = self._config.get('preview_server_port', 8080)
         server = getattr(self, '_preview_server', None)
@@ -1823,6 +1874,99 @@ class EinkTerminal:
             self._beam_url = f'http://{ip}:{port}/beam'
             self._beam_until_mono = time.monotonic() + 120  # show QR for 2 min
         self._render(force_full=True)
+
+    # ─── Copy mode (Ctrl+Space) ────────────────────────────────────────────────
+
+    def _toggle_copy_mode(self):
+        if self._copy_active:
+            self._copy_active = False
+            self._render()
+            return
+        self._copy_row = min(self._screen.cursor.y, self._screen.lines - 1)
+        self._copy_col = min(self._screen.cursor.x, self._screen.columns - 1)
+        self._copy_anchor = None
+        self._copy_active = True
+        self._palette_active = self._clipboard_active = False
+        self._prockill_active = self._svcmgr_active = self._power_active = False
+        self._sshpick_active = self._search_active = False
+        self._help_active = False
+        self._render()
+
+    def _copy_render_range(self) -> tuple:
+        """(r1, c1, r2, c2) — reading-order-normalized highlight range for
+        rendering. A single cell (the cursor) when no anchor is set yet."""
+        r2, c2 = self._copy_row, self._copy_col
+        r1, c1 = self._copy_anchor if self._copy_anchor is not None else (r2, c2)
+        if (r1, c1) > (r2, c2):
+            (r1, c1), (r2, c2) = (r2, c2), (r1, c1)
+        return (r1, c1, r2, c2)
+
+    def _handle_copy_key(self, data: bytes) -> bytes:
+        if not self._copy_active:
+            return data
+        max_row = self._screen.lines - 1
+        max_col = self._screen.columns - 1
+        if b'\x1b[A' in data:
+            self._copy_row = max(0, self._copy_row - 1)
+            self._render(force_full=True); return b''
+        if b'\x1b[B' in data:
+            self._copy_row = min(max_row, self._copy_row + 1)
+            self._render(force_full=True); return b''
+        if b'\x1b[D' in data:
+            self._copy_col = max(0, self._copy_col - 1)
+            self._render(force_full=True); return b''
+        if b'\x1b[C' in data:
+            self._copy_col = min(max_col, self._copy_col + 1)
+            self._render(force_full=True); return b''
+        if b'\x1b' in data:   # Esc — exit entirely, discarding any selection
+            self._copy_active = False
+            self._render(force_full=True); return b''
+        if data == b' ':
+            self._copy_anchor = (
+                None if self._copy_anchor is not None else (self._copy_row, self._copy_col)
+            )
+            self._render(force_full=True); return b''
+        if b'\r' in data or b'\n' in data:
+            self._copy_confirm()
+            return b''
+        return b''   # swallow everything else while navigating
+
+    def _copy_confirm(self):
+        """Yank the current selection (or, with no anchor, the whole line
+        under the cursor) into the on-device clipboard and beam it to a QR."""
+        if self._copy_anchor is None:
+            row = self._screen.buffer[self._copy_row]
+            text = ''.join(row[c].data for c in range(self._screen.columns)).rstrip()
+        else:
+            r1, c1, r2, c2 = self._copy_render_range()
+            lines = []
+            for r in range(r1, r2 + 1):
+                row = self._screen.buffer[r]
+                c_start = c1 if r == r1 else 0
+                c_end = c2 if r == r2 else self._screen.columns - 1
+                lines.append(''.join(row[c].data for c in range(c_start, c_end + 1)).rstrip())
+            text = '\n'.join(lines)
+        self._copy_active = False
+        self._copy_anchor = None
+        if text:
+            self._add_clipboard_entry(text)
+            self._beam_to_phone(text)
+        else:
+            self._render(force_full=True)
+
+    def _add_clipboard_entry(self, text: str):
+        """Push a yanked selection onto the front of the on-device clipboard
+        (same store F8 reads from), capped like the web editor's copy."""
+        first_line = text.split('\n', 1)[0]
+        label = first_line if len(first_line) <= 40 else first_line[:39] + '…'
+        self._clipboard.insert(0, {'text': text, 'label': label})
+        self._clipboard = self._clipboard[:20]
+        try:
+            os.makedirs(os.path.dirname(self._clipboard_path), exist_ok=True)
+            with open(self._clipboard_path, 'w') as f:
+                json.dump(self._clipboard, f)
+        except OSError:
+            pass
 
     # ─── Command palette ─────────────────────────────────────────────────────
 
@@ -1866,7 +2010,7 @@ class EinkTerminal:
             self._palette_idx = 0
             self._palette_active = True
             self._clipboard_active = False
-            self._help_active = False
+            self._help_active = self._copy_active = False
         self._render()
 
     def _handle_palette_key(self, data: bytes) -> bytes:
@@ -1910,7 +2054,7 @@ class EinkTerminal:
             self._clipboard_idx = 0
             self._clipboard_active = True
             self._palette_active = False
-            self._help_active = False
+            self._help_active = self._copy_active = False
         else:
             self._paste_from_file()
         self._render()
@@ -1952,7 +2096,7 @@ class EinkTerminal:
             self._palette_active = self._clipboard_active = False
             self._prockill_active = self._svcmgr_active = self._power_active = False
             self._sshpick_active = False
-            self._help_active = False
+            self._help_active = self._copy_active = False
         self._render()
 
     def _build_search_results(self) -> list:
@@ -2584,6 +2728,10 @@ class EinkTerminal:
     def _render(self, force_full: bool = False, force_flash: bool = False):
         tw = SPLIT_TERMINAL_W if self._split_view else 800
         alerts = self._alert_monitor.active()
+        if self._copy_active:
+            hint = ('mark set — ' if self._copy_anchor else '') + \
+                   'COPY MODE  ↑↓←→ move · Space mark · Enter yank · Esc cancel'
+            alerts = [hint]
 
         # The status bar is deprioritized: only repaint it on a full render, when
         # the throttle interval has elapsed, or when an alert change forces it.
@@ -2724,6 +2872,7 @@ class EinkTerminal:
             and overlay is None
             and not self._split_view
             and not self._show_refresh_hud   # HUD repaints a corner each frame
+            and not self._copy_active        # copy-mode highlight needs a full repaint
             and start_row == self._last_start_row
         )
 
@@ -2774,6 +2923,7 @@ class EinkTerminal:
                 overlay=overlay,
                 tab_bar=tab_bar,
                 bar_config=self._bar_config,
+                select=self._copy_render_range() if self._copy_active else None,
                 cursor_style=self._cursor_style,
             )
             # Overlay split-view sidebar
@@ -3054,6 +3204,7 @@ class EinkTerminal:
                         data = self._handle_palette_key(data)
                         data = self._handle_clipboard_key(data)
                         data = self._handle_sshpick_key(data)
+                        data = self._handle_copy_key(data)
                         if data:
                             pty_dest = self._get_focused_pty()
                             if pty_dest is not None:
@@ -3105,6 +3256,7 @@ class EinkTerminal:
                     data = self._handle_palette_key(data)
                     data = self._handle_clipboard_key(data)
                     data = self._handle_sshpick_key(data)
+                    data = self._handle_copy_key(data)
                     if data:
                         pty_dest = self._get_focused_pty()
                         if pty_dest is not None:
@@ -3129,6 +3281,10 @@ class EinkTerminal:
                             tab.stream.feed(chunk)
                         if tab_i == self._active_tab and not in_screensaver:
                             self._last_activity = now
+                            has_pending = True
+                        elif tab_i != self._active_tab and chunk and not tab.activity:
+                            tab.activity = True
+                            self._status_force = True   # show the bullet promptly
                             has_pending = True
                 except OSError:
                     if tab_i == self._active_tab:

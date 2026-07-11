@@ -58,13 +58,21 @@ python eink_terminal.py         # terminal emulator, live on Pi hardware
 | `src/preview_server.py` | HTTP server: mirrors the display image over LAN, accepts remote/mobile keyboard input into the PTY, serves the on-device settings editor |
 
 Hotkeys: F1 SSH picker, F2 close tab, Ctrl+T new tab, Ctrl+Left/Right switch
-tabs, F3 kill process, F4 service manager, F5 power menu, F6 command palette
-(includes "Rename tab"), F7 dark mode, F8 clipboard, F9/F12 font size, F10
-full refresh, F11 switch to stats dashboard, PgUp/PgDn scroll, Ctrl+F
-scrollback search, Ctrl+\ toggle split pane (left/right), Ctrl+] swap
-split-pane focus, Ctrl+/ help overlay (lists every hotkey; ↑↓ to browse,
-Enter runs the selected one, Esc closes — see `_HELP_ITEMS` /
-`_run_help_action` in `src/eink_terminal_app.py`).
+tabs, Alt+1..9 jump to tab N, F3 kill process, F4 service manager, F5 power
+menu, F6 command palette (includes "Rename tab"), F7 dark mode, F8 clipboard,
+F9/F12 font size, F10 full refresh, F11 switch to stats dashboard, PgUp/PgDn
+scroll, Ctrl+F scrollback search, Ctrl+\ toggle split pane (left/right),
+Ctrl+] swap split-pane focus, Ctrl+Space copy mode (arrows move a selection
+cursor over the visible screen, Space marks the anchor, Enter yanks the
+range — or the whole line with no anchor — into the F8 clipboard and beams
+it to a QR for phone copy, Esc cancels; see `_toggle_copy_mode` /
+`_handle_copy_key` in `src/eink_terminal_app.py`), Ctrl+/ help overlay (lists
+every hotkey; ↑↓ to browse, Enter runs the selected one, Esc closes — see
+`_HELP_ITEMS` / `_run_help_action` in `src/eink_terminal_app.py`).
+
+Background tabs that produce output while you're on another tab get flagged
+in the status-bar tab chip as `•N` (e.g. `[2/3 build] •4`) until you switch
+to them — see `_Tab.activity` / `_tab_indicator` in `src/eink_terminal_app.py`.
 
 Idle behavior (all configurable, `terminal_*` keys in `config/config.yaml`):
 panel deep-sleep → screensaver → **idle reset** (kills and respawns the
