@@ -58,6 +58,11 @@ def make_app():
         app._prompt_show_git = cfg['terminal_prompt_show_git']
         app._prompt_symbol = cfg['terminal_prompt_symbol']
         app._start_dir_pref = cfg['terminal_start_dir']
+        app._log_enabled = cfg.get('terminal_log_enabled', False)
+        app._log_dir = cfg.get('terminal_log_dir', '') or '/tmp/eink-test-logs'
+        app._log_max_bytes = cfg.get('terminal_log_max_bytes', 0) or 1_000_000
+        app._log_max_files = cfg.get('terminal_log_max_files', 0) or 40
+        app._tab_log_seq = 0
         app._child_pid = None
         app._settings_pending = {}
         app._settings_idx = 0

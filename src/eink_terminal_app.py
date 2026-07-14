@@ -10,6 +10,10 @@ Features:
   - Alert overlays: system alerts (high CPU, low disk, SSH logins) appear in
     the status bar without covering terminal content
   - Split view: 600px terminal + 200px live stats sidebar
+  - Session logging: optionally persist each tab's output (ANSI-stripped) to
+    a rotating file on disk, surviving idle-reset/shell-exit (config:
+    terminal_log_enabled, terminal_log_dir, terminal_log_max_bytes,
+    terminal_log_max_files) — see src/session_logger.py
 
 On-display config editor:
   Open it by typing `settings` (or `eink`) at the shell prompt, or via F6 →
@@ -72,6 +76,7 @@ from sd_watchdog import Watchdog
 from preview_server import start_if_enabled as _start_preview
 from preview_server import _save_config_values
 from evdev_input import EvdevKeyboard, find_keyboard
+from session_logger import TabLogger
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +98,7 @@ class _Tab:
     pane_focus: int = 0    # 0 = primary (left), 1 = secondary (right)
     split_dir: str = ''    # 'h' = left/right split; '' = no split
     activity: bool = False  # produced output while in the background, unseen
+    logger: 'TabLogger' = None  # optional rotating on-disk session log
 
 
 _RENDER_DEBOUNCE  = 0.02   # seconds — lower now that hw writes are async
@@ -391,6 +397,16 @@ class EinkTerminal:
         # Where new shells start: 'home', 'root', 'last' (resume previous dir),
         # or an explicit path. 'last' is persisted to data/last_cwd.txt.
         self._start_dir_pref = config.get('terminal_start_dir', 'home')
+
+        # Session logging: persist each tab's output (ANSI stripped) to a
+        # rotating file under _log_dir, so scrollback survives idle-reset /
+        # shell-exit and can be grepped later. Off by default.
+        self._log_enabled   = config.get('terminal_log_enabled', False)
+        self._log_dir       = (config.get('terminal_log_dir', '')
+                               or os.path.join(_REPO_ROOT, 'data', 'terminal_logs'))
+        self._log_max_bytes = int(config.get('terminal_log_max_bytes', 0) or 1_000_000)
+        self._log_max_files = int(config.get('terminal_log_max_files', 0) or 40)
+        self._tab_log_seq   = 0
 
         # tmux
         self._use_tmux     = config.get('terminal_use_tmux', False) and bool(shutil.which('tmux'))
@@ -1179,6 +1195,16 @@ class EinkTerminal:
             indicator += ' •' + ','.join(busy)
         return indicator
 
+    def _make_tab_logger(self):
+        """Return a fresh TabLogger for a newly spawned tab, or None if
+        terminal_log_enabled is off."""
+        if not self._log_enabled:
+            return None
+        self._tab_log_seq += 1
+        return TabLogger(self._log_dir, f'tab{self._tab_log_seq}',
+                          max_bytes=self._log_max_bytes,
+                          max_files=self._log_max_files)
+
     def _sync_active_tab(self):
         if self._tabs and 0 <= self._active_tab < len(self._tabs):
             self._tabs[self._active_tab].scroll_pages = self._scroll_pages
@@ -1194,7 +1220,7 @@ class EinkTerminal:
         self._spawn_shell(tmux_session=new_session)
         self._tabs.append(_Tab(screen=self._screen, stream=self._stream,
                                pty_master=self._pty_master, child_pid=self._child_pid,
-                               tmux_session=new_session))
+                               tmux_session=new_session, logger=self._make_tab_logger()))
         self._active_tab = len(self._tabs) - 1
         self._scroll_pages = 0
         if cmd:
@@ -1208,6 +1234,8 @@ class EinkTerminal:
         if len(self._tabs) <= 1:
             return
         t = self._tabs[self._active_tab]
+        if t.logger:
+            t.logger.close()
         if t.child_pid:
             try: os.kill(t.child_pid, signal.SIGTERM)
             except (ProcessLookupError, OSError): pass
@@ -2435,6 +2463,8 @@ class EinkTerminal:
         logger.info('Idle reset — starting a fresh shell')
         # Tear down every tab's child + any per-tab tmux sessions.
         for tab in self._tabs:
+            if tab.logger:
+                tab.logger.close()
             if tab.child_pid:
                 try: os.kill(tab.child_pid, signal.SIGTERM)
                 except (ProcessLookupError, OSError): pass
@@ -2465,7 +2495,7 @@ class EinkTerminal:
         self._spawn_shell()
         self._tabs = [_Tab(screen=self._screen, stream=self._stream,
                            pty_master=self._pty_master, child_pid=self._child_pid,
-                           tmux_session=self._tmux_session)]
+                           tmux_session=self._tmux_session, logger=self._make_tab_logger())]
         self._active_tab = 0
         self._scroll_pages = 0
         if render:
@@ -2994,7 +3024,8 @@ class EinkTerminal:
 
         # Wrap initial shell in a Tab
         self._tabs = [_Tab(screen=self._screen, stream=self._stream,
-                           pty_master=self._pty_master, child_pid=self._child_pid)]
+                           pty_master=self._pty_master, child_pid=self._child_pid,
+                           logger=self._make_tab_logger())]
         self._active_tab = 0
 
         if self._split_view:
@@ -3279,6 +3310,8 @@ class EinkTerminal:
                             if tab_i == self._active_tab and self._scroll_pages > 0 and not in_screensaver:
                                 self._snap_to_live()
                             tab.stream.feed(chunk)
+                            if tab.logger:
+                                tab.logger.write(chunk)
                         if tab_i == self._active_tab and not in_screensaver:
                             self._last_activity = now
                             has_pending = True
