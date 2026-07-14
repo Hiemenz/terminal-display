@@ -13,7 +13,7 @@ def test_zsh_prompt_escapes(make_app):
 
 
 def test_zsh_dotdir_written(make_app, tmp_path, monkeypatch):
-    import eink_terminal_app as m
+    import shell_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     app = make_app(terminal_prompt_custom=True)
     d = app._write_zsh_dotdir()
@@ -43,7 +43,7 @@ def test_fish_prompt_is_valid(make_app):
 
 
 def test_prompt_command_picks_shell(make_app, tmp_path, monkeypatch):
-    import eink_terminal_app as m
+    import shell_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     app = make_app(terminal_prompt_custom=True)
 

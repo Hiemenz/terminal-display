@@ -2,8 +2,7 @@
 import pyte
 import pytest
 
-from eink_terminal_app import _Tab, _CTRL_SLASH, _HELP_ITEMS
-
+from terminal_state import _CTRL_SLASH, _HELP_ITEMS, _Tab
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

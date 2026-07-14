@@ -28,14 +28,14 @@ def test_blank_defaults_home(make_app):
 
 
 def test_last_falls_back_home_when_unset(make_app, tmp_path, monkeypatch):
-    import eink_terminal_app as m
+    import shell_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     app = make_app(terminal_start_dir='last')
     assert app._resolve_start_dir() == os.path.expanduser('~')
 
 
 def test_last_reads_saved_dir(make_app, tmp_path, monkeypatch):
-    import eink_terminal_app as m
+    import shell_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     target = tmp_path / 'project'
     target.mkdir()
@@ -47,7 +47,7 @@ def test_last_reads_saved_dir(make_app, tmp_path, monkeypatch):
 
 
 def test_last_ignores_stale_missing_dir(make_app, tmp_path, monkeypatch):
-    import eink_terminal_app as m
+    import shell_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     data = tmp_path / 'data'
     data.mkdir()
@@ -57,7 +57,7 @@ def test_last_ignores_stale_missing_dir(make_app, tmp_path, monkeypatch):
 
 
 def test_save_then_read_roundtrip_non_tmux(make_app, tmp_path, monkeypatch):
-    import eink_terminal_app as m
+    import shell_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     # Non-tmux path reads /proc/<pid>/cwd; point it at our own process.
     app = make_app(terminal_use_tmux=False, terminal_start_dir='last')

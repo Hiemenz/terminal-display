@@ -11,6 +11,8 @@ fires. This module sends those pings.
 It no-ops cleanly when ``NOTIFY_SOCKET`` is unset (dev machines, ``--local``,
 anything not launched under systemd), so it is always safe to construct and call.
 """
+from __future__ import annotations
+
 import logging
 import os
 import socket

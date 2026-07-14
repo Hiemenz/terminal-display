@@ -8,12 +8,14 @@ Two usage modes:
   display_image(img)         — legacy one-shot full refresh (stats dashboard)
   EinkDriver(local)          — persistent driver for terminal mode with partial refresh
 """
-import os
-import time
-import platform
 import logging
+import os
+import platform
 import queue as _queue
 import threading
+import time
+from typing import Any, Optional
+
 from PIL import Image
 
 try:
@@ -22,18 +24,16 @@ try:
 except ImportError:
     _HAS_NUMPY = False
 
-from refresh_tracker import needs_full_refresh, record_full_refresh, record_partial_refresh
+from refresh_tracker import record_full_refresh, record_partial_refresh
 
 _IS_MAC = platform.system() == 'Darwin'
 
+epd7in5_V2: Any = None
 if not _IS_MAC:
     try:
         from waveshare_epd import epd7in5_V2
     except Exception as e:
         logging.warning('Could not import waveshare_epd: %s', e)
-        epd7in5_V2 = None
-else:
-    epd7in5_V2 = None
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DEFAULT_OUTPUT = os.path.join(_REPO_ROOT, 'output', 'terminal.bmp')
@@ -124,11 +124,11 @@ class EinkDriver:
         self._du_frames_text    = int(du_frames_text)
         self._du_frames_heavy   = int(du_frames_heavy)
         self._du_heavy_threshold = du_heavy_threshold
-        self._du_frames_loaded  = None   # frame count currently in the DU LUT
+        self._du_frames_loaded: Optional[int] = None  # frame count currently in the DU LUT
 
         # Live refresh counters for the debug HUD (read by the app via stats()).
-        self._stats = {'partial': 0, 'region': 0, 'full': 0,
-                       'bytes': 0, 'last_flash_mono': 0.0, 'du_frames': 0}
+        self._stats: dict = {'partial': 0, 'region': 0, 'full': 0,
+                             'bytes': 0, 'last_flash_mono': 0.0, 'du_frames': 0}
 
         # Ghost clearing: once `partial_refresh_limit` partials have stacked up,
         # flash just the rows that changed (the portion that changed) rather than
@@ -151,15 +151,15 @@ class EinkDriver:
         self._cell_h = 0
 
         # Hardware state — owned exclusively by the worker thread (no locks).
-        self._epd          = None
+        self._epd: Any = None
         self._partial_ready = False
-        self._prev_buf      = None
+        self._prev_buf: Optional[bytearray] = None
         self._hw_sleeping   = True    # assume display is sleeping on startup; forces full init()
 
         # Worker communication.
-        self._q            = _queue.Queue()       # ordered task queue
+        self._q: _queue.Queue = _queue.Queue()    # ordered task queue
         self._partial_lock = threading.Lock()
-        self._pending_partial = None              # latest partial frame (replace-on-write)
+        self._pending_partial: Optional[Image.Image] = None  # latest partial frame (replace-on-write)
 
         if not (local or _IS_MAC):
             threading.Thread(target=self._worker, daemon=True, name='eink-hw').start()
@@ -426,7 +426,7 @@ class EinkDriver:
             snap_y = self._cell_h > 0
             snap_x = self._cell_w > 0
 
-            cell_row_x = {}  # cell_row -> [x_lo, x_hi]
+            cell_row_x: dict = {}  # cell_row -> [x_lo, x_hi]
             for prow, (x_lo, x_hi) in row_x.items():
                 cr = prow // cell_h if snap_y else prow
                 if cr in cell_row_x:
@@ -491,6 +491,7 @@ class EinkDriver:
                     src = row * row_bytes + x_b0
                     band[out:out + band_w] = buf[src:src + band_w]
                     if old_band is not None:
+                        assert old_prev is not None
                         old_band[out:out + band_w] = old_prev[src:src + band_w]
                     out += band_w
                 patches.append((band, old_band, x_start, y_min, x_end, y_max))
@@ -512,7 +513,7 @@ class EinkDriver:
             self._partial_ready = False
             self._prev_buf      = None
 
-    def _change_y_from_bufs(self, old, new) -> tuple:
+    def _change_y_from_bufs(self, old, new) -> Optional[tuple]:
         """Pixel-row span (y_min, y_max) of bytes that differ between two frame
         buffers, or None if identical / not comparable."""
         epd = self._epd

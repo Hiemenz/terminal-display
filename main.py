@@ -11,16 +11,16 @@ Flags:
     --local   Skip e-ink push; just save the image (useful on macOS)
     --config  Path to config.yaml
 """
-import sys
-import os
 import argparse
 import logging
+import os
+import platform
 import queue as _queue
 import select
 import subprocess
+import sys
 import threading
 import time
-import platform
 from datetime import datetime
 
 # Route app logs (src/*.py use logging) to stderr → journald.
@@ -32,19 +32,19 @@ logging.basicConfig(
 # Ensure src/ is on the path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from config_loader import load_config, add_config_arg
-from system_stats import collect, collect_time
+import socket
+
 import stats_history
-from refresh_schedule import effective_intervals
-from render import render, render_output, render_screensaver
+from config_loader import add_config_arg, load_config
 from display import send_to_display
 from display_eink import EinkDriver
+from preview_server import get_screensaver_path
+from preview_server import start_if_enabled as _start_preview
+from refresh_schedule import effective_intervals
 from refresh_tracker import needs_full_refresh
+from render import render, render_output, render_screensaver
 from sd_watchdog import Watchdog
-from util import output_path
-from preview_server import start_if_enabled as _start_preview, get_screensaver_path
-
-import socket
+from system_stats import collect, collect_time
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 _OUTPUT_IMAGE = os.path.join(_REPO_ROOT, 'output', 'terminal.bmp')
@@ -88,8 +88,8 @@ def _keyboard_watcher(switch_event: threading.Event, stop_event: threading.Event
     Ctrl+C stops the program. Silently exits if stdin is not a tty (e.g. systemd).
     """
     try:
-        import tty
         import termios
+        import tty
         fd = sys.stdin.fileno()
         if not os.isatty(fd):
             return
@@ -119,8 +119,9 @@ def _evdev_watcher(switch_event: threading.Event, stop_event: threading.Event, c
     Does NOT grab the device — terminal mode will grab it later.
     """
     try:
-        from evdev_input import find_keyboard
         import evdev
+
+        from evdev_input import find_keyboard
         kbd_path = config.get('terminal_keyboard_device', 'auto')
         dev = find_keyboard(kbd_path if kbd_path != 'auto' else '')
         if dev is None:

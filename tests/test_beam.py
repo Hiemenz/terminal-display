@@ -1,5 +1,5 @@
 """Tests for beam-to-phone (preview server side)."""
-from preview_server import _render_beam_page, PreviewServer
+from preview_server import PreviewServer, _render_beam_page
 
 
 def test_beam_page_escapes_and_includes_text():

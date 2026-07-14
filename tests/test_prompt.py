@@ -33,14 +33,14 @@ def test_ps1_host_only_has_no_leading_at(make_app):
 
 
 def test_prompt_command_none_when_disabled(make_app, tmp_path, monkeypatch):
-    import eink_terminal_app as m
+    import shell_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     app = make_app(terminal_prompt_custom=False)
     assert app._build_prompt_command() is None
 
 
 def test_rcfile_written_and_contents(make_app, tmp_path, monkeypatch):
-    import eink_terminal_app as m
+    import shell_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     app = make_app(terminal_prompt_custom=True)
     path = app._write_bash_rcfile()
@@ -56,7 +56,7 @@ def test_rcfile_written_and_contents(make_app, tmp_path, monkeypatch):
 
 
 def test_rcfile_quotes_single_quote_in_symbol(make_app, tmp_path, monkeypatch):
-    import eink_terminal_app as m
+    import shell_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     app = make_app(terminal_prompt_custom=True, terminal_prompt_symbol="x'y")
     path = app._write_bash_rcfile()
@@ -69,7 +69,7 @@ def test_rcfile_quotes_single_quote_in_symbol(make_app, tmp_path, monkeypatch):
 def test_rcfile_sets_prompt_when_sourced(make_app, tmp_path, monkeypatch):
     """Integration: sourcing the rcfile in bash yields the expected expanded
     prompt (user@host … symbol). Run in tmp_path so there's no git branch."""
-    import eink_terminal_app as m
+    import shell_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     app = make_app(terminal_prompt_custom=True, terminal_prompt_show_git=False)
     path = app._write_bash_rcfile()

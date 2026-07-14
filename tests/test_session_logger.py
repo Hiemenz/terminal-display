@@ -4,11 +4,9 @@ import os
 import time
 
 import pyte
-import pytest
 
 from eink_terminal_app import _Tab
 from session_logger import TabLogger, _AnsiStripper, _safe_label
-
 
 # ── _AnsiStripper ────────────────────────────────────────────────────────────
 

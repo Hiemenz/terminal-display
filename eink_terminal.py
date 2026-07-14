@@ -21,11 +21,11 @@ Typeable commands (run from the shell):
     settings / eink   Open the on-display config editor
     clear-eink        Clear the screen + e-ink ghosting (keeps the shell)
 """
-import sys
-import os
 import argparse
 import logging
+import os
 import platform
+import sys
 
 # Route app logs (src/*.py use logging) to stderr → journald. Without this the
 # logger has no handler and screensaver/keyboard/error events are invisible.
@@ -36,7 +36,7 @@ logging.basicConfig(
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
 
-from config_loader import load_config, add_config_arg
+from config_loader import add_config_arg, load_config
 from eink_terminal_app import EinkTerminal
 
 
