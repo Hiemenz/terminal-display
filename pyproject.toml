@@ -26,6 +26,7 @@ dev = [
     "pytest (>=8.3,<9.0)",
     "ruff (>=0.8,<1.0)",
     "mypy (>=1.13,<2.0)",
+    "types-PyYAML (>=6.0.12,<7.0.0) ; python_version >= '3.10'",
 ]
 
 [tool.ruff]
