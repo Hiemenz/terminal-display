@@ -56,6 +56,7 @@ python eink_terminal.py         # terminal emulator, live on Pi hardware
 | `src/terminal_renderer.py` | Renders the `pyte` screen buffer to a PIL image; draws the ambient URL QR overlay, tab bar |
 | `src/alert_monitor.py` | Polls for system conditions, feeds short-lived alerts into the terminal status bar |
 | `src/preview_server.py` | HTTP server: mirrors the display image over LAN, accepts remote/mobile keyboard input into the PTY, serves the on-device settings editor |
+| `src/session_logger.py` | `TabLogger` — optional rotating, ANSI-stripped on-disk log of a tab's output (`terminal_log_enabled`) |
 
 Hotkeys: F1 SSH picker, F2 close tab, Ctrl+T new tab, Ctrl+Left/Right switch
 tabs, Alt+1..9 jump to tab N, F3 kill process, F4 service manager, F5 power
@@ -73,6 +74,13 @@ every hotkey; ↑↓ to browse, Enter runs the selected one, Esc closes — see
 Background tabs that produce output while you're on another tab get flagged
 in the status-bar tab chip as `•N` (e.g. `[2/3 build] •4`) until you switch
 to them — see `_Tab.activity` / `_tab_indicator` in `src/eink_terminal_app.py`.
+
+Session logging (`terminal_log_enabled`, off by default): each tab's output
+is stripped of ANSI escape codes and appended to a rotating file under
+`terminal_log_dir` (default `data/terminal_logs/`), so a long-running build
+or `claude` session's scrollback survives idle-reset or a shell crash and
+can be grepped after the fact. See `src/session_logger.py` (`TabLogger`) and
+`EinkTerminal._make_tab_logger`.
 
 Idle behavior (all configurable, `terminal_*` keys in `config/config.yaml`):
 panel deep-sleep → screensaver → **idle reset** (kills and respawns the

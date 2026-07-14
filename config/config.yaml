@@ -85,6 +85,15 @@ terminal_scrollback: 500
 # Cursor style: 'block' (filled reverse-video cell) or 'underline' (thin bar).
 terminal_cursor_style: block
 
+# Session logging: persist each tab's output (ANSI escape codes stripped, so
+# it's plain greppable text) to a rotating file under terminal_log_dir. Off
+# by default. Useful for capturing a long-running build/claude session that
+# would otherwise be lost to idle-reset or a shell crash.
+terminal_log_enabled: false
+terminal_log_dir: ""              # empty = data/terminal_logs
+terminal_log_max_bytes: 1000000   # rotate a tab's active log after ~1MB
+terminal_log_max_files: 40        # oldest *.log pruned across all tabs
+
 # ── Custom shell prompt (PS1) ────────────────────────────────────────────────
 # When true, the app injects a PS1 into the shell (after your rc loads, so it
 # overrides it) built from the parts toggled below. Leave false to keep your
