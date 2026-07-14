@@ -4,13 +4,15 @@ Collect system statistics for display.
 Returns a dict with CPU, memory, disk, network, load, uptime, and top processes.
 Requires: psutil
 """
+from __future__ import annotations
+
 import json
 import os
-import time
 import platform
 import shutil
 import socket
 import subprocess
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta
@@ -20,12 +22,12 @@ import psutil
 # Cache for _get_pending_updates: polling apt's package lists isn't free, and
 # the answer doesn't change faster than an `apt update` runs, so we re-check
 # on a slow independent timer rather than every collect() cycle.
-_updates_cache = {'count': None, 'checked_at': 0.0}
+_updates_cache: dict = {'count': None, 'checked_at': 0.0}
 
 # Cache for _get_ci_status: the GitHub Actions API is rate-limited and a
 # build's conclusion doesn't change between polls, so it's checked on its
 # own slow timer rather than every collect() cycle.
-_ci_cache = {'status': None, 'checked_at': 0.0}
+_ci_cache: dict = {'status': None, 'checked_at': 0.0}
 
 
 def _get_uptime() -> str:

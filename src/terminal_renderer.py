@@ -10,8 +10,14 @@ HQ rendering (hq=True, default):
 """
 import os
 from datetime import datetime
-from PIL import Image, ImageDraw, ImageFont
+from typing import Union
+
 import pyte
+from PIL import Image, ImageDraw, ImageFont
+
+# PIL's FreeTypeFont and (bitmap-fallback) ImageFont aren't related by
+# inheritance in typeshed, but our font helper can return either.
+_Font = Union[ImageFont.FreeTypeFont, ImageFont.ImageFont]
 
 try:
     import qrcode as _qrcode
@@ -32,7 +38,7 @@ _qr_cache:   dict = {}  # url -> PIL Image, generated once per URL
 
 # ── Font helpers ──────────────────────────────────────────────────────────────
 
-def _find_mono_font(font_path: str, size: int) -> ImageFont.ImageFont:
+def _find_mono_font(font_path: str, size: int) -> _Font:
     key = (font_path, size)
     if key in _font_cache:
         return _font_cache[key]
@@ -61,7 +67,7 @@ def _find_mono_font(font_path: str, size: int) -> ImageFont.ImageFont:
     for fp in candidates:
         if os.path.exists(fp):
             try:
-                font = ImageFont.truetype(fp, size)
+                font: _Font = ImageFont.truetype(fp, size)
                 _font_cache[key] = font
                 return font
             except Exception:
@@ -85,17 +91,17 @@ def _in_select_range(row_idx: int, col_idx: int, select: tuple) -> bool:
     return True
 
 
-def _char_size(font: ImageFont.ImageFont) -> tuple:
+def _char_size(font: _Font) -> tuple:
     try:
         cw = int(font.getlength('M'))
     except AttributeError:
         try:
-            cw = font.getbbox('M')[2]
+            cw = int(font.getbbox('M')[2])
         except Exception:
             cw = 8
     try:
         bbox = font.getbbox('Mgjpq|')
-        ch = (bbox[3] - min(bbox[1], 0)) + 2
+        ch = int(bbox[3] - min(bbox[1], 0)) + 2
     except Exception:
         ch = int(cw * 2)
     return max(cw, 4), max(ch, 8)
@@ -141,7 +147,6 @@ def render_screen(
     scale = 2 if hq else 1
     W_s  = W * scale
     H_s  = H * scale
-    TH_s = TERMINAL_H * scale
     tw_s = terminal_width * scale
 
     bg = 0 if dark_mode else 255
@@ -213,7 +218,7 @@ def render_screen(
 
     # ── HQ downsample + hard threshold ───────────────────────────────────────
     if hq:
-        img = img.resize((W, H), Image.LANCZOS)
+        img = img.resize((W, H), Image.Resampling.LANCZOS)
         # Hard threshold: push anti-aliased gray edges to clean black or white.
         # 128 is neutral; nudge slightly toward white to preserve thin strokes.
         img = img.point(lambda p: 255 if p > 112 else 0)
@@ -249,11 +254,11 @@ def render_tab_bar(img: Image.Image, tabs_info: list, dark_mode: bool = True):
         max_w = W // max(len(tabs_info), 1)
         while len(label) > 4:
             try:    lw = int(font.getlength(label))
-            except: lw = len(label) * 7
+            except Exception: lw = len(label) * 7
             if lw <= max_w: break
             label = label[:-3] + '  '
         try:    chip_w = int(font.getlength(label))
-        except: chip_w = len(label) * 7
+        except Exception: chip_w = len(label) * 7
         if is_active:
             draw.rectangle([x, 0, x + chip_w - 1, TAB_BAR_H - 1], fill=fg)
             draw.rectangle([x + 1, 1, x + chip_w - 2, TAB_BAR_H - 2], fill=bg)
@@ -264,7 +269,7 @@ def render_tab_bar(img: Image.Image, tabs_info: list, dark_mode: bool = True):
         if i < len(tabs_info) - 1:
             draw.text((x, pad_y), '│', font=font, fill=fg)
             try:    x += int(font.getlength('│'))
-            except: x += 7
+            except Exception: x += 7
 
 
 def _draw_url_qr(img: Image.Image, url: str, terminal_width: int = W):

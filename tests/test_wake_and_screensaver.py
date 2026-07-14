@@ -1,5 +1,4 @@
 """Tests for screensaver robustness and SSH/tmux wake detection."""
-import time
 import types
 
 import pyte

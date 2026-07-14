@@ -4,15 +4,16 @@ Thin CLI wrapper around display_eink.
 Standalone:
     python src/display.py --image output/terminal.bmp [--config PATH]
 """
+import argparse
 import os
 import sys
-import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PIL import Image
+
+from config_loader import add_config_arg
 from display_eink import display_image
-from config_loader import load_config, add_config_arg
 
 
 def send_to_display(image_path):

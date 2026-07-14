@@ -1,6 +1,6 @@
 """Tests for the configurable screensaver/deep-sleep timeout."""
-from eink_terminal_app import _SETTINGS_SCHEMA, _SETTINGS_LIVE
 from config_loader import load_config
+from terminal_state import _SETTINGS_LIVE, _SETTINGS_SCHEMA
 
 
 def test_sleep_minutes_in_on_display_editor():

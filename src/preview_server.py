@@ -25,6 +25,8 @@ Usage:
   if server:
       text = server.input_queue.get_nowait()
 """
+from __future__ import annotations
+
 import hmac
 import io
 import json
@@ -40,11 +42,12 @@ import tempfile
 import threading
 import time
 import urllib.parse
-import yaml
 from datetime import datetime
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import List
+
+import yaml
 
 from util import data_path
 
@@ -658,7 +661,7 @@ def _crop_to_display(img):
     scale = max(_DISPLAY_W / src_w, _DISPLAY_H / src_h)
     new_w = round(src_w * scale)
     new_h = round(src_h * scale)
-    img = img.resize((new_w, new_h), Image.LANCZOS)
+    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
     left = (new_w - _DISPLAY_W) // 2
     top = (new_h - _DISPLAY_H) // 2
     return img.crop((left, top, left + _DISPLAY_W, top + _DISPLAY_H))
@@ -1586,6 +1589,7 @@ def _get_wifi_info() -> dict:
     wifi_str = f'WIFI:T:WPA;S:{ssid};;'
     try:
         import io as _io
+
         import qrcode as _qr
         qr = _qr.QRCode(error_correction=_qr.constants.ERROR_CORRECT_L, box_size=5, border=2)
         qr.add_data(wifi_str)

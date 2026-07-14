@@ -3,9 +3,17 @@ Render system stats to an 800x480 PIL image.
 
 Entry point: render(stats, config) -> PIL.Image
 """
+from __future__ import annotations
+
 import os
 import re
+from typing import Union
+
 from PIL import Image, ImageDraw, ImageFont
+
+# PIL's FreeTypeFont and (bitmap-fallback) ImageFont aren't related by
+# inheritance in typeshed, but our font helpers can return either.
+_Font = Union[ImageFont.FreeTypeFont, ImageFont.ImageFont]
 
 _ANSI_RE = re.compile(r'\x1b\[[0-9;]*[A-Za-z]|\x1b.')
 
@@ -34,7 +42,7 @@ CARD_RADIUS = 10  # card corner radius
 CARD_INSET = 14   # horizontal content inset inside a card
 
 
-def _find_font(path: str, size: int) -> ImageFont.ImageFont:
+def _find_font(path: str, size: int) -> _Font:
     """Try provided path, then common monospace fonts, then PIL default."""
     candidates = []
     if path:
@@ -56,7 +64,7 @@ def _find_font(path: str, size: int) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def _find_sans(path: str, size: int, bold: bool = False) -> ImageFont.ImageFont:
+def _find_sans(path: str, size: int, bold: bool = False) -> _Font:
     """Sans-serif UI font for the dashboard chrome (headings, metrics, clock).
     Falls back to the mono stack, then the PIL default."""
     if bold:
@@ -97,7 +105,7 @@ def _bar(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
 
 
 def _card_frame(draw: ImageDraw.ImageDraw, x: int, y0: int, w: int, y_end: int,
-                title: str, font: ImageFont.ImageFont, fg: int, bg: int):
+                title: str, font: _Font, fg: int, bg: int):
     """Card outline + filled title chip (fieldset-legend style).
 
     Content is drawn first, between y0 + CHIP_H and y_end; the frame and chip
@@ -121,6 +129,7 @@ def _fmt_rate(bps: float) -> str:
         if v < 1024 or unit == 'GB':
             return f"{v:.0f}{unit}/s" if unit == 'B' else f"{v:.1f}{unit}/s"
         v /= 1024
+    raise AssertionError('unreachable: loop always returns on GB')
 
 
 def _fmt_rate_short(bps: float) -> str:
@@ -130,6 +139,7 @@ def _fmt_rate_short(bps: float) -> str:
         if v < 1024 or unit == 'G':
             return f"{v:.0f}{unit}" if unit in ('B', 'K') else f"{v:.1f}{unit}"
         v /= 1024
+    raise AssertionError('unreachable: loop always returns on G')
 
 
 def _sparkline(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
@@ -154,7 +164,7 @@ def _sparkline(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
 
 
 def _trend_row(draw: ImageDraw.ImageDraw, x: int, y: int, w: int, vals: list,
-               fg: int, font: ImageFont.ImageFont, fmt, win_min: int,
+               fg: int, font: _Font, fmt, win_min: int,
                fixed_max: float = None) -> int:
     """Sparkline on the left + min/avg/max badge on the right. Returns new y."""
     spark_h = 16
@@ -214,7 +224,7 @@ def render(stats: dict, config: dict) -> Image.Image:
     platform_str = stats.get('platform', '')
 
     d.text((W // 2, y), time_str, font=f_time, fill=fg, anchor='ma')
-    time_h = f_time.getbbox(time_str)[3]
+    time_h = int(f_time.getbbox(time_str)[3])
     d.text((W // 2, y + time_h + 6), date_str, font=f_date, fill=fg, anchor='ma')
 
     # Left block: hostname + platform; right block: uptime + IP.
@@ -238,7 +248,7 @@ def render(stats: dict, config: dict) -> Image.Image:
         d.text((W - PAD, y + 72), f"CI {ci_status.replace('_', ' ')}",
                font=f_small, fill=fg, anchor='ra')
 
-    y += time_h + 6 + f_date.getbbox('Mg')[3] + 8
+    y += time_h + 6 + int(f_date.getbbox('Mg')[3]) + 8
     d.line([(PAD, y), (W - PAD, y)], fill=fg, width=1)
     y += SECTION_GAP
 
@@ -276,6 +286,7 @@ def render(stats: dict, config: dict) -> Image.Image:
             cy = _trend_row(d, cx, cy, cw, hist['cpu'], fg, f_small,
                             lambda v: f"{v:.0f}%", hist_min, fixed_max=100)
         if show_load:
+            assert load is not None
             d.text((cx, cy), f"load  {load[0]:.2f}  ·  {load[1]:.2f}  ·  {load[2]:.2f}",
                    font=f_small, fill=fg)
             cy += 18
@@ -287,6 +298,7 @@ def render(stats: dict, config: dict) -> Image.Image:
         y0 = ly
         cx = lx + CARD_INSET
         cy = y0 + CHIP_H + 6
+        assert load is not None
         d.text((cx, cy), f"1m {load[0]:.2f}   5m {load[1]:.2f}   15m {load[2]:.2f}",
                font=f_body, fill=fg)
         cy += ROW_H
@@ -353,7 +365,6 @@ def render(stats: dict, config: dict) -> Image.Image:
             except Exception:
                 qr_size = 0
 
-        text_w = cw - (qr_size + 10 if qr_size else 0)
         d.text((cx, cy), net.get('interface', '?'), font=f_metric_s, fill=fg)
         cy += 30
         d.text((cx, cy), f"↑ {net.get('bytes_sent_str', '?')} sent", font=f_body, fill=fg)
@@ -403,7 +414,7 @@ def _crop_to_fit(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
     scale = max(target_w / src_w, target_h / src_h)
     new_w = round(src_w * scale)
     new_h = round(src_h * scale)
-    img = img.resize((new_w, new_h), Image.LANCZOS)
+    img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
     left = (new_w - target_w) // 2
     top = (new_h - target_h) // 2
     return img.crop((left, top, left + target_w, top + target_h))
@@ -473,7 +484,7 @@ def render_text_message(text: str, label: str, config: dict) -> Image.Image:
     y = PAD
     if label:
         d.text((PAD, y), label, font=f_label, fill=fg)
-        lh = f_label.getbbox(label)[3] + 4
+        lh = int(f_label.getbbox(label)[3]) + 4
         y += lh
         d.line([(PAD, y), (W - PAD, y)], fill=fg, width=1)
         y += 8

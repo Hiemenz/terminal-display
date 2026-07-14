@@ -1,9 +1,7 @@
 """Tests for Ctrl+T new-tab shortcut and F6-palette tab rename."""
 import pyte
-import pytest
 
-from eink_terminal_app import _Tab, _CTRL_T, _RENAME_TAB, _PALETTE_ACTIONS
-
+from terminal_state import _CTRL_T, _PALETTE_ACTIONS, _RENAME_TAB, _Tab
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

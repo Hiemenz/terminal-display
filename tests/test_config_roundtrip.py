@@ -1,8 +1,8 @@
 """Tests that _save_config_values writes the new keys correctly."""
 import shutil
 
-from preview_server import _save_config_values
 from config_loader import load_config
+from preview_server import _save_config_values
 
 
 def _copy_config(tmp_path):

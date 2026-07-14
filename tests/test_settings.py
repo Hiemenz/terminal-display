@@ -1,6 +1,5 @@
 """Tests for the on-display config editor (Settings overlay)."""
-from eink_terminal_app import (_SETTINGS_SCHEMA, _SETTINGS_OPEN,
-                               _SETTINGS_LIVE, _SETTINGS_SHELL)
+from terminal_state import _SETTINGS_LIVE, _SETTINGS_OPEN, _SETTINGS_SCHEMA, _SETTINGS_SHELL
 
 
 def test_schema_only_editable_types():
@@ -69,7 +68,7 @@ def test_dirty_marker(make_app):
 
 
 def test_live_only_save_applies_without_restart(make_app, monkeypatch):
-    import eink_terminal_app as m
+    import settings_mixin as m
     saved = {}
     monkeypatch.setattr(m, '_save_config_values',
                         lambda path, updates: saved.update(updates))
@@ -94,7 +93,7 @@ def test_live_only_save_applies_without_restart(make_app, monkeypatch):
 
 
 def test_shell_level_save_restarts(make_app, monkeypatch):
-    import eink_terminal_app as m
+    import settings_mixin as m
     monkeypatch.setattr(m, '_save_config_values', lambda path, updates: None)
     calls = []
     monkeypatch.setattr(m.subprocess, 'Popen', lambda *a, **k: calls.append(a))
@@ -107,7 +106,7 @@ def test_shell_level_save_restarts(make_app, monkeypatch):
 
 
 def test_save_with_no_changes_just_closes(make_app, monkeypatch):
-    import eink_terminal_app as m
+    import settings_mixin as m
     calls = []
     monkeypatch.setattr(m.subprocess, 'Popen', lambda *a, **k: calls.append(a))
     app = make_app()

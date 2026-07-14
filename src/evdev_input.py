@@ -5,8 +5,6 @@ Bypasses X11/Wayland so input works even when a desktop is running.
 The device is grabbed exclusively so keystrokes don't also go to the desktop.
 """
 import logging
-import os
-import select
 
 logger = logging.getLogger(__name__)
 

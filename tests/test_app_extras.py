@@ -39,7 +39,7 @@ def test_screen_text_trims_blanks(make_app):
 # ── Snippets ──────────────────────────────────────────────────────────────────
 
 def test_load_snippets(make_app, tmp_path, monkeypatch):
-    import eink_terminal_app as m
+    import palette_help_mixin as m
     monkeypatch.setattr(m, '_REPO_ROOT', str(tmp_path))
     cfg = tmp_path / 'config'
     cfg.mkdir()

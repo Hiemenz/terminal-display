@@ -23,5 +23,55 @@ build-backend = "poetry.core.masonry.api"
 
 [dependency-groups]
 dev = [
-    "pytest (>=8.3,<9.0)"
+    "pytest (>=8.3,<9.0)",
+    "ruff (>=0.8,<1.0)",
+    "mypy (>=1.13,<2.0)",
+    "types-PyYAML (>=6.0.12,<7.0.0) ; python_version >= '3.10'",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+extend-exclude = ["src/waveshare_epd"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+# E501 (line-too-long), E701/E702 (compact one-liners), E402 (sys.path.insert
+# before import) reflect this codebase's existing style, not bugs.
+ignore = ["E501", "E701", "E702", "E402"]
+
+[tool.mypy]
+python_version = "3.9"
+ignore_missing_imports = true
+no_implicit_optional = false
+exclude = ["src/waveshare_epd/"]
+
+[[tool.mypy.overrides]]
+module = "waveshare_epd.*"
+ignore_errors = true
+
+# EinkTerminal is composed from mixins (see eink_terminal_app.py's module
+# docstring) that all operate on one shared `self` — each mixin only
+# defines a slice of the instance attributes, so mypy can't see attributes
+# another mixin (or __init__) sets, and flags every cross-mixin self.foo as
+# attr-defined. That, plus eink_terminal_app.py's own blank-tab-during-spawn
+# pattern (screen/stream/pty_master left None until the shell forks),
+# trips ~250 errors that reflect this class-composition trick, not bugs.
+# A Protocol-based `self: EinkTerminal` annotation on every mixin would fix
+# this but adds meaningful boilerplate for a purely cosmetic mypy gap;
+# ignored here instead.
+[[tool.mypy.overrides]]
+module = [
+    "eink_terminal_app",
+    "shell_mixin",
+    "hotkeys_mixin",
+    "tabs_mixin",
+    "picker_overlays_mixin",
+    "settings_mixin",
+    "palette_help_mixin",
+    "text_actions_mixin",
+    "search_mixin",
+    "split_pane_mixin",
+    "network_mixin",
+]
+ignore_errors = true

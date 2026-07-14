@@ -2,10 +2,8 @@
 import json
 
 import pyte
-import pytest
 
-from eink_terminal_app import _Tab, _CTRL_SPACE, _ALT_DIGITS, _HELP_ITEMS
-
+from terminal_state import _ALT_DIGITS, _CTRL_SPACE, _HELP_ITEMS, _Tab
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

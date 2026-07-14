@@ -1,12 +1,10 @@
 """Tests for idle auto-reset, on-demand clear, graceful shutdown, and shell-exit recovery."""
-import io
-import select
 import types
 
 import pytest
 
-from eink_terminal_app import _Tab
 from config_loader import load_config
+from eink_terminal_app import _Tab
 
 
 def test_shipped_config_default_reset_is_60():
