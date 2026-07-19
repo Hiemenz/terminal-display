@@ -167,6 +167,23 @@ terminal_hq_render: true
 # SSH in from another device, save text here, press F8 to paste.
 terminal_paste_file: ~/eink-paste.txt
 
+# ── Local LLM chat ────────────────────────────────────────────────────────────
+# F6 command palette > "Chat with local LLM" (or Ctrl+N to cycle modes) opens
+# a new tab running src/llm_chat.py, a REPL that talks to a GGUF model
+# on-device via llama-cpp-python — no network calls, no API key.
+terminal_llm_model_path: data/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+terminal_llm_context_size: 4096
+terminal_llm_max_tokens: 512
+terminal_llm_threads: 4          # match nproc; llama.cpp defaults poorly on Pi
+terminal_llm_system_prompt: "You are a helpful, concise assistant running locally on a Raspberry Pi."
+
+# ── Notes ─────────────────────────────────────────────────────────────────────
+# F6 command palette > "Notes" (or Ctrl+N to cycle modes) opens a tab running
+# nano on this file. Relative paths resolve against the repo root. Readable
+# (raw text, PIN-gated if preview_server_pin is set) at /notes on the preview
+# server — handy for copying long notes off the device without a QR code.
+terminal_notes_file: data/notes.txt
+
 # ── HTTP preview server ──────────────────────────────────────────────────────
 # Serves the current display as PNG on the LAN. Open http://<pi-ip>:8080/
 # in any browser to see a live auto-refreshing view of the e-ink display.

@@ -41,3 +41,24 @@ top_process_count: 5
 `main.py` → `system_stats.collect()` → `render.render()` → `display_eink.display_image()`
 
 On macOS: saves `output/terminal.bmp`. On Pi: pushes to e-ink hardware.
+
+## Deploying changes
+
+On the Pi, both the stats dashboard and the terminal emulator normally run
+under one systemd service:
+
+```bash
+sudo systemctl restart eink-display
+```
+
+Restarting picks up any code/config changes, and — since `KillMode=control-group`
+— cleanly kills everything the service spawned: all terminal tabs, any `nano`
+Notes session, any running `llm_chat.py` chat. It comes back with one fresh
+shell tab.
+
+**Careful if you're working inside a shell driven by that same service** —
+e.g. an SSH/Claude Code session typed into the terminal-emulator's tmux
+session, or a terminal tab itself. Restarting from there kills your own
+session mid-command, since it's a child process of what's being restarted.
+Run the restart from a separate connection (another SSH window, or the
+keyboard attached directly to the Pi) instead.

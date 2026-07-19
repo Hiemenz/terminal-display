@@ -311,6 +311,13 @@ class EvdevKeyboard:
         if key == ecodes.KEY_TAB and self._shift:
             return b'\x1b[Z'
 
+        # Shift+Enter: a bare LF, distinct from plain Enter's CR (_SPECIAL
+        # below). Raw-mode readers (llm_chat.py's composer) treat CR as
+        # submit and LF as "insert a newline" — this is what lets Shift+Enter
+        # compose a multi-line message instead of sending it.
+        if key in (ecodes.KEY_ENTER, ecodes.KEY_KPENTER) and self._shift:
+            return b'\n'
+
         # Non-printable specials
         if key in _SPECIAL:
             return _SPECIAL[key]

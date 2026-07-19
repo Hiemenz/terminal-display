@@ -33,6 +33,7 @@ class _Tab:
     split_dir: str = ''    # 'h' = left/right split; '' = no split
     activity: bool = False  # produced output while in the background, unseen
     logger: Optional['TabLogger'] = None  # optional rotating on-disk session log
+    mode: str = ''  # '' (plain shell), 'notes', or 'llm' — see _cycle_mode
 
 
 _RENDER_DEBOUNCE  = 0.02   # seconds — lower now that hw writes are async
@@ -201,14 +202,28 @@ _BIGTEXT_OPEN  = '🔍 Big text (read mode)'
 _BEAM_OPEN     = '📱 Beam screen to phone'
 _HUD_TOGGLE    = '📊 Toggle refresh stats HUD'
 _RENAME_TAB    = '✏ Rename tab'
+_NOTES_OPEN    = '📝 Notes'
+_LLM_CHAT_OPEN = '🤖 Chat with local LLM'
+_RESTART_TERMINAL = '🔄 Restart terminal (saves notes first)'
+_MARKDOWN_VIEW = '📄 View notes as Markdown'
 # Palette actions that open an overlay / run in-app instead of typing a command.
-_PALETTE_ACTIONS = (_SETTINGS_OPEN, _SNIPPETS_OPEN, _BIGTEXT_OPEN, _BEAM_OPEN, _HUD_TOGGLE, _RENAME_TAB)
+_PALETTE_ACTIONS = (_SETTINGS_OPEN, _SNIPPETS_OPEN, _BIGTEXT_OPEN, _BEAM_OPEN, _HUD_TOGGLE,
+                    _RENAME_TAB, _NOTES_OPEN, _LLM_CHAT_OPEN, _RESTART_TERMINAL, _MARKDOWN_VIEW)
+
+# The three modes Ctrl+N cycles through: plain shell, notes (nano on a fixed
+# file), local LLM chat. A tab's _Tab.mode tags which one it is; '' means
+# plain shell/terminal so pre-existing tabs count as that mode for free.
+_MODE_TERMINAL = ''
+_MODE_NOTES = 'notes'
+_MODE_LLM = 'llm'
+_MODE_CYCLE = (_MODE_TERMINAL, _MODE_NOTES, _MODE_LLM)
 _F12  = b'\x1b[24~'
 _CTRL_LEFT  = b'\x1b[1;5D'   # cycle tabs
 _CTRL_RIGHT = b'\x1b[1;5C'
 _PGUP = b'\x1b[5~'
 _PGDN = b'\x1b[6~'
 _CTRL_F            = b'\x06'   # scrollback search
+_CTRL_N            = b'\x0e'   # cycle mode: terminal -> notes -> llm chat
 _CTRL_T            = b'\x14'   # new tab
 _CTRL_BACKSLASH    = b'\x1c'   # toggle left/right split pane
 _CTRL_BRACKETRIGHT = b'\x1d'   # swap split pane focus
@@ -231,6 +246,11 @@ _HELP_ITEMS = [
     ('Toggle Split Pane',   'Ctrl+\\'),
     ('Swap Split Focus',    'Ctrl+]'),
     ('Rename Tab',          'F6 > Rename'),
+    ('Cycle Mode',          'Ctrl+N'),
+    ('Notes',               'F6 > Notes'),
+    ('Chat with local LLM', 'F6 > LLM Chat'),
+    ('Restart Terminal',    'F6 > Restart'),
+    ('View Notes as Markdown', 'F6 > Markdown'),
     ('SSH Picker',          'F1'),
     ('Command Palette',     'F6'),
     ('Kill Process',        'F3'),

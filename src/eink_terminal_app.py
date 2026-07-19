@@ -41,10 +41,11 @@ Hotkeys:
 
 EinkTerminal's ~130 methods are split across mixin modules by feature area
 (shell/PTY, hotkeys, tabs, overlay pickers, settings, palette/help, text
-actions, search, split pane, network) — see shell_mixin.py, hotkeys_mixin.py,
-tabs_mixin.py, picker_overlays_mixin.py, settings_mixin.py,
+actions, search, split pane, network, markdown viewer) — see shell_mixin.py,
+hotkeys_mixin.py, tabs_mixin.py, picker_overlays_mixin.py, settings_mixin.py,
 palette_help_mixin.py, text_actions_mixin.py, search_mixin.py,
-split_pane_mixin.py, network_mixin.py. This file keeps __init__, the
+split_pane_mixin.py, network_mixin.py, markdown_viewer_mixin.py. This file
+keeps __init__, the
 render/idle/refresh state machine, and the main select() loop — the pieces
 most tightly coupled to per-frame timing. Shared constants, the per-tab
 dataclass, and small pure helpers live in terminal_state.py so both this
@@ -70,6 +71,7 @@ from alert_monitor import AlertMonitor
 from display_eink import EinkDriver
 from evdev_input import EvdevKeyboard, find_keyboard
 from hotkeys_mixin import HotkeysMixin
+from markdown_viewer_mixin import MarkdownViewerMixin
 from network_mixin import NetworkMixin
 from palette_help_mixin import PaletteHelpMixin
 from picker_overlays_mixin import PickerOverlaysMixin
@@ -117,6 +119,7 @@ class EinkTerminal(
     SearchMixin,
     SplitPaneMixin,
     NetworkMixin,
+    MarkdownViewerMixin,
 ):
     """Runs a shell in a PTY and mirrors output to the e-ink display."""
 
@@ -159,6 +162,12 @@ class EinkTerminal(
         self._reset_deferred_busy = False
         # Set by the `clear-eink` shell command (SIGUSR2); handled in the loop.
         self._clear_requested = False
+        # Set by the `notes`/`llmchat`/`terminal` shell commands (real-time
+        # signals SIGRTMIN+1/+2/+3) so a mode can be switched to by typing a
+        # command from any shell tab, not just Ctrl+N/F6. Handled in the loop.
+        self._notes_requested = False
+        self._llm_chat_requested = False
+        self._terminal_requested = False
         self._split_view  = config.get('terminal_split_view', False)
         self._status_extras  = config.get('terminal_status_bar_extras', True)
         self._cursor_style   = config.get('terminal_cursor_style', 'block')
@@ -348,6 +357,13 @@ class EinkTerminal(
         # "Big text" momentary read mode — any key restores the prior font.
         self._big_text_active = False
         self._big_text_prev_font: int = 0
+
+        # Markdown viewer (F6 > "View notes as Markdown") — a paginated,
+        # rendered-not-raw view of the notes file. PgUp/PgDn flip pages, any
+        # other key closes back to the terminal. See markdown_viewer_mixin.py.
+        self._markdown_active = False
+        self._markdown_pages: list = []
+        self._markdown_page_idx: int = 0
 
         # Beam-to-phone: a pinned QR linking to the captured screen text.
         self._beam_url: str = ''
@@ -968,6 +984,12 @@ class EinkTerminal(
         try:
             signal.signal(signal.SIGUSR1, self._on_settings_signal)
             signal.signal(signal.SIGUSR2, self._on_clear_signal)
+            # `notes`/`llmchat`/`terminal` shell commands (see
+            # _install_command_scripts) — real-time signals since SIGUSR1/2 are
+            # already spoken for by settings/clear-eink above.
+            signal.signal(signal.SIGRTMIN + 1, self._on_notes_signal)
+            signal.signal(signal.SIGRTMIN + 2, self._on_llm_chat_signal)
+            signal.signal(signal.SIGRTMIN + 3, self._on_terminal_signal)
             # Graceful shutdown so a stray Ctrl+C / `systemctl stop` puts the
             # panel to sleep cleanly rather than crashing mid-refresh.
             signal.signal(signal.SIGINT, self._on_shutdown_signal)
@@ -1119,6 +1141,39 @@ class EinkTerminal(
                 self._clear_screen()
                 continue
 
+            # ── `notes`/`llmchat`/`terminal` commands requested a mode switch
+            # (SIGRTMIN+1/+2/+3) — same idea as settings/clear-eink above, but
+            # jump straight to (or open) that mode's tab instead.
+            if self._notes_requested:
+                self._notes_requested = False
+                self._last_input = now
+                if in_screensaver or panel_asleep or self._in_text_message:
+                    in_screensaver = False
+                    panel_asleep = False
+                    self._in_text_message = False
+                self._open_notes()
+                continue
+
+            if self._llm_chat_requested:
+                self._llm_chat_requested = False
+                self._last_input = now
+                if in_screensaver or panel_asleep or self._in_text_message:
+                    in_screensaver = False
+                    panel_asleep = False
+                    self._in_text_message = False
+                self._open_llm_chat()
+                continue
+
+            if self._terminal_requested:
+                self._terminal_requested = False
+                self._last_input = now
+                if in_screensaver or panel_asleep or self._in_text_message:
+                    in_screensaver = False
+                    panel_asleep = False
+                    self._in_text_message = False
+                self._open_terminal()
+                continue
+
             # ── Early panel deep-sleep ────────────────────────────────────────
             # Before the screensaver kicks in, power the panel down once a shorter
             # idle window passes. The terminal image is retained behind the dark
@@ -1190,6 +1245,7 @@ class EinkTerminal(
                         if self._scroll_pages > 0:
                             self._snap_to_live()
                             has_pending = True
+                        data = self._handle_markdown_key(data)
                         data = self._handle_hotkeys(data)
                         data = self._handle_help_key(data)
                         data = self._handle_search_key(data)
@@ -1242,6 +1298,7 @@ class EinkTerminal(
                     if self._scroll_pages > 0:
                         self._snap_to_live()
                         has_pending = True
+                    data = self._handle_markdown_key(data)
                     data = self._handle_hotkeys(data)
                     data = self._handle_help_key(data)
                     data = self._handle_search_key(data)

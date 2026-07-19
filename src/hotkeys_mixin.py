@@ -18,6 +18,7 @@ from terminal_state import (
     _CTRL_BRACKETRIGHT,
     _CTRL_F,
     _CTRL_LEFT,
+    _CTRL_N,
     _CTRL_RIGHT,
     _CTRL_SLASH,
     _CTRL_SPACE,
@@ -99,6 +100,9 @@ class HotkeysMixin:
         if _CTRL_T in data:
             self._new_tab()
             data = data.replace(_CTRL_T, b'')
+        if _CTRL_N in data:
+            self._cycle_mode()
+            data = data.replace(_CTRL_N, b'')
         if _CTRL_BACKSLASH in data:
             self._toggle_split_pane()
             data = data.replace(_CTRL_BACKSLASH, b'')
