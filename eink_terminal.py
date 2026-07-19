@@ -20,6 +20,12 @@ Hotkeys (while the terminal is active):
 Typeable commands (run from the shell):
     settings / eink   Open the on-display config editor
     clear-eink        Clear the screen + e-ink ghosting (keeps the shell)
+    notes             Switch to Notes mode (nano on terminal_notes_file)
+    llmchat           Switch to local LLM chat mode (src/llm_chat.py)
+    terminal          Switch back to a plain shell tab
+
+llm_chat.py also understands /notes and /terminal as slash commands typed
+into the chat itself, plus /help and /reset — see src/llm_chat.py.
 """
 import argparse
 import logging

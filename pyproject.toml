@@ -16,6 +16,7 @@ qrcode = "^8.2"
 evdev = "^1.9.3"
 speedtest-cli = "^2.1"
 numpy = "^2.0"
+llama-cpp-python = "^0.3.34"
 
 [build-system]
 requires = ["poetry-core"]
@@ -48,6 +49,14 @@ exclude = ["src/waveshare_epd/"]
 
 [[tool.mypy.overrides]]
 module = "waveshare_epd.*"
+ignore_errors = true
+
+# llama_cpp's stubs type create_chat_completion's streamed response as a
+# TypedDict union that mypy can't narrow from `stream=True` alone, so plain
+# dict indexing/`.get()` on each chunk (correct at runtime — see llm_chat.py)
+# reads as errors here. Not a real bug, just stub friction.
+[[tool.mypy.overrides]]
+module = "llm_chat"
 ignore_errors = true
 
 # EinkTerminal is composed from mixins (see eink_terminal_app.py's module

@@ -159,6 +159,12 @@ class EinkTerminal(
         self._reset_deferred_busy = False
         # Set by the `clear-eink` shell command (SIGUSR2); handled in the loop.
         self._clear_requested = False
+        # Set by the `notes`/`llmchat`/`terminal` shell commands (real-time
+        # signals SIGRTMIN+1/+2/+3) so a mode can be switched to by typing a
+        # command from any shell tab, not just Ctrl+N/F6. Handled in the loop.
+        self._notes_requested = False
+        self._llm_chat_requested = False
+        self._terminal_requested = False
         self._split_view  = config.get('terminal_split_view', False)
         self._status_extras  = config.get('terminal_status_bar_extras', True)
         self._cursor_style   = config.get('terminal_cursor_style', 'block')
@@ -968,6 +974,12 @@ class EinkTerminal(
         try:
             signal.signal(signal.SIGUSR1, self._on_settings_signal)
             signal.signal(signal.SIGUSR2, self._on_clear_signal)
+            # `notes`/`llmchat`/`terminal` shell commands (see
+            # _install_command_scripts) — real-time signals since SIGUSR1/2 are
+            # already spoken for by settings/clear-eink above.
+            signal.signal(signal.SIGRTMIN + 1, self._on_notes_signal)
+            signal.signal(signal.SIGRTMIN + 2, self._on_llm_chat_signal)
+            signal.signal(signal.SIGRTMIN + 3, self._on_terminal_signal)
             # Graceful shutdown so a stray Ctrl+C / `systemctl stop` puts the
             # panel to sleep cleanly rather than crashing mid-refresh.
             signal.signal(signal.SIGINT, self._on_shutdown_signal)
@@ -1117,6 +1129,39 @@ class EinkTerminal(
                     panel_asleep = False
                     self._in_text_message = False
                 self._clear_screen()
+                continue
+
+            # ── `notes`/`llmchat`/`terminal` commands requested a mode switch
+            # (SIGRTMIN+1/+2/+3) — same idea as settings/clear-eink above, but
+            # jump straight to (or open) that mode's tab instead.
+            if self._notes_requested:
+                self._notes_requested = False
+                self._last_input = now
+                if in_screensaver or panel_asleep or self._in_text_message:
+                    in_screensaver = False
+                    panel_asleep = False
+                    self._in_text_message = False
+                self._open_notes()
+                continue
+
+            if self._llm_chat_requested:
+                self._llm_chat_requested = False
+                self._last_input = now
+                if in_screensaver or panel_asleep or self._in_text_message:
+                    in_screensaver = False
+                    panel_asleep = False
+                    self._in_text_message = False
+                self._open_llm_chat()
+                continue
+
+            if self._terminal_requested:
+                self._terminal_requested = False
+                self._last_input = now
+                if in_screensaver or panel_asleep or self._in_text_message:
+                    in_screensaver = False
+                    panel_asleep = False
+                    self._in_text_message = False
+                self._open_terminal()
                 continue
 
             # ── Early panel deep-sleep ────────────────────────────────────────

@@ -60,8 +60,9 @@ _CONFIG_SNAPSHOT_DIR = 'config_snapshots'
 # tradeoff for a LAN deterrent, not a bank vault).
 _active_sessions: set = set()
 _SESSION_COOKIE = 'eink_session'
-_GATED_HTML_GET = {'/config', '/clipboard', '/beam'}
+_GATED_HTML_GET = {'/config', '/clipboard', '/beam', '/notes'}
 _GATED_JSON_GET = {'/clipboard/list'}
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _get_pin(config_path: str) -> str:
@@ -979,6 +980,7 @@ _PAGE_HTML = '''\
       <a href="/config" class="pill-btn">&#9881; Config</a>
       <a href="/gallery" class="pill-btn">&#128247; Gallery</a>
       <a href="/clipboard" class="pill-btn">&#128203; Clips</a>
+      <a href="/notes" class="pill-btn">&#128221; Notes</a>
       <button id="mode-btn" class="pill-btn" onclick="toggleMode()">&#8644; Mode</button>
       __AUTH_LINK__
     </div>
@@ -1621,10 +1623,39 @@ font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px}
 </header><pre id="t">__TEXT__</pre></body></html>'''
 
 
-def _render_beam_page(text: str) -> str:
-    """A minimal page showing the beamed terminal text with a copy button."""
+def _render_beam_page(text: str, title: str = 'Beamed screen') -> str:
+    """A minimal page showing raw text with a copy button. Shared by /beam
+    (Ctrl+Space copy mode) and /notes (raw view of the notes file)."""
     import html as _html
-    return _BEAM_HTML.replace('__TEXT__', _html.escape(text))
+    page = _BEAM_HTML.replace('__TEXT__', _html.escape(text))
+    if title != 'Beamed screen':
+        page = page.replace('Beamed screen', title)
+    return page
+
+
+def _get_notes_path(config_path: str) -> str:
+    """Resolve terminal_notes_file (relative paths are repo-root-relative),
+    defaulting to data/notes.txt when unset or the config can't be read."""
+    default = data_path('notes.txt')
+    if not config_path:
+        return default
+    try:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        rel = str(cfg.get('terminal_notes_file', '') or '').strip()
+    except Exception:
+        rel = ''
+    if not rel:
+        return default
+    return rel if os.path.isabs(rel) else os.path.join(_REPO_ROOT, rel)
+
+
+def _read_notes(config_path: str) -> str:
+    try:
+        with open(_get_notes_path(config_path)) as f:
+            return f.read()
+    except OSError:
+        return ''
 
 
 _LOGIN_HTML = '''\
@@ -1751,6 +1782,10 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 text = (beam_ref[0] if beam_ref else '') or '(nothing beamed yet)'
                 self._respond(200, 'text/html; charset=utf-8',
                               _render_beam_page(text).encode())
+            elif path == '/notes':
+                text = _read_notes(config_path) or '(notes file is empty)'
+                self._respond(200, 'text/html; charset=utf-8',
+                              _render_beam_page(text, title='Notes').encode())
             else:
                 self._respond(404, 'text/plain', b'Not found')
 

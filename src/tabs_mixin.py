@@ -4,13 +4,25 @@ from __future__ import annotations
 
 import logging
 import os
+import shlex
+import shutil
 import signal
 import subprocess
+import time
 
 from session_logger import TabLogger
-from terminal_state import _Tab
+from terminal_state import (
+    _MODE_CYCLE,
+    _MODE_LLM,
+    _MODE_NOTES,
+    _MODE_TERMINAL,
+    _REPO_ROOT,
+    _Tab,
+)
 
 logger = logging.getLogger(__name__)
+
+_MODE_TITLES = {_MODE_NOTES: 'notes', _MODE_LLM: 'llm'}
 
 
 class TabsMixin:
@@ -63,7 +75,7 @@ class TabsMixin:
         if self._tabs and 0 <= self._active_tab < len(self._tabs):
             self._tabs[self._active_tab].scroll_pages = self._scroll_pages
 
-    def _new_tab(self, cmd: str = None):
+    def _new_tab(self, cmd: str = None, mode: str = ''):
         self._sync_active_tab()
         if self._tabs and 0 <= self._active_tab < len(self._tabs):
             t = self._tabs[self._active_tab]
@@ -74,7 +86,8 @@ class TabsMixin:
         self._spawn_shell(tmux_session=new_session)
         self._tabs.append(_Tab(screen=self._screen, stream=self._stream,
                                pty_master=self._pty_master, child_pid=self._child_pid,
-                               tmux_session=new_session, logger=self._make_tab_logger()))
+                               tmux_session=new_session, logger=self._make_tab_logger(),
+                               mode=mode, title=_MODE_TITLES.get(mode, '')))
         self._active_tab = len(self._tabs) - 1
         self._scroll_pages = 0
         if cmd:
@@ -83,6 +96,90 @@ class TabsMixin:
             except OSError:
                 pass
         self._render(force_full=True)
+
+    # ─── Modes (Ctrl+N / F6 palette): terminal / notes / local LLM chat ────────
+
+    def _notes_path(self) -> str:
+        rel = str(self._config.get('terminal_notes_file', '') or 'data/notes.txt')
+        return rel if os.path.isabs(rel) else os.path.join(_REPO_ROOT, rel)
+
+    def _open_mode_tab(self, mode: str, cmd: str):
+        """Jump to the existing tab for `mode` if one is open, else open one."""
+        for i, t in enumerate(self._tabs):
+            if t.mode == mode:
+                self._goto_tab(i)
+                return
+        self._new_tab(cmd=cmd, mode=mode)
+
+    def _open_notes(self):
+        path = self._notes_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except OSError:
+            pass
+        self._open_mode_tab(_MODE_NOTES, 'nano ' + shlex.quote(path))
+
+    def _open_llm_chat(self):
+        script = os.path.join(_REPO_ROOT, 'src', 'llm_chat.py')
+        cmd = f'cd {shlex.quote(_REPO_ROOT)} && poetry run python3 {shlex.quote(script)}'
+        self._open_mode_tab(_MODE_LLM, cmd)
+
+    def _open_terminal(self):
+        """Jump to a plain shell tab if one is open, else start one. Used by
+        Ctrl+N cycling back around and by the `terminal` shell command."""
+        self._open_mode_tab(_MODE_TERMINAL, None)
+
+    def _cycle_mode(self):
+        """Ctrl+N: jump straight to the next mode (terminal -> notes -> llm ->
+        terminal ...), creating that mode's tab on first use. Skips the
+        command palette entirely — the whole point is a single keypress."""
+        tab = self._current_tab()
+        current = tab.mode if tab else _MODE_TERMINAL
+        if current not in _MODE_CYCLE:
+            current = _MODE_TERMINAL
+        nxt = _MODE_CYCLE[(_MODE_CYCLE.index(current) + 1) % len(_MODE_CYCLE)]
+        if nxt == _MODE_TERMINAL:
+            self._open_terminal()
+        elif nxt == _MODE_NOTES:
+            self._open_notes()
+        else:
+            self._open_llm_chat()
+
+    _NOTES_SNAPSHOT_KEEP = 10
+
+    def _backup_notes(self):
+        """Snapshot the notes file to data/notes_snapshots/ before a restart
+        tears down its tab. nano gets SIGTERM'd/hung-up with no chance to
+        save, so this only protects what was last saved to disk — anything
+        typed but not yet written with Ctrl+O in nano can't be recovered."""
+        path = self._notes_path()
+        if not os.path.isfile(path):
+            return
+        try:
+            snap_dir = os.path.join(_REPO_ROOT, 'data', 'notes_snapshots')
+            os.makedirs(snap_dir, exist_ok=True)
+            stamp = time.strftime('%Y%m%d-%H%M%S')
+            dest = os.path.join(snap_dir, f'notes-{stamp}.txt')
+            if os.path.exists(dest):
+                dest = os.path.join(snap_dir, f'notes-{stamp}-{os.getpid()}.txt')
+            shutil.copy2(path, dest)
+            snaps = sorted(f for f in os.listdir(snap_dir)
+                           if f.startswith('notes-') and f.endswith('.txt'))
+            for old in snaps[:-self._NOTES_SNAPSHOT_KEEP]:
+                try:
+                    os.remove(os.path.join(snap_dir, old))
+                except OSError:
+                    pass
+        except OSError:
+            logger.warning('notes backup failed', exc_info=True)
+
+    def _restart_terminal(self):
+        """F6 'Restart Terminal': back up notes, then nuke and respawn every
+        tab — including any running llm_chat.py or nano session — for a
+        clean slate, without needing `systemctl restart` (and the sudo/full
+        service bounce that implies)."""
+        self._backup_notes()
+        self._reset_session()
 
     def _close_tab(self):
         if len(self._tabs) <= 1:
