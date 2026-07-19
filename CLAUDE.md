@@ -58,6 +58,8 @@ python eink_terminal.py         # terminal emulator, live on Pi hardware
 | `src/preview_server.py` | HTTP server: mirrors the display image over LAN, accepts remote/mobile keyboard input into the PTY, serves the on-device settings editor, notes, and clipboard |
 | `src/session_logger.py` | `TabLogger` — optional rotating, ANSI-stripped on-disk log of a tab's output (`terminal_log_enabled`) |
 | `src/llm_chat.py` | Offline chat REPL for a GGUF model via `llama-cpp-python` — no network calls. Launched in its own tab by "Chat with local LLM" / Ctrl+N; see `terminal_llm_*` in `config/config.yaml` |
+| `src/markdown_renderer.py` | Parses/paginates Markdown into 800×480 PIL images (headers, bold/italic, lists, code, quotes, hr) — no hardware/app dependency |
+| `src/markdown_viewer_mixin.py` | Full-screen paginated Markdown viewer over the notes file: PgUp/PgDn page, any other key closes. F6 → "View notes as Markdown" |
 
 Hotkeys: F1 SSH picker, F2 close tab, Ctrl+T new tab, Ctrl+N cycle mode
 (terminal → notes → local LLM chat, opening that mode's tab on first use —
@@ -113,6 +115,18 @@ only protects what was last written with Ctrl+O in nano, not in-buffer edits
 that were never saved. See `_restart_terminal` / `_backup_notes` in
 `src/tabs_mixin.py` (`_reset_session` in `src/eink_terminal_app.py` does the
 actual tab teardown/respawn — it's the same method idle-reset already uses).
+
+Markdown viewer (F6 → "View notes as Markdown"): a paginated, *rendered* —
+not raw-text — view of the notes file, drawn straight to the panel with PIL
+(headers, **bold**, *italic* as underline, `inline code`, fenced code blocks,
+bullet/numbered lists, blockquotes, horizontal rules). PgUp/PgDn flip pages;
+any other key closes back to the terminal. It bypasses the normal pyte/
+terminal render pipeline entirely — same "push a custom full-screen image
+straight to the driver" approach as the web UI's "send text to display"
+feature, just paginated instead of one-shot. See `src/markdown_renderer.py`
+(`render_markdown_pages` — parsing/pagination, no EinkTerminal dependency)
+and `src/markdown_viewer_mixin.py` (`_show_markdown`/`_handle_markdown_key` —
+the app-side state and PgUp/PgDn/Esc key handling).
 
 Background tabs that produce output while you're on another tab get flagged
 in the status-bar tab chip as `•N` (e.g. `[2/3 build] •4`) until you switch

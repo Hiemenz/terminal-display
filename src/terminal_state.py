@@ -205,9 +205,10 @@ _RENAME_TAB    = '✏ Rename tab'
 _NOTES_OPEN    = '📝 Notes'
 _LLM_CHAT_OPEN = '🤖 Chat with local LLM'
 _RESTART_TERMINAL = '🔄 Restart terminal (saves notes first)'
+_MARKDOWN_VIEW = '📄 View notes as Markdown'
 # Palette actions that open an overlay / run in-app instead of typing a command.
 _PALETTE_ACTIONS = (_SETTINGS_OPEN, _SNIPPETS_OPEN, _BIGTEXT_OPEN, _BEAM_OPEN, _HUD_TOGGLE,
-                    _RENAME_TAB, _NOTES_OPEN, _LLM_CHAT_OPEN, _RESTART_TERMINAL)
+                    _RENAME_TAB, _NOTES_OPEN, _LLM_CHAT_OPEN, _RESTART_TERMINAL, _MARKDOWN_VIEW)
 
 # The three modes Ctrl+N cycles through: plain shell, notes (nano on a fixed
 # file), local LLM chat. A tab's _Tab.mode tags which one it is; '' means
@@ -249,6 +250,7 @@ _HELP_ITEMS = [
     ('Notes',               'F6 > Notes'),
     ('Chat with local LLM', 'F6 > LLM Chat'),
     ('Restart Terminal',    'F6 > Restart'),
+    ('View Notes as Markdown', 'F6 > Markdown'),
     ('SSH Picker',          'F1'),
     ('Command Palette',     'F6'),
     ('Kill Process',        'F3'),

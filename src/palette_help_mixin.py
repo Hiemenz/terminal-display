@@ -11,6 +11,7 @@ from terminal_state import (
     _HELP_ITEMS,
     _HUD_TOGGLE,
     _LLM_CHAT_OPEN,
+    _MARKDOWN_VIEW,
     _NOTES_OPEN,
     _PALETTE_ACTIONS,
     _RENAME_TAB,
@@ -44,6 +45,8 @@ class PaletteHelpMixin:
             self._open_llm_chat()
         elif action == _RESTART_TERMINAL:
             self._restart_terminal()
+        elif action == _MARKDOWN_VIEW:
+            self._open_markdown_notes()
 
     # ─── Help overlay (Ctrl+/) ─────────────────────────────────────────────────
 
@@ -109,6 +112,8 @@ class PaletteHelpMixin:
             self._open_llm_chat()
         elif label == 'Restart Terminal':
             self._restart_terminal()
+        elif label == 'View Notes as Markdown':
+            self._open_markdown_notes()
         elif label == 'SSH Picker':
             self._toggle_sshpick()
         elif label == 'Command Palette':

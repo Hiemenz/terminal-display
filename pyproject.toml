@@ -82,5 +82,6 @@ module = [
     "search_mixin",
     "split_pane_mixin",
     "network_mixin",
+    "markdown_viewer_mixin",
 ]
 ignore_errors = true
