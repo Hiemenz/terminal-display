@@ -1490,7 +1490,14 @@ class EinkTerminal(
                 self._show_screensaver()
 
             # ── Debounced render ──────────────────────────────────────────────
-            if has_pending and not in_screensaver and not panel_asleep and (now - last_render) >= _RENDER_DEBOUNCE:
+            # Skip when a full-screen custom image owns the panel (Markdown
+            # viewer, big-text read mode, or a web "send text" message) — PTY
+            # output from a background process must not repaint over them.
+            _fullscreen_overlay = (self._markdown_active or self._big_text_active
+                                   or self._in_text_message)
+            if (has_pending and not in_screensaver and not panel_asleep
+                    and not _fullscreen_overlay
+                    and (now - last_render) >= _RENDER_DEBOUNCE):
                 self._render()
                 self._screen.dirty.clear()
                 _ct = self._current_tab()
@@ -1498,7 +1505,8 @@ class EinkTerminal(
                     _ct.pane2_screen.dirty.clear()
                 has_pending = False
                 last_render = now
-            elif not in_screensaver and not panel_asleep and self._periodic_flash_due(now):
+            elif (not in_screensaver and not panel_asleep and not _fullscreen_overlay
+                    and self._periodic_flash_due(now)):
                 # Deferred whole-panel ghost-clearing flash, fired in a quiet gap
                 # so it never interrupts active typing.
                 self._render(force_flash=True)

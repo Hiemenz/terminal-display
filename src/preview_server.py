@@ -1627,10 +1627,10 @@ def _render_beam_page(text: str, title: str = 'Beamed screen') -> str:
     """A minimal page showing raw text with a copy button. Shared by /beam
     (Ctrl+Space copy mode) and /notes (raw view of the notes file)."""
     import html as _html
-    page = _BEAM_HTML.replace('__TEXT__', _html.escape(text))
-    if title != 'Beamed screen':
-        page = page.replace('Beamed screen', title)
-    return page
+    # Replace title/heading before injecting user content so a notes file that
+    # happens to contain the literal "Beamed screen" can't corrupt the page.
+    page = _BEAM_HTML.replace('Beamed screen', title)
+    return page.replace('__TEXT__', _html.escape(text))
 
 
 def _get_notes_path(config_path: str) -> str:
