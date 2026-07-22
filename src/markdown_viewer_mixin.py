@@ -25,8 +25,14 @@ class MarkdownViewerMixin:
 
     def _show_markdown(self, text: str, label: str):
         from markdown_renderer import render_markdown_pages
+        # Overlay self._dark_mode and self._font_path so the Markdown page
+        # matches the terminal's live theme (terminal_dark_mode / F7 toggle),
+        # not the stats-dashboard's separate dark_mode/font_path keys.
+        cfg = dict(self._config)
+        cfg['dark_mode'] = self._dark_mode
+        cfg['font_path'] = getattr(self, '_font_path', self._config.get('font_path', ''))
         try:
-            pages = render_markdown_pages(text, label, self._config)
+            pages = render_markdown_pages(text, label, cfg)
         except Exception as e:
             logger.warning('Markdown render error: %s', e)
             return
