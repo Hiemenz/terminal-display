@@ -420,8 +420,37 @@ def _crop_to_fit(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
     return img.crop((left, top, left + target_w, top + target_h))
 
 
+def _weekly_percent(config: dict) -> float | None:
+    """Percentage of the current week elapsed, in [0, 100].
+
+    The week resets to 0% every Tuesday at 23:00 in `config['timezone']`
+    (defaults to America/Chicago / Central time) and climbs back to ~100%
+    just before the following Tuesday 23:00. Returns None if the
+    configured timezone can't be resolved (e.g. missing tzdata).
+    """
+    try:
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(config.get('timezone') or 'America/Chicago')
+        now = datetime.now(tz)
+
+        anchor_weekday = 1  # Monday=0 ... Tuesday=1
+        days_since = (now.weekday() - anchor_weekday) % 7
+        anchor = (now - timedelta(days=days_since)).replace(
+            hour=23, minute=0, second=0, microsecond=0)
+        if anchor > now:
+            anchor -= timedelta(days=7)
+
+        elapsed = (now - anchor).total_seconds()
+        pct = elapsed / (7 * 24 * 3600) * 100
+        return max(0.0, min(100.0, pct))
+    except Exception:
+        return None
+
+
 def render_screensaver(image_path: str, qr_url: str, config: dict) -> Image.Image:
-    """Render the idle screensaver: background image + QR code overlay."""
+    """Render the idle screensaver: background image + QR code + week-progress overlay."""
     font_path = config.get('font_path', '')
 
     img = Image.new('L', (W, H), color=_BLACK)
@@ -431,6 +460,23 @@ def render_screensaver(image_path: str, qr_url: str, config: dict) -> Image.Imag
             bg = Image.open(image_path).convert('L')
             bg = _crop_to_fit(bg, W, H)
             img.paste(bg, (0, 0))
+        except Exception:
+            pass
+
+    d = ImageDraw.Draw(img)
+
+    pct = _weekly_percent(config)
+    if pct is not None:
+        try:
+            box_w, box_h = 160, 42
+            box_x, box_y = PAD, PAD
+            d.rounded_rectangle(
+                [box_x, box_y, box_x + box_w, box_y + box_h],
+                radius=8, fill=_WHITE, outline=_BLACK, width=1,
+            )
+            f_week = _find_font(font_path, 16)
+            d.text((box_x + 10, box_y + 6), f'Week {pct:.0f}%', font=f_week, fill=_BLACK)
+            _bar(d, box_x + 10, box_y + 28, box_w - 20, 8, pct, _BLACK, _WHITE, _BLACK)
         except Exception:
             pass
 
@@ -449,7 +495,6 @@ def render_screensaver(image_path: str, qr_url: str, config: dict) -> Image.Imag
             # Bottom-right corner, leaving room for the label below the QR.
             qr_x = W - PAD - qr_size
             qr_y = H - PAD - qr_size - box_pad - label_h
-            d = ImageDraw.Draw(img)
             d.rectangle(
                 [qr_x - box_pad, qr_y - box_pad,
                  qr_x + qr_size + box_pad, qr_y + qr_size + box_pad + label_h],
