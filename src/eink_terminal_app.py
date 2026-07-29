@@ -596,15 +596,20 @@ class EinkTerminal(
         This is how SSH'ing in and typing into the shared tmux session wakes
         the e-ink: #{client_activity} bumps only on client *input* (never on
         program output), so a spinner or log tail can't hold the panel awake.
-        Polled at most every 2 s, and skipped while local input is fresh
-        (local keys already reset the idle timer)."""
+        Scoped to our own tmux_session via `-t` — otherwise `list-clients`
+        returns every client on the whole tmux server, so typing in an
+        unrelated session (e.g. a separate SSH coding session) would falsely
+        register as e-ink activity and wake the panel. Polled at most every
+        2 s, and skipped while local input is fresh (local keys already reset
+        the idle timer)."""
         if not (self._use_tmux and self._wake_on_ssh):
             return False
         if (now - self._tmux_poll_mono) < 2.0 or (now - self._last_input) < 2.0:
             return False
         self._tmux_poll_mono = now
         try:
-            r = subprocess.run(['tmux', 'list-clients', '-F', '#{client_activity}'],
+            r = subprocess.run(['tmux', 'list-clients', '-t', self._tmux_session,
+                                '-F', '#{client_activity}'],
                                capture_output=True, text=True, timeout=1)
             newest = max((float(s) for s in r.stdout.split()), default=0.0)
         except Exception:
