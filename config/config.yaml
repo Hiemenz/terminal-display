@@ -192,11 +192,13 @@ preview_server_port: 8080
 
 # PIN gate for the preview server's mutating/sensitive endpoints (settings
 # save & restore, remote keyboard input, uploads, clipboard, gallery
-# selection, the beamed-text page). Empty (default) = no gate, matching
+# selection, the beamed-text page, notes, the journald log viewer, and
+# quick actions incl. restart/reboot). Empty (default) = no gate, matching
 # prior behavior. Set a PIN to require it once per browser session before
-# any of those actions are allowed; viewing the live display image itself
-# stays open. Sessions are in-memory only, so a settings save (which
-# restarts the service) or app restart requires re-entering the PIN.
+# any of those actions are allowed; viewing the live display image, status
+# panel, and gallery stays open. Sessions are in-memory only, so a settings
+# save (which restarts the service) or app restart requires re-entering the
+# PIN.
 preview_server_pin: ""
 
 # Config snapshot history: every settings save (and the on-device editor's
