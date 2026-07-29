@@ -302,7 +302,6 @@ class EinkTerminal(
         self._display_queue = None   # set in run() after server starts
         self._preview_server = None  # set in run() after server starts
         self._last_status_pub = 0.0  # throttle for the /status panel publish
-        self._preview_server = None  # set in run() after server starts
 
         # Tab management
         self._tabs: list = []
