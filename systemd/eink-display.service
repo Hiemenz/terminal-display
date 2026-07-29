@@ -7,15 +7,24 @@ Wants=network.target
 Type=simple
 User=pi
 Group=pi
-WorkingDirectory=/home/pi/terminal-display
+WorkingDirectory=/home/pi/git/terminal-display
 
 # Reads startup_mode from config and launches the right script.
-ExecStart=/home/pi/terminal-display/systemd/launcher.sh
+ExecStart=/home/pi/git/terminal-display/systemd/launcher.sh
 
 # Restart on crash, but not on clean exit (e.g. mode-switch spawns new process)
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=10
+
+# terminal_use_tmux spawns tmux (and whatever's running inside it, e.g. a
+# `claude` session) as a child of this service. Default KillMode=control-group
+# would SIGTERM/SIGKILL the whole cgroup on every restart/stop, killing tmux
+# and everything in it even though tmux would otherwise survive its parent
+# dying. KillMode=process signals only the tracked main PID (the python
+# process; launcher.sh execs it), leaving tmux and its sessions running so
+# the next start's `tmux new-session -A` just reattaches.
+KillMode=process
 
 # Health watchdog: the app pings WATCHDOG=1 from its main loop (src/sd_watchdog.py).
 # If the loop hangs and stops pinging for this long, systemd restarts the
@@ -23,10 +32,12 @@ TimeoutStopSec=10
 # loop and deliberately withholds pings so the watchdog still fires.
 WatchdogSec=60
 
-# Resource caps: keep a leak or runaway from taking down the whole Pi. The app's
-# steady-state RSS is well under 100M; the cap just bounds pathological growth.
-MemoryMax=256M
-CPUQuota=80%
+# Resource caps: keep a runaway from taking down the whole Pi. With KillMode=process
+# and terminal_use_tmux, tmux and everything inside it (including any `claude`
+# sessions) stay in this cgroup across restarts, so the cap has to cover all of
+# that too, not just the ~100M steady-state app itself.
+MemoryMax=2G
+CPUQuota=200%
 
 # Ensure SPI, GPIO, and raw keyboard input are accessible (Pi-specific)
 SupplementaryGroups=spi gpio video input
