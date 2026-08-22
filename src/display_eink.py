@@ -275,12 +275,12 @@ class EinkDriver:
         logging.info('E-ink full flash refresh (hw_sleeping=%s)', self._hw_sleeping)
         try:
             buf = epd.getbuffer(image)
-            # After deep sleep use full init() to restore power rails.
-            if self._hw_sleeping:
-                epd.init()
-                self._hw_sleeping = False
-            else:
-                epd.init_fast()
+            # Always use the full-quality init() here, not init_fast(). This path
+            # exists specifically to clear ghosting (explicit `clear`, clear-eink,
+            # F10, periodic anti-ghost flash) — init_fast()'s weaker waveform
+            # undercuts that guarantee and leaves stale text visibly lingering.
+            epd.init()
+            self._hw_sleeping = False
             epd.display(buf)
             self._stats['full'] += 1
             self._stats['last_flash_mono'] = time.monotonic()
