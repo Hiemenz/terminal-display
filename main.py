@@ -279,6 +279,12 @@ Examples:
     args = parser.parse_args()
 
     config = load_config(args.config)
+
+    # Respect startup_mode without needing the launcher/sudo — exec terminal if configured.
+    if not args.once and config.get('startup_mode', 'stats') == 'terminal':
+        term_py = os.path.join(_REPO_ROOT, 'eink_terminal.py')
+        os.execv(sys.executable, [sys.executable, term_py])
+
     interval = config.get('update_interval', 30)
 
     # On macOS always use local mode (no hardware)
