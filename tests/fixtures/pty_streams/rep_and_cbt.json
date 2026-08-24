@@ -1,0 +1,48 @@
+{
+ "name": "rep_and_cbt",
+ "command": [
+  "--settle",
+  "2.5",
+  "--",
+  "bash",
+  "-c",
+  "printf \"a\\033[10bZ\\n\"; printf \"x\\ty\\033[Zq\\n\""
+ ],
+ "cols": 80,
+ "rows": 24,
+ "recorded": "2026-08-23",
+ "tmux": "tmux 3.5a",
+ "chunks": [
+  "G1s/MTA0OWgbWzIyOzA7MHQbWz8xaBs9G1tIG1syShtbPzEybBtbPzI1aBtbPzEwMDBsG1s/MTAwMmwbWz8xMDAzbBtbPzEwMDZsG1s/MTAwNWwbWz8yMDA0aBsoQhtbbRtbPzEybBtbPzI1aBtbPzEwMDZsG1s/MTAwMGwbWz8xMDAybBtbPzEwMDNsG1sxOzFIG1sxOzI0chtbYxtbPmMbWz5xG10xMDs/G1wbXTExOz8bXBtbMTsxSBtbPzI1bCQgG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSxtbPzEybBtbPzI1aBtbMTszSBsoQhtbbRtbPzEybBtbPzI1aBtbPzEwMDZsG1s/MTAwMGwbWz8xMDAybBtbPzEwMDNsG1sxOzFIG1sxOzI0chtbMTszSA==",
+  "G1s/MjVsG1tIJCAbW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1s/MTJsG1s/MjVoG1sxOzNI",
+  "LS1zZXR0bGUgMi41IC0tIGJhc2ggLWMgJ3ByaW50ZiAiYVwwMzNbMTBiWlxuIjsgcHJpbnRmICJ4XHR5XDAzM1tacVxuIicNCg==",
+  "YmFzaDogLS1zZXR0bGU6IGNvbW1hbmQgbm90IGZvdW5kDQo=",
+  "JCA="
+ ],
+ "expected": [
+  "$ --settle 2.5 -- bash -c 'printf \"a\\033[10bZ\\n\"; printf \"x\\ty\\033[Zq\\n\"'",
+  "bash: --settle: command not found",
+  "$",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ]
+}

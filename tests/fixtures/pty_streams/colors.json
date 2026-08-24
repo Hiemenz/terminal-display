@@ -1,0 +1,50 @@
+{
+ "name": "colors",
+ "command": [
+  "--settle",
+  "2.5",
+  "--",
+  "bash",
+  "-c",
+  "ls --color=always /etc | head -30"
+ ],
+ "cols": 80,
+ "rows": 24,
+ "recorded": "2026-08-23",
+ "tmux": "tmux 3.5a",
+ "chunks": [
+  "G1s/MTA0OWgbWzIyOzA7MHQbWz8xaBs9G1tIG1syShtbPzEybBtbPzI1aBtbPzEwMDBsG1s/MTAwMmwbWz8xMDAzbBtbPzEwMDZsG1s/MTAwNWwbWz8yMDA0aBsoQhtbbRtbPzEybBtbPzI1aBtbPzEwMDZsG1s/MTAwMGwbWz8xMDAybBtbPzEwMDNsG1sxOzFIG1sxOzI0chtbYxtbPmMbWz5xG10xMDs/G1wbXTExOz8bXBtbMTsxSA==",
+  "G1s/MjVsJCAbW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1s/MTJsG1s/MjVoG1sxOzNI",
+  "GyhCG1ttG1s/MTJsG1s/MjVoG1s/MTAwNmwbWz8xMDAwbBtbPzEwMDJsG1s/MTAwM2wbWzE7MUgbWzE7MjRyG1sxOzNI",
+  "G1s/MjVsG1tIJCAbW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1s/MTJsG1s/MjVoG1sxOzNI",
+  "LS1zZXR0bGUgMi41IC0tIGJhc2ggLWMgJ2xzIC0tY29sb3I9YWx3YXlzIC9ldGMgfCBoZWFkIC0zMCcNCg==",
+  "YmFzaDogLS1zZXR0bGU6IGNvbW1hbmQgbm90IGZvdW5kDQo=",
+  "JCA="
+ ],
+ "expected": [
+  "$ --settle 2.5 -- bash -c 'ls --color=always /etc | head -30'",
+  "bash: --settle: command not found",
+  "$",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ]
+}

@@ -1,0 +1,50 @@
+{
+ "name": "insert_delete_lines",
+ "command": [
+  "--settle",
+  "2.5",
+  "--",
+  "bash",
+  "-c",
+  "printf \"one\\ntwo\\nthree\\n\"; tput cup 1 0; printf \"\\033[L\"; printf \"inserted\"; tput cup 6 0"
+ ],
+ "cols": 80,
+ "rows": 24,
+ "recorded": "2026-08-23",
+ "tmux": "tmux 3.5a",
+ "chunks": [
+  "G1s/MTA0OWgbWzIyOzA7MHQbWz8xaBs9G1tIG1syShtbPzEybBtbPzI1aBtbPzEwMDBsG1s/MTAwMmwbWz8xMDAzbBtbPzEwMDZsG1s/MTAwNWwbWz8yMDA0aBsoQhtbbRtbPzEybBtbPzI1aBtbPzEwMDZsG1s/MTAwMGwbWz8xMDAybBtbPzEwMDNsG1sxOzFIG1sxOzI0chtbYxtbPmMbWz5xG10xMDs/G1wbXTExOz8bXBtbMTsxSA==",
+  "G1s/MjVsJCAbW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1s/MTJsG1s/MjVoG1sxOzNI",
+  "GyhCG1ttG1s/MTJsG1s/MjVoG1s/MTAwNmwbWz8xMDAwbBtbPzEwMDJsG1s/MTAwM2wbWzE7MUgbWzE7MjRyG1sxOzNI",
+  "G1s/MjVsG1tIJCAbW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1s/MTJsG1s/MjVoG1sxOzNI",
+  "LS1zZXR0bGUgMi41IC0tIGJhc2ggLWMgJ3ByaW50ZiAib25lXG50d29cbnRocmVlXG4iOyB0cHV0IGN1cCAxIDA7IHByaW50ZiAiXDAzM1tMIjsgcHJpbnRmICJpbnNlcnRlZCI7IHRwdXQgY3VwIDYgMCcNCg==",
+  "YmFzaDogLS1zZXR0bGU6IGNvbW1hbmQgbm90IGZvdW5kDQo=",
+  "JCA="
+ ],
+ "expected": [
+  "$ --settle 2.5 -- bash -c 'printf \"one\\ntwo\\nthree\\n\"; tput cup 1 0; printf \"\\03",
+  "3[L\"; printf \"inserted\"; tput cup 6 0'",
+  "bash: --settle: command not found",
+  "$",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ]
+}
