@@ -335,7 +335,17 @@ terminal_reset_minutes: 60
 # estimate, not your quota — the real limits live server-side.
 screensaver_show_qr: false       # wake QR in the lock screen's bottom-right
 screensaver_show_claude_usage: true
+# Yardstick for the "used N%" line on the lock screen. The real weekly limit
+# is enforced server-side and isn't readable locally, so set your own token
+# budget here — or leave 0 to compare against your own 4-week average.
+claude_weekly_token_budget: 0
 terminal_claude_usage_ttl: 300   # seconds between transcript scans
+
+# When the panel deep-sleeps it keeps showing whatever was last drawn (e-ink
+# retains the image with no power). Draw the screensaver first so what stays
+# on the glass is the lock screen, not your terminal. false = sleep on the
+# terminal image, the old behaviour.
+display_sleep_shows_screensaver: true
 
 screensaver_enabled: true
 
