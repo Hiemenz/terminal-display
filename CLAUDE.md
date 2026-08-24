@@ -219,8 +219,30 @@ web-UI QR code sits inside the Network card.
 - `terminal_alert_health_interval: 30` / `terminal_alert_throttle` / `terminal_alert_failed_units` / `terminal_alert_storage_health` / `terminal_alert_network` / `terminal_alert_network_host` / `terminal_alert_network_fails` — system-health alerts (thermal throttle, failed systemd units, SD card read-only remount, dead network) shown in the terminal status bar
 - `preview_server_pin: ""` — PIN-gates the preview server's mutating/sensitive endpoints (settings, remote input, uploads, clipboard, notes); empty disables the gate (default, matches prior behavior)
 - `terminal_llm_model_path` / `terminal_llm_context_size` / `terminal_llm_max_tokens` / `terminal_llm_threads` / `terminal_llm_system_prompt` — local LLM chat (`src/llm_chat.py`): GGUF file, context window, response length cap, CPU threads, and system prompt. No network calls — inference runs fully on-device via `llama-cpp-python`
+- `screensaver_show_claude_usage: true` / `terminal_claude_usage_ttl: 300` — lock-screen Claude Code activity panel (local estimate, not quota) and how often the transcripts are rescanned
 - `terminal_long_command_seconds: 30` — announce a command finishing when it ran at least this long (0 = off, tmux mode only)
 - `terminal_notes_file: data/notes.txt` — plain text file opened by the Notes mode/palette entry (in `nano`) and served as raw text at `/notes`
+
+## Lock Screen: Claude Activity Panel
+
+The screensaver can show how much Claude Code work has gone through recently
+— messages and tokens over the last 5 h and 7 d, plus the busiest project —
+read from the session transcripts under `~/.claude/projects/*/*.jsonl`
+(`src/claude_usage.py`, `screensaver_show_claude_usage`).
+
+It is labelled "local est." on screen for a reason: **this is not your quota
+status.** Claude Code's real 5-hour and weekly limits are enforced
+server-side and written nowhere on disk — `/usage` fetches them live — so
+what's shown is what the local transcripts record going through, in tokens,
+which is not the unit the limits are counted in.
+
+Cache reads are reported separately from `sent` (input + cache creation):
+they dwarf everything else and bill at a fraction of the rate, so folding
+them together would make the number meaningless. The scan takes about a
+second over ~130 MB, so it is cached for `terminal_claude_usage_ttl` seconds
+and only ever runs as the panel goes to sleep. Every part of it is
+defensive — the panel is decoration, and nothing about it may stop the
+display sleeping.
 
 ## Refresh Behavior & Debugging Flashes
 

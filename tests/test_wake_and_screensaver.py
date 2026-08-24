@@ -106,3 +106,38 @@ def test_scan_for_url_respects_row_filter(make_app):
     assert app._scan_for_url(rows={1}) == 'http://example.com/page'
     assert app._scan_for_url(rows={0, 2}) == ''
     assert app._scan_for_url(rows=set()) == ''
+
+
+# ── Claude activity panel ─────────────────────────────────────────────────────
+
+def test_usage_scan_failure_still_shows_the_screensaver(make_app, monkeypatch):
+    """The activity panel is decoration. A transcript scan that blows up must
+    not keep the panel awake on a stale frame."""
+    app = _saver_app(make_app)
+    sentinel = object()
+    monkeypatch.setattr(render_mod, 'render_screensaver', lambda *a, **k: sentinel)
+    monkeypatch.setattr('claude_usage.collect_usage',
+                        lambda *a, **k: (_ for _ in ()).throw(OSError('boom')))
+    app._show_screensaver()
+    assert app._driver.calls == ['flash', 'sleep']
+
+
+def test_usage_panel_can_be_turned_off(make_app):
+    app = _saver_app(make_app)
+    app._config = dict(app._config, screensaver_show_claude_usage=False)
+    assert app._claude_usage() == {}
+
+
+def test_usage_is_cached_between_screensavers(make_app, monkeypatch):
+    """Scanning ~130 MB of transcripts takes about a second; it must not run
+    every time the screensaver comes up."""
+    app = _saver_app(make_app)
+    app._config = dict(app._config, screensaver_show_claude_usage=True,
+                       terminal_claude_usage_ttl=300)
+    scans = []
+    monkeypatch.setattr('claude_usage.collect_usage',
+                        lambda *a, **k: scans.append(1) or {'5h': {'messages': 1}})
+    first = app._claude_usage()
+    second = app._claude_usage()
+    assert first == second
+    assert len(scans) == 1
