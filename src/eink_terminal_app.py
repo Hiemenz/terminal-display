@@ -141,6 +141,10 @@ class EinkTerminal(
         # since the last render; makes the next 'flash' a deep, ghost-free one
         # instead of the normal fast waveform. See _TrackedScreen in terminal_state.py.
         self._deep_flash_pending = False
+        # Set when the screen scrolled since the last render. pyte marks every
+        # line dirty on a scroll, which would otherwise read as a near-total
+        # redraw and flash the panel for each line of scrolling output.
+        self._scrolled_since_render = False
         # Idle → screensaver + panel deep-sleep. screensaver_sleep_minutes (in
         # minutes, editable on-device) takes precedence over the legacy seconds.
         _sleep_min = config.get('screensaver_sleep_minutes')
@@ -209,6 +213,9 @@ class EinkTerminal(
         self._tmux_activity_seen = 0.0   # newest #{client_activity} handled
         self._tmux_poll_mono     = 0.0   # last poll (throttled to every 2 s)
 
+        # Flicker-free partials rewrite the whole frame with the DU waveform,
+        # so a near-total redraw needs no resync flash — see _refresh_kind.
+        self._flicker_free = config.get('terminal_flicker_free_partial', False)
         self._driver      = EinkDriver(local=local,
                                        partial_refresh_limit=config.get('partial_refresh_before_full', 30),
                                        flicker_free=config.get('terminal_flicker_free_partial', False),
@@ -441,9 +448,10 @@ class EinkTerminal(
                 os.write(self._pty_master, b'\x0c')
             except OSError:
                 pass
-        self._render(force_full=True)
-        if self._last_image is not None:
-            self._driver.flash_refresh(self._last_image, deep=True)
+        # One deep flash, not a full repaint followed by a flash — the panel
+        # would otherwise be written twice for a single clear.
+        self._deep_flash_pending = True
+        self._render(force_flash=True)
         self._last_full_refresh_mono = time.monotonic()
     def _reset_session(self, render: bool = True):
         """Kill the shell (and tmux session/tabs) and start a brand-new one, so a
@@ -712,6 +720,25 @@ class EinkTerminal(
 
     # ─── Rendering ───────────────────────────────────────────────────────────
 
+    def _consume_screen_flags(self, screen, active: bool) -> None:
+        """Turn a screen's post-feed flags into hints for the next render.
+
+        A deep, ghost-clearing flash belongs to a screen the user actually
+        wiped: ED 2/3, or tmux's whole-region scroll that left the screen
+        blank. A command printing more than a screenful scrolls the same way
+        but leaves the screen full of text — that's a scroll, and it only
+        suppresses the all-dirty "near-total redraw" flash."""
+        cleared = getattr(screen, 'full_clear', False) or (
+            getattr(screen, 'region_cleared', False) and screen.is_blank())
+        scrolled = getattr(screen, 'scrolled', False)
+        screen.full_clear = screen.region_cleared = screen.scrolled = False
+        if not active:
+            return
+        if cleared:
+            self._deep_flash_pending = True
+        elif scrolled:
+            self._scrolled_since_render = True
+
     def _refresh_kind(self, force_full: bool, force_flash: bool,
                       heavy_change: bool) -> str:
         """Pick the panel update for this frame:
@@ -722,7 +749,15 @@ class EinkTerminal(
                       on its own count-based cadence)."""
         if force_full:
             return 'full'
-        if force_flash or heavy_change:
+        if force_flash:
+            return 'flash'
+        # A near-total redraw only needs the resync flash when partials are
+        # diff-based. The flicker-free (DU) partial rewrites every pixel with
+        # the previous frame as its reference, so it lands a whole-screen
+        # change cleanly on its own — flashing for it just makes scrolling
+        # output strobe. Ghosting is still handled by the periodic anti-ghost
+        # flash and by an explicit clear.
+        if heavy_change and not self._flicker_free:
             return 'flash'
         return 'partial'
 
@@ -885,6 +920,7 @@ class EinkTerminal(
             self._last_image = img
             kind = self._refresh_kind(force_full, force_flash, heavy_change=False)
             self._deep_flash_pending = False   # split view has no flash path (below) to consume it
+            self._scrolled_since_render = False
             if kind in ('full', 'flash'):
                 self._driver.full_refresh(img)
                 self._last_full_refresh_mono = time.monotonic()
@@ -902,7 +938,12 @@ class EinkTerminal(
         # If almost the entire screen changed at once (clear, vim/less redraw,
         # tab switch), partial updates would leave the panel out of sync and
         # ghosting; resync with a full flash refresh instead.
-        heavy_change = len(self._screen.dirty) >= max(8, int(vis_rows * 0.85))
+        heavy_change = (len(self._screen.dirty) >= max(8, int(vis_rows * 0.85))
+                        and not self._scrolled_since_render)
+        self._scrolled_since_render = False
+        # A pending deep flash is a real clear; make sure it gets the flash
+        # path even though the scroll that delivered it suppressed heavy_change.
+        force_flash = force_flash or self._deep_flash_pending
 
         # Use incremental rendering when the cache is warm and no large change
         # (overlay, scroll, split sidebar) invalidates the full layout.
@@ -1358,10 +1399,8 @@ class EinkTerminal(
                             if tab_i == self._active_tab and self._scroll_pages > 0 and not in_screensaver:
                                 self._snap_to_live()
                             tab.stream.feed(chunk)
-                            if tab.screen.full_clear:
-                                tab.screen.full_clear = False
-                                if tab_i == self._active_tab:
-                                    self._deep_flash_pending = True
+                            self._consume_screen_flags(
+                                tab.screen, tab_i == self._active_tab)
                             if tab.logger:
                                 tab.logger.write(chunk)
                         if tab_i == self._active_tab and not in_screensaver:
@@ -1392,10 +1431,8 @@ class EinkTerminal(
                             chunk = _filter_pty_output(chunk, tab.pane2_master)
                             if chunk and tab.pane2_stream:
                                 tab.pane2_stream.feed(chunk)
-                                if tab.pane2_screen.full_clear:
-                                    tab.pane2_screen.full_clear = False
-                                    if tab_i == self._active_tab:
-                                        self._deep_flash_pending = True
+                                self._consume_screen_flags(
+                                    tab.pane2_screen, tab_i == self._active_tab)
                             if tab_i == self._active_tab and not in_screensaver:
                                 self._last_activity = now
                                 has_pending = True

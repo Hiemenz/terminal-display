@@ -84,6 +84,31 @@ def _save(image: Image.Image, output_path: str = None):
 
 # ── Persistent driver for terminal mode ──────────────────────────────────────
 
+def _frame_is_blank(buf, row_bytes: int = 100, threshold: float = 0.85) -> bool:
+    """True when most of the frame's rows are entirely white.
+
+    In the panel's RAM a 0 byte is eight white pixels, so an all-zero row is a
+    blank scanline. A freshly cleared terminal is blank apart from the prompt
+    line and the status bar; a screenful of text is not (its rows all carry
+    some ink), and dark mode is not (its rows are mostly ink).
+    """
+    if not buf:
+        return False
+    if _HAS_NUMPY:
+        arr = _np.frombuffer(bytes(buf), dtype=_np.uint8)
+        rows = arr.size // row_bytes
+        if rows == 0:
+            return False
+        blank = int((~arr[:rows * row_bytes].reshape(rows, row_bytes).any(axis=1)).sum())
+    else:
+        rows = len(buf) // row_bytes
+        if rows == 0:
+            return False
+        blank = sum(1 for i in range(rows)
+                    if not any(buf[i * row_bytes:(i + 1) * row_bytes]))
+    return blank / rows >= threshold
+
+
 class EinkDriver:
     """
     Persistent e-ink driver with a background hardware-write thread.
@@ -289,7 +314,7 @@ class EinkDriver:
             # undercuts that guarantee and leaves stale text visibly lingering.
             epd.init()
             self._hw_sleeping = False
-            if deep:
+            if deep and not _frame_is_blank(buf):
                 # epd.display() forces a full-panel waveform by writing the
                 # bitwise-inverted image as the "old" reference (so every pixel
                 # registers as changed), but that's a software trick against
@@ -300,6 +325,13 @@ class EinkDriver:
                 # for an explicit user-requested clear (clear-eink, F10, a
                 # detected `clear`/`reset`) that guaranteed wipe matters more
                 # than the extra second it costs.
+                #
+                # Skipped for an already-blank frame (_frame_is_blank): Clear()
+                # writes old=all-black / new=all-white, and display() of a blank
+                # frame writes old=~blank=all-black / new=blank=all-white — the
+                # same bytes to the same registers. Running both just flashes
+                # the panel twice for one wipe, which is exactly the `clear`
+                # case the deep flash exists for.
                 epd.Clear()
             epd.display(buf)
             self._stats['full'] += 1

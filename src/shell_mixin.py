@@ -19,7 +19,8 @@ import tty
 import pyte
 
 from terminal_renderer import SPLIT_TERMINAL_W, terminal_dimensions
-from terminal_state import _REPO_ROOT, _TrackedHistoryScreen, _TrackedScreen
+from terminal_state import (_REPO_ROOT, _TrackedByteStream, _TrackedHistoryScreen,
+                            _TrackedScreen)
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +175,7 @@ class ShellMixin:
         else:
             history = self._config.get('terminal_scrollback', 500)
             self._screen = _TrackedHistoryScreen(cols, rows, history=history)
-        self._stream = pyte.ByteStream(self._screen)
+        self._stream = _TrackedByteStream(self._screen)
         self._scroll_pages = 0
 
     # ─── PTY ─────────────────────────────────────────────────────────────────

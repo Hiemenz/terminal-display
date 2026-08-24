@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import pyte
+from pyte.screens import Margins
 
 from session_logger import TabLogger
 
@@ -29,12 +30,79 @@ class _ClearTrackingMixin(_ClearTrackingBase):
     update only drives pixels that changed, which on this panel's fast
     waveform can leave faint traces of the text that used to be there —
     exactly the case where the user is asking for a clean screen."""
-    full_clear = False
+    full_clear = False      # ED 2/3 — an unambiguous "wipe the screen"
+    region_cleared = False  # a scroll that took the whole region away
+    scrolled = False        # content shifted at all (scroll / index)
 
     def erase_in_display(self, how: int = 0, *args, **kwargs) -> None:
         super().erase_in_display(how, *args, **kwargs)
         if how in (2, 3):
             self.full_clear = True
+
+    # pyte implements neither SU (CSI Ps S) nor SD (CSI Ps T) — an unmapped
+    # CSI final byte is silently dropped. That matters here because tmux does
+    # NOT pass `clear`'s ED 2 through to the outer terminal: it repaints the
+    # pane by scrolling the whole region away instead
+    # (`ESC[1;23r ESC[2;23r ESC[22S ESC[K`). Unhandled, those lines stayed in
+    # the pyte buffer, so after `clear` the panel still showed the old text —
+    # no amount of ghost-clearing at the driver level could fix that, since
+    # the content was genuinely still in the frame we painted.
+    def scroll_up(self, count: int = 1, *args, **kwargs) -> None:
+        """SU — scroll the scrolling region up `count` lines."""
+        self._scroll_region(count, up=True)
+
+    def scroll_down(self, count: int = 1, *args, **kwargs) -> None:
+        """SD — scroll the scrolling region down `count` lines."""
+        self._scroll_region(count, up=False)
+
+    def _scroll_region(self, count, up: bool) -> None:
+        try:
+            count = max(1, int(count or 1))
+        except (TypeError, ValueError):
+            count = 1
+        top, bottom = self.margins or Margins(0, self.lines - 1)
+        height = bottom - top + 1
+        self.scrolled = True
+        if count >= height:
+            # Everything visible went away. That's how tmux spells `clear`, but
+            # it's also what a command printing more than a screenful does, so
+            # this is only a *candidate* for the deep flash — the render loop
+            # confirms it by checking whether the screen actually ended up
+            # blank once the whole chunk has been fed.
+            self.region_cleared = True
+        # index()/reverse_index() only scroll when the cursor sits on the
+        # margin; park it there, scroll, then put it back where it was.
+        saved_x, saved_y = self.cursor.x, self.cursor.y
+        self.cursor.y = bottom if up else top
+        for _ in range(min(count, height)):
+            if up:
+                super().index()
+            else:
+                super().reverse_index()
+        self.cursor.x, self.cursor.y = saved_x, saved_y
+
+    # pyte's index()/reverse_index() mark *every* line dirty when they scroll.
+    # The render loop treats an all-dirty frame as a near-total redraw worth a
+    # whole-panel flash, so without this flag every line of scrolling output
+    # would flash the panel. A scroll is exactly the case the flicker-free
+    # partial handles well — the periodic anti-ghost flash covers the rest.
+    def index(self, *args, **kwargs) -> None:
+        top, bottom = self.margins or Margins(0, self.lines - 1)
+        if self.cursor.y == bottom:
+            self.scrolled = True
+        super().index(*args, **kwargs)
+
+    def reverse_index(self, *args, **kwargs) -> None:
+        top, _bottom = self.margins or Margins(0, self.lines - 1)
+        if self.cursor.y == top:
+            self.scrolled = True
+        super().reverse_index(*args, **kwargs)
+
+    def is_blank(self) -> bool:
+        """True when the screen holds almost nothing — a freshly cleared
+        terminal (a prompt line, maybe a leftover line) rather than a screenful
+        of output that happened to scroll past."""
+        return sum(1 for line in self.display if line.strip()) <= 2
 
 
 class _TrackedScreen(_ClearTrackingMixin, pyte.Screen):
@@ -43,6 +111,16 @@ class _TrackedScreen(_ClearTrackingMixin, pyte.Screen):
 
 class _TrackedHistoryScreen(_ClearTrackingMixin, pyte.HistoryScreen):
     pass
+
+
+class _TrackedByteStream(pyte.ByteStream):
+    """ByteStream that routes SU/SD to the tracked screens above. pyte's
+    dispatch table is a plain class attribute, so extending it is enough.
+
+    Only use this with a _TrackedScreen/_TrackedHistoryScreen — pyte binds
+    every handler when the parser is built, so a screen without scroll_up
+    would raise AttributeError at construction time."""
+    csi = {**pyte.ByteStream.csi, 'S': 'scroll_up', 'T': 'scroll_down'}
 
 
 @dataclass

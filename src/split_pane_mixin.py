@@ -13,7 +13,7 @@ import termios
 import pyte
 
 from terminal_renderer import terminal_dimensions
-from terminal_state import _TrackedScreen
+from terminal_state import _TrackedByteStream, _TrackedScreen
 
 
 class SplitPaneMixin:
@@ -31,7 +31,7 @@ class SplitPaneMixin:
         half_w = self._split_half_w()
         cols, rows, _, _ = terminal_dimensions(self._font_size, self._font_path, half_w)
         tab.pane2_screen = _TrackedScreen(cols, rows)
-        tab.pane2_stream = pyte.ByteStream(tab.pane2_screen)
+        tab.pane2_stream = _TrackedByteStream(tab.pane2_screen)
         new_session = f'{self._tmux_session}-p2'
         pid, master_fd = pty.fork()
         if pid == 0:
