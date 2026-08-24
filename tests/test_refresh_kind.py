@@ -12,10 +12,23 @@ def test_force_full_is_no_flash_full(make_app):
     assert app._refresh_kind(True, False, True) == 'full'
 
 
-def test_force_flash_and_heavy_change_flash(make_app):
+def test_force_flash_flashes(make_app):
     app = _kind_app(make_app)
     assert app._refresh_kind(False, True, False) == 'flash'
+
+
+def test_heavy_change_resyncs_with_a_flash_when_partials_are_diff_based(make_app):
+    app = _kind_app(make_app)
+    app._flicker_free = False
     assert app._refresh_kind(False, False, True) == 'flash'
+
+
+def test_heavy_change_needs_no_flash_when_flicker_free(make_app):
+    """The DU partial rewrites every pixel against the previous frame, so a
+    near-total redraw (scrolling output) lands cleanly without strobing."""
+    app = _kind_app(make_app)
+    app._flicker_free = True
+    assert app._refresh_kind(False, False, True) == 'partial'
 
 
 def test_default_is_partial(make_app):

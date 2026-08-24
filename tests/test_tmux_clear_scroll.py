@@ -29,14 +29,40 @@ def test_tmux_clear_empties_the_screen():
 
 
 def test_tmux_clear_requests_a_deep_flash():
+    """tmux's clear is a whole-region scroll, so it's flagged region_cleared
+    and confirmed by the screen ending up blank."""
     screen = _TrackedScreen(80, 24)
     stream = _TrackedByteStream(screen)
     _filled(screen, stream)
     stream.feed(TMUX_CLEAR)
-    assert screen.full_clear is True
+    stream.feed(b'pi@host:~$ ')
+    assert screen.region_cleared is True
+    assert screen.is_blank() is True
 
 
-def test_ed2_still_requests_a_deep_flash():
+def test_screenful_of_output_is_a_scroll_not_a_clear():
+    """A command printing more than a screenful scrolls the region away the
+    same way, but leaves the screen full — it must not earn the deep flash."""
+    screen = _TrackedScreen(80, 24)
+    stream = _TrackedByteStream(screen)
+    _filled(screen, stream)
+    stream.feed(b'\x1b[1;24r\x1b[24S')
+    for i in range(24):
+        stream.feed(('output line %d\r\n' % i).encode())
+    assert screen.region_cleared is True
+    assert screen.is_blank() is False
+    assert screen.full_clear is False
+
+
+def test_scrolling_is_flagged():
+    screen = _TrackedScreen(80, 24)
+    stream = _TrackedByteStream(screen)
+    for i in range(30):          # past the bottom, so pyte scrolls
+        stream.feed(('line%d\r\n' % i).encode())
+    assert screen.scrolled is True
+
+
+def test_ed2_still_sets_full_clear():
     screen = _TrackedScreen(80, 24)
     stream = _TrackedByteStream(screen)
     _filled(screen, stream)

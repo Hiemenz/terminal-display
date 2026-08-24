@@ -16,3 +16,6 @@ assets/gallery/
 
 # Poetry virtualenv if created inside project
 .venv/
+
+# auto-update.sh run log
+update.log

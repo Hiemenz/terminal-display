@@ -30,7 +30,9 @@ class _ClearTrackingMixin(_ClearTrackingBase):
     update only drives pixels that changed, which on this panel's fast
     waveform can leave faint traces of the text that used to be there —
     exactly the case where the user is asking for a clean screen."""
-    full_clear = False
+    full_clear = False      # ED 2/3 — an unambiguous "wipe the screen"
+    region_cleared = False  # a scroll that took the whole region away
+    scrolled = False        # content shifted at all (scroll / index)
 
     def erase_in_display(self, how: int = 0, *args, **kwargs) -> None:
         super().erase_in_display(how, *args, **kwargs)
@@ -60,20 +62,47 @@ class _ClearTrackingMixin(_ClearTrackingBase):
             count = 1
         top, bottom = self.margins or Margins(0, self.lines - 1)
         height = bottom - top + 1
+        self.scrolled = True
         if count >= height:
-            # The whole region scrolled away — same user-visible result as a
-            # `clear`, so it earns the deep ghost-clearing flash.
-            self.full_clear = True
+            # Everything visible went away. That's how tmux spells `clear`, but
+            # it's also what a command printing more than a screenful does, so
+            # this is only a *candidate* for the deep flash — the render loop
+            # confirms it by checking whether the screen actually ended up
+            # blank once the whole chunk has been fed.
+            self.region_cleared = True
         # index()/reverse_index() only scroll when the cursor sits on the
         # margin; park it there, scroll, then put it back where it was.
         saved_x, saved_y = self.cursor.x, self.cursor.y
         self.cursor.y = bottom if up else top
         for _ in range(min(count, height)):
             if up:
-                self.index()
+                super().index()
             else:
-                self.reverse_index()
+                super().reverse_index()
         self.cursor.x, self.cursor.y = saved_x, saved_y
+
+    # pyte's index()/reverse_index() mark *every* line dirty when they scroll.
+    # The render loop treats an all-dirty frame as a near-total redraw worth a
+    # whole-panel flash, so without this flag every line of scrolling output
+    # would flash the panel. A scroll is exactly the case the flicker-free
+    # partial handles well — the periodic anti-ghost flash covers the rest.
+    def index(self, *args, **kwargs) -> None:
+        top, bottom = self.margins or Margins(0, self.lines - 1)
+        if self.cursor.y == bottom:
+            self.scrolled = True
+        super().index(*args, **kwargs)
+
+    def reverse_index(self, *args, **kwargs) -> None:
+        top, _bottom = self.margins or Margins(0, self.lines - 1)
+        if self.cursor.y == top:
+            self.scrolled = True
+        super().reverse_index(*args, **kwargs)
+
+    def is_blank(self) -> bool:
+        """True when the screen holds almost nothing — a freshly cleared
+        terminal (a prompt line, maybe a leftover line) rather than a screenful
+        of output that happened to scroll past."""
+        return sum(1 for line in self.display if line.strip()) <= 2
 
 
 class _TrackedScreen(_ClearTrackingMixin, pyte.Screen):
