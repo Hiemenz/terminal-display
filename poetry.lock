@@ -190,13 +190,13 @@ files = [
 
 [[package]]
 name = "llama-cpp-python"
-version = "0.3.34"
+version = "0.3.35"
 description = "Python bindings for the llama.cpp library"
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "llama_cpp_python-0.3.34.tar.gz", hash = "sha256:d849d286d808284f1d3ec1bd6875572430d29d1f9574a010232caa4e9cef0e35"},
+    {file = "llama_cpp_python-0.3.35.tar.gz", hash = "sha256:1139dbb54509074b70893fab8554e3b079aa9f4d312058ce4018ef0019e3de12"},
 ]
 
 [package.dependencies]
