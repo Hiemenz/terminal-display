@@ -3,10 +3,14 @@ mode, and the clipboard overlay (F8) — the screen-text capture/output actions.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import subprocess
 import time
 
 from terminal_state import _MAX_FONT, _get_local_ip
+
+logger = logging.getLogger(__name__)
 
 
 class TextActionsMixin:
@@ -178,9 +182,26 @@ class TextActionsMixin:
         self._copy_anchor = None
         if text:
             self._add_clipboard_entry(text)
+            self._copy_to_tmux_buffer(text)
             self._beam_to_phone(text)
         else:
             self._render(force_full=True)
+
+    def _copy_to_tmux_buffer(self, text: str) -> None:
+        """Also put a yank in tmux's paste buffer.
+
+        The on-device clipboard (F8) can only paste back into this app. A tmux
+        buffer pastes with Ctrl+B ] into any pane on the machine, including an
+        SSH session sharing the same server — which is usually where you want
+        the thing you just copied off the screen.
+        """
+        if not (self._use_tmux and text):
+            return
+        try:
+            subprocess.run(['tmux', 'set-buffer', '-b', 'eink', '--', text],
+                           capture_output=True, timeout=2)
+        except Exception as e:
+            logger.debug('could not set tmux buffer: %s', e)
 
     def _add_clipboard_entry(self, text: str):
         """Push a yanked selection onto the front of the on-device clipboard
