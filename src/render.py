@@ -449,8 +449,18 @@ def _weekly_percent(config: dict) -> float | None:
         return None
 
 
-def _draw_claude_usage(d, font_path: str, usage: dict) -> None:
-    """Panel of recent Claude Code activity, top-right of the lock screen.
+def _draw_claude_usage(d, font_path: str, usage: dict,
+                       reserved_bottom: int = 0,
+                       week_pct: float = None) -> None:
+    """Panel of recent Claude Code activity, bottom-right of the lock screen.
+
+    `reserved_bottom` is how much of that corner the wake QR already occupies:
+    with the QR shown the panel stacks above it rather than over it.
+
+    `week_pct` folds the week-progress bar into the same tile. The week runs
+    Tuesday 23:00 to Tuesday 23:00, so it reads as "how far through the week
+    this usage happened" — which is the question the two tiles were being
+    compared to answer anyway.
 
     Deliberately labelled an estimate: Claude Code's real 5-hour and weekly
     limits are enforced server-side and written nowhere on disk, so this is
@@ -472,8 +482,10 @@ def _draw_claude_usage(d, font_path: str, usage: dict) -> None:
     widths = [int(d.textlength(r, font=f_row)) for r in rows]
     box_w = max(widths + [int(d.textlength('CLAUDE ACTIVITY (local est.)', font=f_title))]) + 20
     box_h = 26 + len(rows) * 16 + (16 if busiest else 4)
+    if week_pct is not None:
+        box_h += 30
     box_x = W - PAD - box_w
-    box_y = PAD
+    box_y = H - PAD - box_h - reserved_bottom
     d.rounded_rectangle([box_x, box_y, box_x + box_w, box_y + box_h],
                         radius=8, fill=_WHITE, outline=_BLACK, width=1)
     d.text((box_x + 10, box_y + 6), 'CLAUDE ACTIVITY (local est.)',
@@ -484,6 +496,16 @@ def _draw_claude_usage(d, font_path: str, usage: dict) -> None:
         y += 16
     if busiest:
         d.text((box_x + 10, y), 'busiest: %s' % busiest[:24], font=f_row, fill=_BLACK)
+        y += 16
+    if week_pct is not None:
+        y += 4
+        d.line([(box_x + 10, y), (box_x + box_w - 10, y)], fill=_BLACK)
+        y += 6
+        label = 'Week %.0f%%' % week_pct
+        d.text((box_x + 10, y), label, font=f_row, fill=_BLACK)
+        label_w = int(d.textlength(label, font=f_row)) + 8
+        _bar(d, box_x + 10 + label_w, y + 3, box_w - 20 - label_w, 9,
+             week_pct, _BLACK, _WHITE, _BLACK)
 
 
 def render_screensaver(image_path: str, qr_url: str, config: dict,
@@ -505,7 +527,10 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
     d = ImageDraw.Draw(img)
 
     pct = _weekly_percent(config)
-    if pct is not None:
+    # Folded into the activity tile when there is one, so the lock screen
+    # carries a single combined panel instead of two boxes saying related
+    # things in opposite corners.
+    if pct is not None and not claude_usage:
         try:
             box_w, box_h = 160, 42
             box_x, box_y = PAD, PAD
@@ -519,13 +544,8 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
         except Exception:
             pass
 
-    if claude_usage:
-        try:
-            _draw_claude_usage(d, font_path, claude_usage)
-        except Exception:
-            pass
-
-    if qr_url and _HAS_QRCODE:
+    reserved_bottom = 0
+    if qr_url and _HAS_QRCODE and config.get('screensaver_show_qr', True):
         try:
             qr = _qrcode.QRCode(
                 error_correction=_qrcode.constants.ERROR_CORRECT_L,
@@ -550,6 +570,15 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
             label = 'Scan to wake'
             lw = int(d.textlength(label, font=f_small)) if hasattr(d, 'textlength') else f_small.getbbox(label)[2]
             d.text((qr_x + (qr_size - lw) // 2, qr_y + qr_size + 4), label, font=f_small, fill=_BLACK)
+            # Tell the activity panel how much of this corner is spoken for.
+            reserved_bottom = H - (qr_y - box_pad) + 6
+        except Exception:
+            pass
+
+    if claude_usage:
+        try:
+            _draw_claude_usage(d, font_path, claude_usage, reserved_bottom,
+                               week_pct=pct)
         except Exception:
             pass
 

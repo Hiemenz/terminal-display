@@ -136,3 +136,115 @@ def test_summary_lines_cover_both_windows(tmp_path):
     assert len(lines) == 2
     assert 'last 5 h' in lines[0]
     assert 'last 7 d' in lines[1]
+
+
+# ── where the panel lands on the lock screen ──────────────────────────────────
+
+def _usage_fixture():
+    return {'5h': {'messages': 12, 'sent': 1000, 'generated': 100,
+                   'cached': 5000, 'top_project': 'terminal-display'},
+            '7d': {'messages': 300, 'sent': 90000, 'generated': 9000,
+                   'cached': 500000, 'top_project': 'crypto'}}
+
+
+# A config whose timezone can't be resolved yields no week percentage, so the
+# baseline frame carries neither the week box nor the week bar — leaving the
+# diff to show only what the activity panel itself drew.
+NO_WEEK = {'font_path': '', 'timezone': 'Not/AZone'}
+
+
+def _blank_like(img):
+    """A blank frame the same size — for "was anything drawn here at all"."""
+    from PIL import Image
+    return Image.new(img.mode, img.size, color=0)
+
+
+def _changed_pixels(with_panel, without_panel):
+    width, height = with_panel.size
+    return [(x, y) for y in range(height) for x in range(width)
+            if with_panel.getpixel((x, y)) != without_panel.getpixel((x, y))]
+
+
+def test_panel_is_drawn_in_the_bottom_right():
+    """Bottom-right, clear of the week-progress box in the top-left."""
+    from render import H, W, render_screensaver
+
+    config = dict(NO_WEEK, screensaver_show_qr=False)
+    plain = render_screensaver('', '', config)
+    panelled = render_screensaver('', '', config, claude_usage=_usage_fixture())
+    changed = _changed_pixels(panelled, plain)
+
+    assert changed, 'the panel drew nothing'
+    assert min(x for x, _y in changed) > W // 2
+    assert min(y for _x, y in changed) > H // 2
+
+
+def test_qr_can_be_hidden():
+    from render import render_screensaver
+
+    url = 'http://192.168.1.2:8080/config'
+    shown = render_screensaver('', url, dict(NO_WEEK, screensaver_show_qr=True))
+    hidden = render_screensaver('', url, dict(NO_WEEK, screensaver_show_qr=False))
+    assert _changed_pixels(shown, hidden), 'screensaver_show_qr changed nothing'
+    assert not _changed_pixels(hidden, render_screensaver('', '', NO_WEEK))
+
+
+def test_panel_stacks_above_the_qr_when_both_are_shown():
+    """Both want the same corner. With the QR on, the panel sits above it
+    rather than over it."""
+    from render import H, W, render_screensaver
+
+    config = dict(NO_WEEK, screensaver_show_qr=True)
+    url = 'http://192.168.1.2:8080/config'
+    bare = render_screensaver('', '', config)
+    with_qr = render_screensaver('', url, config)
+    both = render_screensaver('', url, config, claude_usage=_usage_fixture())
+
+    changed = _changed_pixels(both, with_qr)
+    assert changed, 'the panel drew nothing'
+    qr_top = min(y for _x, y in _changed_pixels(with_qr, bare))
+    assert max(y for _x, y in changed) < qr_top, 'panel overlaps the wake QR'
+    assert min(x for x, _y in changed) > W // 2
+    assert min(y for _x, y in changed) > H // 4
+
+
+def test_no_usage_means_no_panel():
+    from render import render_screensaver
+
+    assert not _changed_pixels(render_screensaver('', '', NO_WEEK, claude_usage={}),
+                               render_screensaver('', '', NO_WEEK))
+
+
+def test_week_bar_is_folded_into_the_panel():
+    """One combined tile: with the panel up, the week bar rides inside it and
+    the old top-left box is gone."""
+    from render import H, W, render_screensaver
+
+    config = {'font_path': '', 'screensaver_show_qr': False}   # week resolves
+    with_panel = render_screensaver('', '', config, claude_usage=_usage_fixture())
+    no_week = render_screensaver('', '', dict(config, timezone='Not/AZone'),
+                                 claude_usage=_usage_fixture())
+
+    # Nothing is drawn in the top-left corner any more...
+    corner = [(x, y) for x, y in _changed_pixels(with_panel,
+                                                 _blank_like(with_panel))
+              if x < W // 3 and y < H // 3]
+    assert not corner, 'the week box is still drawn top-left'
+    # ...and the week bar shows up inside the bottom-right tile.
+    added = _changed_pixels(with_panel, no_week)
+    assert added, 'the week bar was not drawn at all'
+    assert min(x for x, _y in added) > W // 2
+    assert min(y for _x, y in added) > H // 2
+
+
+def test_week_box_survives_when_the_panel_is_off():
+    """Turning the activity panel off must not take the week bar with it."""
+    from render import H, W, render_screensaver
+
+    config = {'font_path': '', 'screensaver_show_qr': False}
+    without_panel = render_screensaver('', '', config)
+    changed = _changed_pixels(without_panel,
+                              render_screensaver('', '', dict(config, timezone='Not/AZone')))
+    assert changed, 'no week box drawn'
+    assert max(x for x, _y in changed) < W // 2
+    assert max(y for _x, y in changed) < H // 2
