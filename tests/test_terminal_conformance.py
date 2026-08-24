@@ -22,6 +22,7 @@ import base64
 import glob
 import json
 import os
+import re
 import sys
 
 import pyte
@@ -56,10 +57,20 @@ def _normalize(lines):
     return rows
 
 
-def _replay(fixture):
-    screen = _TrackedScreen(fixture['cols'], fixture['rows'])
+def _replay(fixture, screen=None):
+    """Feed a fixture's bytes to a screen, honouring any mid-stream resize.
+
+    A resize marker is what the app does on a font-size change: the grid
+    changes under a program that is already drawing.
+    """
+    if screen is None:
+        screen = _TrackedScreen(fixture['cols'], fixture['rows'])
     stream = _TrackedByteStream(screen)
     for chunk in fixture['chunks']:
+        if isinstance(chunk, dict):
+            cols, rows = chunk['resize']
+            screen.resize(rows, cols)
+            continue
         stream.feed(base64.b64decode(chunk))
     return screen
 
@@ -72,6 +83,20 @@ def _diff(expected, actual):
         if want != got:
             out.append('row %2d\n  tmux: %r\n  ours: %r' % (i, want, got))
     return '\n'.join(out)
+
+
+def test_a_resized_fixture_ends_at_its_final_size():
+    """Any fixture carrying a resize marker must end on the size tmux captured
+    — otherwise the grid we diff isn't the grid tmux described."""
+    for path in _fixtures():
+        fixture = _load(path)
+        markers = [c for c in fixture['chunks'] if isinstance(c, dict)]
+        if not markers:
+            continue
+        screen = _replay(fixture)
+        final_cols, final_rows = fixture.get(
+            'final_size', [fixture['cols'], fixture['rows']])
+        assert (screen.columns, screen.lines) == (final_cols, final_rows), path
 
 
 def test_fixtures_exist():
@@ -113,9 +138,56 @@ def test_harness_catches_a_dropped_escape(name, sequence):
     screen = pyte.Screen(fixture['cols'], fixture['rows'])
     stream = pyte.ByteStream(screen)
     for chunk in fixture['chunks']:
+        if isinstance(chunk, dict):
+            cols, rows = chunk['resize']
+            screen.resize(rows, cols)
+            continue
         stream.feed(base64.b64decode(chunk))
     expected = _normalize(fixture['expected'])
     assert _normalize(screen.display) != expected, (
         'fixture %s no longer exercises %s' % (name, sequence))
     # ...while our screen does match it.
     assert _normalize(_replay(fixture).display) == expected
+
+
+# Sequences the corpus must keep exercising, and what breaks when it doesn't.
+# A fixture can stop covering one silently — a program changes how it draws,
+# or someone re-records on a different tmux — and the suite quietly narrows.
+COVERAGE = {
+    'SU (scroll up)': rb'\x1b\[[0-9;]*S',
+    'ED (erase display)': rb'\x1b\[[0-9;]*J',
+    'EL (erase line)': rb'\x1b\[[0-9;]*K',
+    'CUP (cursor position)': rb'\x1b\[[0-9;]*H',
+    'DECSTBM (scroll region)': rb'\x1b\[[0-9;]*r',
+    'alternate screen': rb'\x1b\[\?1049[hl]',
+    'SGR (colour/attrs)': rb'\x1b\[[0-9;]*m',
+}
+
+
+def _raw_bytes(fixture):
+    return b''.join(base64.b64decode(c) for c in fixture['chunks']
+                    if not isinstance(c, dict))
+
+
+def _corpus_bytes():
+    return {os.path.basename(p)[:-5]: _raw_bytes(_load(p)) for p in _fixtures()}
+
+
+@pytest.mark.parametrize('label,pattern', sorted(COVERAGE.items()))
+def test_corpus_still_exercises(label, pattern):
+    hits = [name for name, raw in _corpus_bytes().items()
+            if re.search(pattern, raw)]
+    assert hits, 'no fixture exercises %s any more' % label
+
+
+def test_both_input_paths_are_represented():
+    """tmux normalizes what it forwards, so tmux-mode fixtures alone would
+    never exercise the escapes a program emits directly."""
+    sources = {_load(p).get('source', 'tmux') for p in _fixtures()}
+    assert {'tmux', 'raw-pty'} <= sources
+
+
+def test_a_resize_is_covered():
+    resized = [p for p in _fixtures()
+               if any(isinstance(c, dict) for c in _load(p)['chunks'])]
+    assert resized, 'no fixture resizes mid-stream (what a font-size change does)'

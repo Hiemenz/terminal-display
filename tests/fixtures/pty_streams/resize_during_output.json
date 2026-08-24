@@ -1,0 +1,70 @@
+{
+ "name": "resize_during_output",
+ "command": [
+  "bash",
+  "-c",
+  "for i in $(seq 1 40); do echo \"line $i of output\"; done"
+ ],
+ "source": "tmux",
+ "cols": 80,
+ "rows": 24,
+ "final_size": [
+  100,
+  30
+ ],
+ "recorded": "2026-08-24",
+ "tmux": "tmux 3.5a",
+ "chunks": [
+  "G1s/MTA0OWgbWzIyOzA7MHQbWz8xaBs9G1tIG1syShtbPzEybBtbPzI1aBtbPzEwMDBsG1s/MTAwMmwbWz8xMDAzbBtbPzEwMDZsG1s/MTAwNWwbWz8yMDA0aBsoQhtbbRtbPzEybBtbPzI1aBtbPzEwMDZsG1s/MTAwMGwbWz8xMDAybBtbPzEwMDNsG1sxOzFIG1sxOzI0chtbYxtbPmMbWz5xG10xMDs/G1wbXTExOz8bXBtbMTsxSA==",
+  "G1s/MjVsJCAbW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1s/MTJsG1s/MjVoG1sxOzNI",
+  "GyhCG1ttG1s/MTJsG1s/MjVoG1s/MTAwNmwbWz8xMDAwbBtbPzEwMDJsG1s/MTAwM2wbWzE7MUgbWzE7MjRyG1sxOzNI",
+  "G1s/MjVsG1tIJCAbW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1s/MTJsG1s/MjVoG1sxOzNI",
+  "YmFzaCAtYyAnZm9yIGkgaW4gJChzZXEgMSA0MCk7IGRvIGVjaG8gImxpbmUgJGkgb2Ygb3V0cHV0IjsgZG9uZSc=",
+  "DQo=",
+  "bGluZSAxIG9mIG91dHB1dA0KG1sxOFMbW0hsaW5lIDE4IG9mIG91dHB1dA0KbGluZSAxOSBvZiBvdXRwdXQNCmxpbmUgMjAgb2Ygb3V0cHV0DQpsaW5lIDIxIG9mIG91dHB1dA0KbGluZSAyMiBvZiBvdXRwdXQNCmxpbmUgMjMgb2Ygb3V0cHV0DQpsaW5lIDI0IG9mIG91dHB1dBtbSw0KbGluZSAyNSBvZiBvdXRwdXQbW0sNCmxpbmUgMjYgb2Ygb3V0cHV0G1tLDQpsaW5lIDI3IG9mIG91dHB1dBtbSw0KbGluZSAyOCBvZiBvdXRwdXQbW0sNCmxpbmUgMjkgb2Ygb3V0cHV0G1tLDQpsaW5lIDMwIG9mIG91dHB1dBtbSw0KbGluZSAzMSBvZiBvdXRwdXQbW0sNCmxpbmUgMzIgb2Ygb3V0cHV0G1tLDQpsaW5lIDMzIG9mIG91dHB1dBtbSw0KbGluZSAzNCBvZiBvdXRwdXQbW0sNCmxpbmUgMzUgb2Ygb3V0cHV0G1tLDQpsaW5lIDM2IG9mIG91dHB1dBtbSw0KbGluZSAzNyBvZiBvdXRwdXQbW0sNCmxpbmUgMzggb2Ygb3V0cHV0G1tLDQpsaW5lIDM5IG9mIG91dHB1dBtbSw0KbGluZSA0MCBvZiBvdXRwdXQbW0sNChtbSw==",
+  "JCA=",
+  "G1s/NzcyN2gbKEIbW20bWz8xMmwbWz8yNWgbWz8xMDA2bBtbPzEwMDBsG1s/MTAwMmwbWz8xMDAzbBtbMTsxSBtbMTsyNHIbWzI0OzNI",
+  "G1s/MjVsG1tIbGluZSAxOCBvZiBvdXRwdXQbW0sNCmxpbmUgMTkgb2Ygb3V0cHV0G1tLDQpsaW5lIDIwIG9mIG91dHB1dBtbSw0KbGluZSAyMSBvZiBvdXRwdXQbW0sNCmxpbmUgMjIgb2Ygb3V0cHV0G1tLDQpsaW5lIDIzIG9mIG91dHB1dBtbSw0KbGluZSAyNCBvZiBvdXRwdXQbW0sNCmxpbmUgMjUgb2Ygb3V0cHV0G1tLDQpsaW5lIDI2IG9mIG91dHB1dBtbSw0KbGluZSAyNyBvZiBvdXRwdXQbW0sNCmxpbmUgMjggb2Ygb3V0cHV0G1tLDQpsaW5lIDI5IG9mIG91dHB1dBtbSw0KbGluZSAzMCBvZiBvdXRwdXQbW0sNCmxpbmUgMzEgb2Ygb3V0cHV0G1tLDQpsaW5lIDMyIG9mIG91dHB1dBtbSw0KbGluZSAzMyBvZiBvdXRwdXQbW0sNCmxpbmUgMzQgb2Ygb3V0cHV0G1tLDQpsaW5lIDM1IG9mIG91dHB1dBtbSw0KbGluZSAzNiBvZiBvdXRwdXQbW0sNCmxpbmUgMzcgb2Ygb3V0cHV0G1tLDQpsaW5lIDM4IG9mIG91dHB1dBtbSw0KbGluZSAzOSBvZiBvdXRwdXQbW0sNCmxpbmUgNDAgb2Ygb3V0cHV0G1tLDQokIBtbSxtbPzEybBtbPzI1aA==",
+  {
+   "resize": [
+    100,
+    30
+   ]
+  },
+  "GyhCG1ttG1s/MTJsG1s/MjVoG1s/MTAwNmwbWz8xMDAwbBtbPzEwMDJsG1s/MTAwM2wbWzE7MUgbWzE7MzByG1szMDszSA==",
+  "G1s/MjVsG1tIbGluZSAxMiBvZiBvdXRwdXQbW0sNCmxpbmUgMTMgb2Ygb3V0cHV0G1tLDQpsaW5lIDE0IG9mIG91dHB1dBtbSw0KbGluZSAxNSBvZiBvdXRwdXQbW0sNCmxpbmUgMTYgb2Ygb3V0cHV0G1tLDQpsaW5lIDE3IG9mIG91dHB1dBtbSw0KbGluZSAxOCBvZiBvdXRwdXQbW0sNCmxpbmUgMTkgb2Ygb3V0cHV0G1tLDQpsaW5lIDIwIG9mIG91dHB1dBtbSw0KbGluZSAyMSBvZiBvdXRwdXQbW0sNCmxpbmUgMjIgb2Ygb3V0cHV0G1tLDQpsaW5lIDIzIG9mIG91dHB1dBtbSw0KbGluZSAyNCBvZiBvdXRwdXQbW0sNCmxpbmUgMjUgb2Ygb3V0cHV0G1tLDQpsaW5lIDI2IG9mIG91dHB1dBtbSw0KbGluZSAyNyBvZiBvdXRwdXQbW0sNCmxpbmUgMjggb2Ygb3V0cHV0G1tLDQpsaW5lIDI5IG9mIG91dHB1dBtbSw0KbGluZSAzMCBvZiBvdXRwdXQbW0sNCmxpbmUgMzEgb2Ygb3V0cHV0G1tLDQpsaW5lIDMyIG9mIG91dHB1dBtbSw0KbGluZSAzMyBvZiBvdXRwdXQbW0sNCmxpbmUgMzQgb2Ygb3V0cHV0G1tLDQpsaW5lIDM1IG9mIG91dHB1dBtbSw0KbGluZSAzNiBvZiBvdXRwdXQbW0sNCmxpbmUgMzcgb2Ygb3V0cHV0G1tLDQpsaW5lIDM4IG9mIG91dHB1dBtbSw0KbGluZSAzOSBvZiBvdXRwdXQbW0sNCmxpbmUgNDAgb2Ygb3V0cHV0G1tLDQokIBtbSxtbPzEybBtbPzI1aA==",
+  "DSQgG1tL"
+ ],
+ "expected": [
+  "line 12 of output",
+  "line 13 of output",
+  "line 14 of output",
+  "line 15 of output",
+  "line 16 of output",
+  "line 17 of output",
+  "line 18 of output",
+  "line 19 of output",
+  "line 20 of output",
+  "line 21 of output",
+  "line 22 of output",
+  "line 23 of output",
+  "line 24 of output",
+  "line 25 of output",
+  "line 26 of output",
+  "line 27 of output",
+  "line 28 of output",
+  "line 29 of output",
+  "line 30 of output",
+  "line 31 of output",
+  "line 32 of output",
+  "line 33 of output",
+  "line 34 of output",
+  "line 35 of output",
+  "line 36 of output",
+  "line 37 of output",
+  "line 38 of output",
+  "line 39 of output",
+  "line 40 of output",
+  "$"
+ ]
+}
