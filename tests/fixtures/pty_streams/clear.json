@@ -1,0 +1,51 @@
+{
+ "name": "clear",
+ "command": [
+  "bash",
+  "-c",
+  "for i in $(seq 1 15); do echo \"line $i\"; done; sleep 1; clear"
+ ],
+ "source": "tmux",
+ "cols": 80,
+ "rows": 24,
+ "recorded": "2026-08-23",
+ "tmux": "tmux 3.5a",
+ "chunks": [
+  "G1s/MTA0OWgbWzIyOzA7MHQbWz8xaBs9G1tIG1syShtbPzEybBtbPzI1aBtbPzEwMDBsG1s/MTAwMmwbWz8xMDAzbBtbPzEwMDZsG1s/MTAwNWwbWz8yMDA0aBsoQhtbbRtbPzEybBtbPzI1aBtbPzEwMDZsG1s/MTAwMGwbWz8xMDAybBtbPzEwMDNsG1sxOzFIG1sxOzI0chtbYxtbPmMbWz5xG10xMDs/G1wbXTExOz8bXBtbMTsxSA==",
+  "G1s/MjVsJCAbW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1s/MTJsG1s/MjVoG1sxOzNI",
+  "GyhCG1ttG1s/MTJsG1s/MjVoG1s/MTAwNmwbWz8xMDAwbBtbPzEwMDJsG1s/MTAwM2wbWzE7MUgbWzE7MjRyG1sxOzNI",
+  "G1s/MjVsG1tIJCAbW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1s/MTJsG1s/MjVoG1sxOzNI",
+  "YmFzaCAtYyAnZm9yIGkgaW4gJChzZXEgMSAxNSk7IGRvIGVjaG8gImxpbmUgJGkiOyBkb25lOyBzbGVlcCAxOyBjbGVhcicNCg==",
+  "bGluZSAxDQpsaW5lIDINCmxpbmUgMw0KbGluZSA0DQpsaW5lIDUNCmxpbmUgNg0KbGluZSA3DQpsaW5lIDgNCmxpbmUgOQ0KbGluZSAxMA0KbGluZSAxMQ0KbGluZSAxMg0KbGluZSAxMw0KbGluZSAxNA0KbGluZSAxNQ0K",
+  "G1tIG1tK",
+  "JCA=",
+  "G1s/NzcyN2gbKEIbW20bWz8xMmwbWz8yNWgbWz8xMDA2bBtbPzEwMDBsG1s/MTAwMmwbWz8xMDAzbBtbMTsxSBtbMTsyNHIbWzE7M0g=",
+  "G1s/MjVsG1tIJCAbW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLDQobW0sNChtbSw0KG1tLG1s/MTJsG1s/MjVoG1sxOzNI"
+ ],
+ "expected": [
+  "$",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  ""
+ ]
+}
