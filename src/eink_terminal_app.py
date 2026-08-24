@@ -1689,6 +1689,13 @@ class EinkTerminal(
                     state = 'asleep'
                 else:
                     state = 'active'
+                # The panel's text, so /screen can hand it to a phone or
+                # laptop as selectable text — no QR, no retyping an error
+                # message by hand.
+                try:
+                    self._preview_server.set_screen_text(self._screen_text())
+                except Exception:
+                    pass
                 self._preview_server.set_status({
                     'state': state,
                     'idle_secs': round(idle, 1),

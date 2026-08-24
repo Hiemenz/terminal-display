@@ -70,7 +70,8 @@ _CONFIG_SNAPSHOT_DIR = 'config_snapshots'
 # tradeoff for a LAN deterrent, not a bank vault).
 _active_sessions: set = set()
 _SESSION_COOKIE = 'eink_session'
-_GATED_HTML_GET = {'/config', '/clipboard', '/beam', '/notes', '/logs', '/session-logs'}
+_GATED_HTML_GET = {'/config', '/clipboard', '/beam', '/notes', '/logs',
+                   '/session-logs', '/screen', '/screen.txt'}
 _GATED_JSON_GET = {'/clipboard/list', '/logs.json', '/session-logs.json'}
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -2075,9 +2076,10 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                   activity_ref: List[float], photos_dir: str, config_path: str = '',
                   clipboard_path: str = '', display_queue: queue.Queue = None,
                   beam_ref: List[str] = None, config: dict = None,
-                  status_ref: List[dict] = None):
+                  status_ref: List[dict] = None, screen_ref: List[str] = None):
     config = config if config is not None else {}
     status_ref = status_ref if status_ref is not None else [{}]
+    screen_ref = screen_ref if screen_ref is not None else ['']
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -2128,6 +2130,16 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 text = (beam_ref[0] if beam_ref else '') or '(nothing beamed yet)'
                 self._respond(200, 'text/html; charset=utf-8',
                               _render_beam_page(text).encode())
+            elif path == '/screen':
+                # What's on the panel right now, as selectable text. The QR
+                # beam is for one grabbed selection; this is for "get that
+                # error message onto my laptop" without touching the device.
+                text = (screen_ref[0] if screen_ref else '') or '(nothing on screen yet)'
+                self._respond(200, 'text/html; charset=utf-8',
+                              _render_beam_page(text, title='Screen text').encode())
+            elif path == '/screen.txt':
+                text = (screen_ref[0] if screen_ref else '')
+                self._respond(200, 'text/plain; charset=utf-8', text.encode())
             elif path == '/notes':
                 text = _read_notes(config_path) or '(notes file is empty)'
                 self._respond(200, 'text/html; charset=utf-8',
@@ -2752,10 +2764,15 @@ class PreviewServer:
         self._activity_ref: List[float] = [time.time()]
         self._beam_ref:     List[str] = ['']   # latest "beam to phone" text
         self._status_ref:   List[dict] = [{}]  # live status from the app loop
+        self._screen_ref:   List[str] = ['']   # live screen text, for /screen
 
     def set_beam_text(self, text: str):
         """Store the text shown at /beam (called by the app on beam-to-phone)."""
         self._beam_ref[0] = text or ''
+
+    def set_screen_text(self, text: str):
+        """Publish the terminal's current text for /screen (called by the app)."""
+        self._screen_ref[0] = text or ''
 
     def set_status(self, status: dict):
         """Publish live runtime status for the /status panel (called each loop)."""
@@ -2775,6 +2792,7 @@ class PreviewServer:
             beam_ref=self._beam_ref,
             config=self._config,
             status_ref=self._status_ref,
+            screen_ref=self._screen_ref,
         )
         self._server = HTTPServer(('', self._port), handler)
         self._server.allow_reuse_address = True
