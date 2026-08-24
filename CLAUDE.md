@@ -230,9 +230,12 @@ The screensaver can show how much Claude Code work has gone through recently
 — messages and tokens over the last 5 h and 7 d, plus the busiest project —
 read from the session transcripts under `~/.claude/projects/*/*.jsonl`
 (`src/claude_usage.py`, `screensaver_show_claude_usage`). It sits in the
-bottom-right corner; the wake QR that used to live there is off by default
-(`screensaver_show_qr`), and when it is turned back on the panel stacks
-above it rather than over it.
+bottom-right corner as a single tile with the week-progress bar (the week
+runs Tuesday 23:00 → Tuesday 23:00, so it reads as how far through the week
+this usage happened). The wake QR that used to own that corner is off by
+default (`screensaver_show_qr`); turned back on, the tile stacks above it
+rather than over it. With the activity panel disabled the week bar falls
+back to its own box in the top-left.
 
 It is labelled "local est." on screen for a reason: **this is not your quota
 status.** Claude Code's real 5-hour and weekly limits are enforced
