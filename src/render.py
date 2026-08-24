@@ -449,8 +449,12 @@ def _weekly_percent(config: dict) -> float | None:
         return None
 
 
-def _draw_claude_usage(d, font_path: str, usage: dict) -> None:
-    """Panel of recent Claude Code activity, top-right of the lock screen.
+def _draw_claude_usage(d, font_path: str, usage: dict,
+                       reserved_bottom: int = 0) -> None:
+    """Panel of recent Claude Code activity, bottom-right of the lock screen.
+
+    `reserved_bottom` is how much of that corner the wake QR already occupies:
+    with the QR shown the panel stacks above it rather than over it.
 
     Deliberately labelled an estimate: Claude Code's real 5-hour and weekly
     limits are enforced server-side and written nowhere on disk, so this is
@@ -473,7 +477,7 @@ def _draw_claude_usage(d, font_path: str, usage: dict) -> None:
     box_w = max(widths + [int(d.textlength('CLAUDE ACTIVITY (local est.)', font=f_title))]) + 20
     box_h = 26 + len(rows) * 16 + (16 if busiest else 4)
     box_x = W - PAD - box_w
-    box_y = PAD
+    box_y = H - PAD - box_h - reserved_bottom
     d.rounded_rectangle([box_x, box_y, box_x + box_w, box_y + box_h],
                         radius=8, fill=_WHITE, outline=_BLACK, width=1)
     d.text((box_x + 10, box_y + 6), 'CLAUDE ACTIVITY (local est.)',
@@ -519,13 +523,8 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
         except Exception:
             pass
 
-    if claude_usage:
-        try:
-            _draw_claude_usage(d, font_path, claude_usage)
-        except Exception:
-            pass
-
-    if qr_url and _HAS_QRCODE:
+    reserved_bottom = 0
+    if qr_url and _HAS_QRCODE and config.get('screensaver_show_qr', True):
         try:
             qr = _qrcode.QRCode(
                 error_correction=_qrcode.constants.ERROR_CORRECT_L,
@@ -550,6 +549,14 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
             label = 'Scan to wake'
             lw = int(d.textlength(label, font=f_small)) if hasattr(d, 'textlength') else f_small.getbbox(label)[2]
             d.text((qr_x + (qr_size - lw) // 2, qr_y + qr_size + 4), label, font=f_small, fill=_BLACK)
+            # Tell the activity panel how much of this corner is spoken for.
+            reserved_bottom = H - (qr_y - box_pad) + 6
+        except Exception:
+            pass
+
+    if claude_usage:
+        try:
+            _draw_claude_usage(d, font_path, claude_usage, reserved_bottom)
         except Exception:
             pass
 
