@@ -219,6 +219,8 @@ web-UI QR code sits inside the Network card.
 - `terminal_alert_health_interval: 30` / `terminal_alert_throttle` / `terminal_alert_failed_units` / `terminal_alert_storage_health` / `terminal_alert_network` / `terminal_alert_network_host` / `terminal_alert_network_fails` — system-health alerts (thermal throttle, failed systemd units, SD card read-only remount, dead network) shown in the terminal status bar
 - `preview_server_pin: ""` — PIN-gates the preview server's mutating/sensitive endpoints (settings, remote input, uploads, clipboard, notes); empty disables the gate (default, matches prior behavior)
 - `terminal_llm_model_path` / `terminal_llm_context_size` / `terminal_llm_max_tokens` / `terminal_llm_threads` / `terminal_llm_system_prompt` — local LLM chat (`src/llm_chat.py`): GGUF file, context window, response length cap, CPU threads, and system prompt. No network calls — inference runs fully on-device via `llama-cpp-python`
+- `display_sleep_shows_screensaver: true` — draw the lock screen before deep-sleeping instead of leaving the terminal on the glass
+- `claude_weekly_token_budget: 0` — yardstick for the "used N%" line (0 = compare against your own 4-week average)
 - `screensaver_show_qr: false` — the lock screen's wake QR code
 - `screensaver_show_claude_usage: true` / `terminal_claude_usage_ttl: 300` — lock-screen Claude Code activity panel (local estimate, not quota) and how often the transcripts are rescanned
 - `terminal_long_command_seconds: 30` — announce a command finishing when it ran at least this long (0 = off, tmux mode only)
@@ -229,7 +231,10 @@ web-UI QR code sits inside the Network card.
 The screensaver can show how much Claude Code work has gone through recently
 — messages and tokens over the last 5 h and 7 d, plus the busiest project —
 read from the session transcripts under `~/.claude/projects/*/*.jsonl`
-(`src/claude_usage.py`, `screensaver_show_claude_usage`). It sits in the
+(`src/claude_usage.py`, `screensaver_show_claude_usage`). The panel deep-sleeps onto this image rather than onto the terminal
+(`display_sleep_shows_screensaver`): e-ink retains whatever was last drawn,
+so sleeping on the terminal left the session on the glass and looked exactly
+like a display that never slept. It sits in the
 bottom-right corner as a single tile with the week-progress bar (the week
 runs Tuesday 23:00 → Tuesday 23:00, so it reads as how far through the week
 this usage happened). The wake QR that used to own that corner is off by
@@ -242,6 +247,14 @@ status.** Claude Code's real 5-hour and weekly limits are enforced
 server-side and written nowhere on disk — `/usage` fetches them live — so
 what's shown is what the local transcripts record going through, in tokens,
 which is not the unit the limits are counted in.
+
+The tile also carries a "used N%" line for the week. There is no local
+source for the real weekly limit, so the yardstick is either
+`claude_weekly_token_budget` if you set one, or — at 0 — your own average
+over the preceding 4 weeks, and the line says which ("of budget" vs "of a
+usual week"). Weeks with no activity are left out of that average: an idle
+week isn't evidence of a light workload, and averaging zeros in would make
+any active week look enormous.
 
 Cache reads are reported separately from `sent` (input + cache creation):
 they dwarf everything else and bill at a fraction of the rate, so folding

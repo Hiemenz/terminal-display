@@ -10,7 +10,14 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from claude_usage import _parse_timestamp, collect_usage, format_tokens, summary_lines  # noqa: E402
+from claude_usage import (  # noqa: E402
+    _parse_timestamp,
+    collect_usage,
+    format_tokens,
+    summary_lines,
+    weekly_baseline,
+    weekly_percent,
+)
 
 HOUR = 3600
 
@@ -248,3 +255,63 @@ def test_week_box_survives_when_the_panel_is_off():
     assert changed, 'no week box drawn'
     assert max(x for x, _y in changed) < W // 2
     assert max(y for _x, y in changed) < H // 2
+
+
+# ── "used N%" for the week ────────────────────────────────────────────────────
+
+def test_percent_of_a_configured_budget():
+    usage = {'7d': {'sent': 400_000, 'generated': 100_000}}
+    assert weekly_percent(usage, budget=1_000_000) == (50.0, 'budget')
+
+
+def test_percent_of_your_own_usual_week_when_no_budget():
+    """No budget set, so the yardstick is what recent weeks looked like."""
+    usage = {'7d': {'sent': 900_000, 'generated': 100_000}}
+    pct, of_what = weekly_percent(usage, budget=0, baseline=500_000)
+    assert (round(pct), of_what) == (200, 'usual')
+
+
+def test_budget_wins_over_baseline():
+    usage = {'7d': {'sent': 100, 'generated': 0}}
+    assert weekly_percent(usage, budget=1000, baseline=50)[1] == 'budget'
+
+
+def test_no_yardstick_means_no_percentage():
+    """Better no number than a number measured against nothing."""
+    assert weekly_percent({'7d': {'sent': 5, 'generated': 5}}, 0, 0) == (None, '')
+
+
+def test_baseline_ignores_the_week_in_progress(tmp_path):
+    """A partial week would drag the average down and inflate today's figure."""
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    entries = [
+        _message('2026-08-24T11:00:00Z', sent=999_999),          # this week
+        {'timestamp': '2026-08-14T12:00:00Z', 'cwd': '/w',       # ~1.5 weeks ago
+         'message': {'usage': {'input_tokens': 1000, 'output_tokens': 0}}},
+    ]
+    path = _write_transcript(tmp_path, 'proj', entries, mtime=now)
+    assert path.exists()
+    assert weekly_baseline(str(tmp_path), now=now, weeks=4) == 1000
+
+
+def test_baseline_averages_only_weeks_with_activity(tmp_path):
+    """Idle weeks are not evidence of a light workload; averaging zeros in
+    would make any active week look enormous."""
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    entries = [
+        {'timestamp': '2026-08-14T12:00:00Z', 'cwd': '/w',
+         'message': {'usage': {'input_tokens': 2000, 'output_tokens': 0}}},
+        {'timestamp': '2026-08-07T12:00:00Z', 'cwd': '/w',
+         'message': {'usage': {'input_tokens': 4000, 'output_tokens': 0}}},
+    ]
+    _write_transcript(tmp_path, 'proj', entries, mtime=now)
+    assert weekly_baseline(str(tmp_path), now=now, weeks=4) == 3000
+
+
+def test_percentage_row_reaches_the_tile():
+    from render import render_screensaver
+
+    usage = dict(_usage_fixture(), week_pct=175.0, week_pct_of='usual')
+    with_pct = render_screensaver('', '', NO_WEEK, claude_usage=usage)
+    without = render_screensaver('', '', NO_WEEK, claude_usage=_usage_fixture())
+    assert _changed_pixels(with_pct, without), 'the used% row was not drawn'

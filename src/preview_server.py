@@ -176,8 +176,10 @@ _CONFIG_SCHEMA = [
         ['screensaver_enabled',         'bool',   'Enabled',              None],
         ['screensaver_idle_timeout',    'int',    'Idle Timeout (s)',      'Before screensaver activates'],
         ['screensaver_mode',            'select', 'Mode',                 ['static', 'cycle']],
+        ['display_sleep_shows_screensaver', 'bool', 'Sleep Shows Lock Screen', 'Draw the lock screen before sleeping, instead of leaving the terminal up'],
         ['screensaver_show_qr',         'bool',   'Wake QR Code',         'QR in the lock screen corner'],
         ['screensaver_show_claude_usage', 'bool',  'Claude Activity Panel', 'Recent Claude Code usage (local estimate, not your quota)'],
+        ['claude_weekly_token_budget',   'int',    'Weekly Token Budget',  'Yardstick for "used N%" (0 = compare to your own 4-week average)'],
         ['screensaver_cycle_interval',  'int',    'Cycle Interval (min)', 'Cycle mode only'],
     ]],
     ['Startup & Web', [

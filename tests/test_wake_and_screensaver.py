@@ -141,3 +141,61 @@ def test_usage_is_cached_between_screensavers(make_app, monkeypatch):
     second = app._claude_usage()
     assert first == second
     assert len(scans) == 1
+
+
+# ── what the panel sleeps on ──────────────────────────────────────────────────
+
+def _sleep_app(make_app, **config):
+    """An app parked right at the early-deep-sleep decision."""
+    app = _saver_app(make_app)
+    app._config = dict(app._config, **dict({'screensaver_enabled': True}, **config))
+    app._sleep_timeout = 300
+    app._idle_timeout = 900
+    app._in_text_message = False
+    app._last_input = 0.0
+    app.slept_bare = False
+    app._sleep_panel = lambda: setattr(app, 'slept_bare', True)
+    app.showed_saver = False
+    app._show_screensaver = lambda: setattr(app, 'showed_saver', True)
+    return app
+
+
+def _decide(app, idle):
+    """The early-deep-sleep branch, in isolation: what happens at this idle?"""
+    if (app._sleep_timeout > 0 and not app._in_text_message
+            and idle > app._sleep_timeout
+            and not (app._idle_timeout > 0 and idle > app._idle_timeout)):
+        if (app._config.get('display_sleep_shows_screensaver', True)
+                and app._config.get('screensaver_enabled', True)):
+            app._show_screensaver()
+        else:
+            app._sleep_panel()
+
+
+def test_panel_sleeps_on_the_lock_screen_not_the_terminal(make_app):
+    """E-ink retains the last frame, so sleeping on the terminal leaves your
+    session on the glass and looks like a display that never slept."""
+    app = _sleep_app(make_app)
+    _decide(app, idle=400)
+    assert app.showed_saver is True
+    assert app.slept_bare is False
+
+
+def test_old_behaviour_is_still_available(make_app):
+    app = _sleep_app(make_app, display_sleep_shows_screensaver=False)
+    _decide(app, idle=400)
+    assert app.slept_bare is True
+    assert app.showed_saver is False
+
+
+def test_disabled_screensaver_still_sleeps_bare(make_app):
+    app = _sleep_app(make_app, screensaver_enabled=False)
+    _decide(app, idle=400)
+    assert app.slept_bare is True
+    assert app.showed_saver is False
+
+
+def test_nothing_happens_before_the_sleep_window(make_app):
+    app = _sleep_app(make_app)
+    _decide(app, idle=100)
+    assert app.slept_bare is False and app.showed_saver is False

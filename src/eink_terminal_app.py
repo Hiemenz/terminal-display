@@ -756,11 +756,19 @@ class EinkTerminal(
         if cached and (now - getattr(self, '_claude_usage_mono', 0.0)) < ttl:
             return cached
         try:
-            from claude_usage import collect_usage
+            from claude_usage import collect_usage, weekly_baseline, weekly_percent
             started = time.monotonic()
             usage = collect_usage()
-            logger.info('Claude activity scan: %d msgs in 5 h (%.1fs)',
+            # How heavy a week this is. The real weekly limit is server-side,
+            # so the yardstick is either a budget the user set or, failing
+            # that, what their own recent weeks looked like.
+            budget = int(self._config.get('claude_weekly_token_budget', 0) or 0)
+            baseline = 0 if budget > 0 else weekly_baseline()
+            pct, of_what = weekly_percent(usage, budget, baseline)
+            usage['week_pct'], usage['week_pct_of'] = pct, of_what
+            logger.info('Claude activity scan: %d msgs in 5 h, week %s (%.1fs)',
                         usage.get('5h', {}).get('messages', 0),
+                        ('%.0f%% of %s' % (pct, of_what)) if pct is not None else 'n/a',
                         time.monotonic() - started)
         except Exception as e:
             logger.warning('Claude activity scan failed: %s', e)
@@ -1366,17 +1374,28 @@ class EinkTerminal(
                 continue
 
             # ── Early panel deep-sleep ────────────────────────────────────────
-            # Before the screensaver kicks in, power the panel down once a shorter
-            # idle window passes. The terminal image is retained behind the dark
-            # glass; any input wakes it. Skipped if it would land at/after the
-            # screensaver threshold (then the screensaver handles sleeping).
+            # Power the panel down once a shorter idle window passes. E-ink
+            # retains whatever was last drawn, so this leaves an image on the
+            # glass either way — and the terminal is the wrong one to leave
+            # there: it looks like a display that never slept, and it holds
+            # your session up for anyone walking past. So the screensaver is
+            # drawn first and *that* is what the panel sleeps on, unless
+            # display_sleep_shows_screensaver says otherwise.
             if (self._sleep_timeout > 0 and not panel_asleep and not in_screensaver
                     and not self._in_text_message):
                 idle = now - self._last_input
                 if idle > self._sleep_timeout and not (
                         self._idle_timeout > 0 and idle > self._idle_timeout):
-                    panel_asleep = True
-                    self._sleep_panel()
+                    if (self._config.get('display_sleep_shows_screensaver', True)
+                            and self._config.get('screensaver_enabled', True)):
+                        # _show_screensaver draws and then sleeps the panel, so
+                        # this is the same power state with a deliberate image.
+                        in_screensaver = True
+                        panel_asleep = False
+                        self._show_screensaver()
+                    else:
+                        panel_asleep = True
+                        self._sleep_panel()
                     continue
 
             # ── Idle screensaver check ────────────────────────────────────────

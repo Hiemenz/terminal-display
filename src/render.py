@@ -476,6 +476,11 @@ def _draw_claude_usage(d, font_path: str, usage: dict,
                        format_tokens(bucket.get('sent', 0)),
                        format_tokens(bucket.get('generated', 0))))
     busiest = (usage.get('5h') or {}).get('top_project', '')
+    used_pct, used_of = usage.get('week_pct'), usage.get('week_pct_of', '')
+    used_row = ('used %.0f%% of %s' % (used_pct, 'a usual week' if used_of == 'usual'
+                                       else 'budget')) if used_pct is not None else ''
+    if used_row:
+        rows.append(used_row)
 
     f_title = _find_font(font_path, 13)
     f_row = _find_font(font_path, 13)
