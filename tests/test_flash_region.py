@@ -18,7 +18,7 @@ def _driver(region_flash=True, sleeping=False):
     d._hw_sleeping = sleeping
     calls = []
     d._hw_flash_region = lambda img, y0, y1: calls.append(('region', y0, y1))
-    d._hw_full = lambda img: calls.append(('full',))
+    d._hw_full = lambda img, reason='': calls.append(('full', reason))
     return d, calls
 
 
@@ -37,26 +37,26 @@ def test_bottom_change_flashes_only_those_rows():
 def test_no_change_info_flashes_full():
     d, calls = _driver()
     d._region_or_full_flash(None, None)
-    assert calls == [('full',)]
+    assert calls == [('full', 'partial-limit')]
 
 
 def test_empty_span_flashes_full():
     d, calls = _driver()
     d._region_or_full_flash(None, (200, 200))
-    assert calls == [('full',)]
+    assert calls == [('full', 'partial-limit')]
 
 
 def test_region_flash_disabled_always_full():
     d, calls = _driver(region_flash=False)
     d._region_or_full_flash(None, (0, 50))
-    assert calls == [('full',)]
+    assert calls == [('full', 'partial-limit')]
 
 
 def test_sleeping_panel_flashes_full():
     # No reliable prior frame after sleep → can't do a windowed diff.
     d, calls = _driver(sleeping=True)
     d._region_or_full_flash(None, (0, 50))
-    assert calls == [('full',)]
+    assert calls == [('full', 'partial-limit')]
 
 
 def test_change_y_from_bufs_single_row():
