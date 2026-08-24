@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 import pyte
+from pyte.screens import Margins
 
 from session_logger import TabLogger
 
@@ -36,6 +37,44 @@ class _ClearTrackingMixin(_ClearTrackingBase):
         if how in (2, 3):
             self.full_clear = True
 
+    # pyte implements neither SU (CSI Ps S) nor SD (CSI Ps T) — an unmapped
+    # CSI final byte is silently dropped. That matters here because tmux does
+    # NOT pass `clear`'s ED 2 through to the outer terminal: it repaints the
+    # pane by scrolling the whole region away instead
+    # (`ESC[1;23r ESC[2;23r ESC[22S ESC[K`). Unhandled, those lines stayed in
+    # the pyte buffer, so after `clear` the panel still showed the old text —
+    # no amount of ghost-clearing at the driver level could fix that, since
+    # the content was genuinely still in the frame we painted.
+    def scroll_up(self, count: int = 1, *args, **kwargs) -> None:
+        """SU — scroll the scrolling region up `count` lines."""
+        self._scroll_region(count, up=True)
+
+    def scroll_down(self, count: int = 1, *args, **kwargs) -> None:
+        """SD — scroll the scrolling region down `count` lines."""
+        self._scroll_region(count, up=False)
+
+    def _scroll_region(self, count, up: bool) -> None:
+        try:
+            count = max(1, int(count or 1))
+        except (TypeError, ValueError):
+            count = 1
+        top, bottom = self.margins or Margins(0, self.lines - 1)
+        height = bottom - top + 1
+        if count >= height:
+            # The whole region scrolled away — same user-visible result as a
+            # `clear`, so it earns the deep ghost-clearing flash.
+            self.full_clear = True
+        # index()/reverse_index() only scroll when the cursor sits on the
+        # margin; park it there, scroll, then put it back where it was.
+        saved_x, saved_y = self.cursor.x, self.cursor.y
+        self.cursor.y = bottom if up else top
+        for _ in range(min(count, height)):
+            if up:
+                self.index()
+            else:
+                self.reverse_index()
+        self.cursor.x, self.cursor.y = saved_x, saved_y
+
 
 class _TrackedScreen(_ClearTrackingMixin, pyte.Screen):
     pass
@@ -43,6 +82,16 @@ class _TrackedScreen(_ClearTrackingMixin, pyte.Screen):
 
 class _TrackedHistoryScreen(_ClearTrackingMixin, pyte.HistoryScreen):
     pass
+
+
+class _TrackedByteStream(pyte.ByteStream):
+    """ByteStream that routes SU/SD to the tracked screens above. pyte's
+    dispatch table is a plain class attribute, so extending it is enough.
+
+    Only use this with a _TrackedScreen/_TrackedHistoryScreen — pyte binds
+    every handler when the parser is built, so a screen without scroll_up
+    would raise AttributeError at construction time."""
+    csi = {**pyte.ByteStream.csi, 'S': 'scroll_up', 'T': 'scroll_down'}
 
 
 @dataclass

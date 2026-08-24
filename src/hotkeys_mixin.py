@@ -39,6 +39,7 @@ from terminal_state import (
     _MIN_FONT,
     _PGDN,
     _PGUP,
+    _TrackedByteStream,
     _TrackedScreen,
 )
 
@@ -170,7 +171,7 @@ class HotkeysMixin:
             half_w = self._split_half_w()
             cols, rows, _, _ = terminal_dimensions(self._font_size, self._font_path, half_w)
             tab.pane2_screen = _TrackedScreen(cols, rows)
-            tab.pane2_stream = pyte.ByteStream(tab.pane2_screen)
+            tab.pane2_stream = _TrackedByteStream(tab.pane2_screen)
             winsize = struct.pack('HHHH', rows, cols, 0, 0)
             try:
                 fcntl.ioctl(tab.pane2_master, termios.TIOCSWINSZ, winsize)
