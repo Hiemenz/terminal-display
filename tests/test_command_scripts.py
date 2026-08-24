@@ -61,3 +61,38 @@ def test_install_command_scripts_prepends_bindir_to_path(make_app, tmp_path, mon
 
     bindir = os.path.join(str(tmp_path), 'data', 'bin')
     assert os.environ['PATH'].split(os.pathsep)[0] == bindir
+
+
+def test_claim_pidfile_writes_own_pid(make_app, tmp_path, monkeypatch):
+    """The first instance publishes its PID for the command scripts to signal."""
+    pidfile = str(tmp_path / 'active')
+    app = make_app()
+    monkeypatch.setattr(type(app), '_PIDFILE', pidfile)
+
+    app._claim_pidfile()
+    try:
+        assert open(pidfile).read() == str(os.getpid())
+    finally:
+        app._release_pidfile()
+    assert not os.path.exists(pidfile)
+
+
+def test_second_instance_does_not_steal_pidfile(make_app, tmp_path, monkeypatch):
+    """A duplicate instance (e.g. a stale systemd unit that lost the race for
+    the panel) must leave the live instance's PID alone — otherwise every
+    typeable command silently signals the invisible process."""
+    pidfile = str(tmp_path / 'active')
+    first, second = make_app(), make_app()
+    monkeypatch.setattr(type(first), '_PIDFILE', pidfile)
+
+    first._claim_pidfile()
+    try:
+        second._claim_pidfile()
+        assert second._pidfile_fd is None            # lost the flock
+        assert open(pidfile).read() == str(os.getpid())   # untouched
+
+        # The loser's cleanup must not remove the winner's claim either.
+        second._release_pidfile()
+        assert os.path.exists(pidfile)
+    finally:
+        first._release_pidfile()
