@@ -1,5 +1,6 @@
 """Tests for _install_command_scripts / _write_signal_script — the typeable
-shell commands (settings, eink, clear-eink, notes, llmchat, terminal) that
+shell commands (settings, eink, clear-eink, notes, llmchat, terminal,
+commands) that
 signal the running EinkTerminal process by PID (from /tmp/eink-terminal-active).
 See src/shell_mixin.py."""
 import os
@@ -31,7 +32,8 @@ def test_install_command_scripts_writes_all_six_names(make_app, tmp_path, monkey
     app._install_command_scripts()
 
     bindir = os.path.join(str(tmp_path), 'data', 'bin')
-    for name in ('settings', 'eink', 'clear-eink', 'notes', 'llmchat', 'terminal'):
+    for name in ('settings', 'eink', 'clear-eink', 'notes', 'llmchat', 'terminal',
+                 'commands'):
         assert os.path.isfile(os.path.join(bindir, name)), name
 
 
@@ -96,3 +98,60 @@ def test_second_instance_does_not_steal_pidfile(make_app, tmp_path, monkeypatch)
         assert os.path.exists(pidfile)
     finally:
         first._release_pidfile()
+
+
+# ── reaching shells we didn't spawn ───────────────────────────────────────────
+
+def test_commands_are_linked_into_user_bin(tmp_path, monkeypatch):
+    """PATH alone doesn't reach a tmux server that outlived this process, so
+    the commands are also symlinked into ~/.local/bin (first on the login
+    PATH). Without this, a long-lived session keeps a stale bindir and every
+    typed command is 'not found' with no hint why."""
+    from shell_mixin import ShellMixin
+
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HOME', str(home))
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (bindir / 'settings').write_text('#!/bin/sh\n')
+
+    ShellMixin._link_commands_into_user_bin(str(bindir), ('settings',))
+
+    link = home / '.local' / 'bin' / 'settings'
+    assert link.is_symlink()
+    assert os.readlink(str(link)) == str(bindir / 'settings')
+
+
+def test_a_stale_link_is_repointed(tmp_path, monkeypatch):
+    from shell_mixin import ShellMixin
+
+    home = tmp_path / 'home'
+    (home / '.local' / 'bin').mkdir(parents=True)
+    monkeypatch.setenv('HOME', str(home))
+    stale = home / '.local' / 'bin' / 'settings'
+    stale.symlink_to(tmp_path / 'gone' / 'settings')   # e.g. a deleted clone
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (bindir / 'settings').write_text('#!/bin/sh\n')
+
+    ShellMixin._link_commands_into_user_bin(str(bindir), ('settings',))
+    assert os.readlink(str(stale)) == str(bindir / 'settings')
+
+
+def test_a_real_file_is_never_clobbered(tmp_path, monkeypatch):
+    """Someone else's ~/.local/bin/notes is not ours to overwrite."""
+    from shell_mixin import ShellMixin
+
+    home = tmp_path / 'home'
+    (home / '.local' / 'bin').mkdir(parents=True)
+    monkeypatch.setenv('HOME', str(home))
+    theirs = home / '.local' / 'bin' / 'notes'
+    theirs.write_text('#!/bin/sh\necho not ours\n')
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    (bindir / 'notes').write_text('#!/bin/sh\n')
+
+    ShellMixin._link_commands_into_user_bin(str(bindir), ('notes',))
+    assert theirs.read_text() == '#!/bin/sh\necho not ours\n'
+    assert not theirs.is_symlink()

@@ -121,6 +121,12 @@ class ShellMixin:
                                        'Switches the e-ink terminal to local LLM chat mode.')
             self._write_signal_script(bindir, ('terminal',), signal.SIGRTMIN + 3,
                                        'Switches the e-ink terminal back to a plain shell tab.')
+            # Not named `help`: that's a bash builtin, and shadowing it would
+            # break `help while` and friends in every shell we spawn.
+            self._write_signal_script(bindir, ('commands',), signal.SIGRTMIN + 4,
+                                       'Shows every e-ink terminal command on the panel.')
+            names = ('settings', 'eink', 'clear-eink', 'notes', 'llmchat',
+                     'terminal', 'commands')
         except OSError as e:
             logger.warning('could not install command scripts: %s', e)
             return
@@ -129,6 +135,55 @@ class ShellMixin:
         cur = os.environ.get('PATH', '')
         if bindir not in cur.split(os.pathsep):
             os.environ['PATH'] = bindir + os.pathsep + cur
+        self._link_commands_into_user_bin(bindir, names)
+        self._publish_path_to_tmux_server()
+
+    @staticmethod
+    def _link_commands_into_user_bin(bindir: str, names) -> None:
+        """Also expose the commands from ~/.local/bin.
+
+        PATH alone isn't enough. tmux outlives this process (KillMode=process
+        keeps the server up across restarts), so shells in an existing session
+        keep whatever PATH the server was started with — which can point at a
+        bindir that has since moved or been deleted, leaving every typed
+        command "not found" with no hint why. ~/.local/bin is already first on
+        the login PATH, so a symlink there works in old panes, new panes, and
+        SSH sessions alike.
+
+        Only ever replaces a symlink: a real file of the same name is
+        somebody else's, and gets left alone.
+        """
+        user_bin = os.path.join(os.path.expanduser('~'), '.local', 'bin')
+        try:
+            os.makedirs(user_bin, exist_ok=True)
+        except OSError:
+            return
+        for name in names:
+            target = os.path.join(bindir, name)
+            link = os.path.join(user_bin, name)
+            try:
+                if os.path.islink(link):
+                    if os.readlink(link) == target:
+                        continue
+                    os.unlink(link)
+                elif os.path.exists(link):
+                    logger.debug('%s exists and is not ours — leaving it', link)
+                    continue
+                os.symlink(target, link)
+            except OSError as e:
+                logger.debug('could not link %s: %s', link, e)
+
+    @staticmethod
+    def _publish_path_to_tmux_server() -> None:
+        """Push our PATH into the tmux server's global environment, so panes
+        opened later in a pre-existing session inherit the current bindir
+        instead of the one the server was started with."""
+        try:
+            subprocess.run(['tmux', 'set-environment', '-g', 'PATH',
+                            os.environ.get('PATH', '')],
+                           capture_output=True, timeout=2)
+        except Exception as e:
+            logger.debug('could not publish PATH to tmux: %s', e)
 
     def _on_settings_signal(self, signum, frame):
         """SIGUSR1 handler — set a flag for the main loop. Kept minimal so it's
@@ -150,6 +205,10 @@ class ShellMixin:
     def _on_terminal_signal(self, signum, frame):
         """SIGRTMIN+3 handler (`terminal` command) — flag a mode switch for the loop."""
         self._terminal_requested = True
+
+    def _on_commands_signal(self, signum, frame):
+        """SIGRTMIN+4 handler (`commands`) — flag the help sheet for the loop."""
+        self._help_sheet_requested = True
 
     def _on_shutdown_signal(self, signum, frame):
         """SIGINT/SIGTERM — request a graceful shutdown instead of crashing.

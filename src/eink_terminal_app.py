@@ -176,6 +176,7 @@ class EinkTerminal(
         self._notes_requested = False
         self._llm_chat_requested = False
         self._terminal_requested = False
+        self._help_sheet_requested = False
         self._split_view  = config.get('terminal_split_view', False)
         self._status_extras  = config.get('terminal_status_bar_extras', True)
         self._cursor_style   = config.get('terminal_cursor_style', 'block')
@@ -374,6 +375,10 @@ class EinkTerminal(
         # rendered-not-raw view of the notes file. PgUp/PgDn flip pages, any
         # other key closes back to the terminal. See markdown_viewer_mixin.py.
         self._markdown_active = False
+        # Full-screen command sheet (Ctrl+/) — see _show_help_sheet.
+        self._help_sheet_active = False
+        self._help_sheet_pages: list = []
+        self._help_sheet_idx = 0
         self._markdown_pages: list = []
         self._markdown_page_idx: int = 0
 
@@ -1067,6 +1072,7 @@ class EinkTerminal(
             signal.signal(signal.SIGRTMIN + 1, self._on_notes_signal)
             signal.signal(signal.SIGRTMIN + 2, self._on_llm_chat_signal)
             signal.signal(signal.SIGRTMIN + 3, self._on_terminal_signal)
+            signal.signal(signal.SIGRTMIN + 4, self._on_commands_signal)
             # Graceful shutdown so a stray Ctrl+C / `systemctl stop` puts the
             # panel to sleep cleanly rather than crashing mid-refresh.
             signal.signal(signal.SIGINT, self._on_shutdown_signal)
@@ -1248,6 +1254,17 @@ class EinkTerminal(
                 self._open_terminal()
                 continue
 
+            # ── `commands` asked for the full-screen command sheet ────────────
+            if self._help_sheet_requested:
+                self._help_sheet_requested = False
+                self._last_input = now
+                if in_screensaver or panel_asleep or self._in_text_message:
+                    in_screensaver = False
+                    panel_asleep = False
+                    self._in_text_message = False
+                self._show_help_sheet()
+                continue
+
             # ── Early panel deep-sleep ────────────────────────────────────────
             # Before the screensaver kicks in, power the panel down once a shorter
             # idle window passes. The terminal image is retained behind the dark
@@ -1320,6 +1337,7 @@ class EinkTerminal(
                             self._snap_to_live()
                             has_pending = True
                         data = self._handle_markdown_key(data)
+                        data = self._handle_help_sheet_key(data)
                         data = self._handle_hotkeys(data)
                         data = self._handle_help_key(data)
                         data = self._handle_search_key(data)
@@ -1373,6 +1391,7 @@ class EinkTerminal(
                         self._snap_to_live()
                         has_pending = True
                     data = self._handle_markdown_key(data)
+                    data = self._handle_help_sheet_key(data)
                     data = self._handle_hotkeys(data)
                     data = self._handle_help_key(data)
                     data = self._handle_search_key(data)
@@ -1620,7 +1639,8 @@ class EinkTerminal(
             # viewer, big-text read mode, or a web "send text" message) — PTY
             # output from a background process must not repaint over them.
             _fullscreen_overlay = (self._markdown_active or self._big_text_active
-                                   or self._in_text_message)
+                                   or self._in_text_message
+                                   or self._help_sheet_active)
             if (has_pending and not in_screensaver and not panel_asleep
                     and not _fullscreen_overlay
                     and (now - last_render) >= _RENDER_DEBOUNCE):
