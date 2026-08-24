@@ -59,6 +59,8 @@ python eink_terminal.py         # terminal emulator, live on Pi hardware
 | `src/session_logger.py` | `TabLogger` — optional rotating, ANSI-stripped on-disk log of a tab's output (`terminal_log_enabled`) |
 | `src/llm_chat.py` | Offline chat REPL for a GGUF model via `llama-cpp-python` — no network calls. Launched in its own tab by "Chat with local LLM" / Ctrl+N; see `terminal_llm_*` in `config/config.yaml` |
 | `src/markdown_renderer.py` | Parses/paginates Markdown into 800×480 PIL images (headers, bold/italic, lists, code, quotes, hr) — no hardware/app dependency |
+| `src/help_sheet.py` | Renders the full command reference as a two-column 800×480 cheat sheet (Ctrl+/ or the `commands` command) — no app dependency |
+| `src/command_watch.py` | `CommandWatcher` — pure bookkeeping over per-tab foreground commands; reports long-running ones finishing |
 | `src/markdown_viewer_mixin.py` | Full-screen paginated Markdown viewer over the notes file: PgUp/PgDn page, any other key closes. F6 → "View notes as Markdown" |
 
 Hotkeys: F1 SSH picker, F2 close tab, Ctrl+T new tab, Ctrl+N cycle mode
@@ -71,11 +73,20 @@ stats dashboard, PgUp/PgDn scroll, Ctrl+F scrollback search, Ctrl+\ toggle
 split pane (left/right), Ctrl+] swap split-pane focus, Ctrl+Space copy mode
 (arrows move a selection cursor over the visible screen, Space marks the
 anchor, Enter yanks the range — or the whole line with no anchor — into the
-F8 clipboard and beams it to a QR for phone copy, Esc cancels; see
-`_toggle_copy_mode` / `_handle_copy_key` in `src/eink_terminal_app.py`),
-Ctrl+/ help overlay (lists every hotkey; ↑↓ to browse, Enter runs the
-selected one, Esc closes — see `_HELP_ITEMS` / `_run_help_action` in
-`src/eink_terminal_app.py`).
+F8 clipboard and beams it to a QR for phone copy, Esc cancels; the yank also
+goes into tmux's paste buffer, so Ctrl+B ] drops it into any pane on the
+machine — see `_toggle_copy_mode` / `_handle_copy_key` /
+`_copy_to_tmux_buffer` in `src/text_actions_mixin.py`),
+Ctrl+/ full-screen command sheet: every command at once in two columns,
+drawn straight to the panel (PgUp/PgDn if it ever needs a second page, any
+other key closes), with the tab lifecycle spelled out underneath — `exit` or
+F2 closes a tab, the last tab won't close, and exiting its shell leaves the
+"Shell exited" bar (Enter restarts, Ctrl+C quits, auto-restart after 10 s).
+`_HELP_SECTIONS` in `src/terminal_state.py` is the single source: the flat
+`_HELP_ITEMS` the runnable picker reads (↑↓ to browse, Enter runs the
+selected one — `_toggle_help` / `_run_help_action`) is derived from it, so
+the two views can't drift. See `src/help_sheet.py` and `_show_help_sheet` in
+`src/palette_help_mixin.py`.
 
 Shift+Enter inserts a literal newline instead of submitting — sent as a bare
 LF from a directly-attached keyboard (vs. plain Enter's CR; see
@@ -92,17 +103,37 @@ preview server, so long notes can be copied off the device without a QR
 code. See `_open_notes` in `src/tabs_mixin.py` and `_get_notes_path` /
 `_read_notes` in `src/preview_server.py`.
 
-Typeable mode-switch commands: `notes`, `llmchat`, `terminal` do the same
-thing as Ctrl+N/F6 but from a shell prompt, in any tab — each just signals
-the running app (real-time signals SIGRTMIN+1/+2/+3, same PID-file mechanism
-as the existing `settings`/`clear-eink` commands; see `_write_signal_script`
-in `src/shell_mixin.py`). Inside `llm_chat.py` itself, typing `/notes` or
+Typeable commands: `notes`, `llmchat`, `terminal` do the same thing as
+Ctrl+N/F6 but from a shell prompt, in any tab, and `commands` opens the
+Ctrl+/ command sheet (named that because `help` is a bash builtin) — each
+just signals the running app (real-time signals SIGRTMIN+1/+2/+3/+4, same
+PID-file mechanism as the existing `settings`/`clear-eink` commands; see
+`_write_signal_script` in `src/shell_mixin.py`). The scripts live in
+`data/bin` **and** are symlinked into `~/.local/bin`: tmux outlives this
+process (`KillMode=process`), so shells in a pre-existing session keep the
+PATH the tmux server started with — which can point at a bindir that has
+since moved, silently breaking every typed command. `~/.local/bin` is
+already first on the login PATH, so it reaches old panes, new panes and SSH
+sessions alike (`_link_commands_into_user_bin`). Inside `llm_chat.py` itself, typing `/notes` or
 `/terminal` does the same by shelling out to the `notes`/`terminal` command
 — the chat process keeps running in the background so cycling back to LLM
 chat mode resumes the same conversation. `llm_chat.py` also has `/help`
 (prints a boxed command list), `/menu` (an interactive picker over the same
 commands — ↑↓ to browse, Enter runs the highlighted one, Esc/Ctrl+C
 cancels; see `_show_menu`/`_read_menu_key`), and `/reset` (clears history).
+
+Copying text off the device: `/screen` on the preview server serves whatever
+is on the panel right now as selectable text with a Copy button (`/screen.txt`
+for raw text), PIN-gated and HTML-escaped like `/beam` and `/notes`. That's
+the path for a long stack trace, where reading a QR code is miserable. The
+app publishes the text each loop via `set_screen_text`.
+
+Long-running commands announce themselves in the status bar when they finish
+("make done in 2m14s (build)"), controlled by `terminal_long_command_seconds`
+(default 30, 0 disables; tmux mode only). One `tmux list-panes -a` covers
+every tab, so the poll is a single subprocess every 3 s. The decision logic
+is pure and lives in `src/command_watch.py` (`CommandWatcher`); the poll is
+`_poll_finished_commands` in `src/eink_terminal_app.py`.
 
 Restart Terminal (F6 → "Restart terminal (saves notes first)"): kills and
 respawns every tab — the plain shell, any `nano`/Notes session, any running
@@ -188,7 +219,59 @@ web-UI QR code sits inside the Network card.
 - `terminal_alert_health_interval: 30` / `terminal_alert_throttle` / `terminal_alert_failed_units` / `terminal_alert_storage_health` / `terminal_alert_network` / `terminal_alert_network_host` / `terminal_alert_network_fails` — system-health alerts (thermal throttle, failed systemd units, SD card read-only remount, dead network) shown in the terminal status bar
 - `preview_server_pin: ""` — PIN-gates the preview server's mutating/sensitive endpoints (settings, remote input, uploads, clipboard, notes); empty disables the gate (default, matches prior behavior)
 - `terminal_llm_model_path` / `terminal_llm_context_size` / `terminal_llm_max_tokens` / `terminal_llm_threads` / `terminal_llm_system_prompt` — local LLM chat (`src/llm_chat.py`): GGUF file, context window, response length cap, CPU threads, and system prompt. No network calls — inference runs fully on-device via `llama-cpp-python`
+- `terminal_long_command_seconds: 30` — announce a command finishing when it ran at least this long (0 = off, tmux mode only)
 - `terminal_notes_file: data/notes.txt` — plain text file opened by the Notes mode/palette entry (in `nano`) and served as raw text at `/notes`
+
+## Refresh Behavior & Debugging Flashes
+
+Every whole-panel write records *why* it fired — `clear`, `periodic`,
+`heavy-redraw`, `force-refresh`, `screensaver`, `help-sheet`, and the
+driver's own `baseline` / `partial-limit` / `region-fallback`:
+
+```
+INFO root: E-ink full flash refresh (reason=clear, deep=True, hw_sleeping=False, 3/min)
+```
+
+The rolling per-minute rate is in the log line and in the refresh HUD, with a
+breakdown of the top causes — "it flashes too much" is otherwise only
+diagnosable by correlating timestamps by hand. The knobs behind all of this
+live in the settings page's **Refresh & Ghosting** section.
+
+Two rules worth knowing before touching `_refresh_kind`:
+
+- A **scroll is not a redraw.** pyte marks every line dirty when it scrolls,
+  so treating an all-dirty frame as a near-total redraw made every scrolled
+  line flash the panel. Scrolling is flagged separately (`scrolled` on the
+  tracked screen), and with flicker-free partials a near-total redraw needs
+  no resync flash at all — the DU waveform rewrites every pixel against the
+  previous frame.
+- A **deep flash is for a real clear.** `epd.Clear()` plus `epd.display()`
+  write identical bytes for a blank frame, so a clear would flash twice for
+  one wipe; `_frame_is_blank` skips the redundant one (dark mode and
+  content-heavy frames still get it).
+
+## Terminal Conformance Tests
+
+pyte drops any CSI final byte it doesn't implement — no exception, no log
+line. That is how `clear` stayed broken: tmux spells it SU (`ESC[22S`), pyte
+ignored it, and the panel kept showing text the user had just cleared while
+every test stayed green.
+
+`tools/record_pty_stream.py` records both halves of the contract from a real
+run — every byte written to the PTY, and what tmux says its pane contained
+afterwards (`capture-pane -p`) — into `tests/fixtures/pty_streams/`.
+`tests/test_terminal_conformance.py` replays them and diffs the grid, so CI
+needs neither tmux nor a terminal.
+
+```bash
+python tools/record_pty_stream.py scrolling -- ls -la /etc   # what tmux forwards
+python tools/record_pty_stream.py raw_htop --raw -- htop     # the program's own escapes
+```
+
+`--raw` records the non-tmux input path and still uses tmux as the oracle by
+`cat`ting the bytes into a pane. `test_harness_catches_a_dropped_escape` is
+the guard on the guard: fixtures that exercise SU/SD must *fail* under stock
+pyte, otherwise the suite has gone quietly blind.
 
 ## Waveshare Driver
 
