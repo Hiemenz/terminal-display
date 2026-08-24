@@ -110,7 +110,7 @@ class HotkeysMixin:
             self._swap_pane_focus()
             data = data.replace(_CTRL_BRACKETRIGHT, b'')
         if _CTRL_SLASH in data:
-            self._toggle_help()
+            self._show_help_sheet()
             data = data.replace(_CTRL_SLASH, b'')
         if _CTRL_SPACE in data:
             self._toggle_copy_mode()

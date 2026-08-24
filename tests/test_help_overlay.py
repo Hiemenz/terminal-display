@@ -1,4 +1,5 @@
-"""Tests for the Ctrl+/ help overlay (lists every hotkey; Enter runs it)."""
+"""Tests for the help views: the Ctrl+/ full-screen command sheet and the
+runnable picker (_toggle_help) that lists the same commands one per line."""
 import pyte
 import pytest
 
@@ -13,6 +14,16 @@ def _make_tab(title=''):
                 title=title)
 
 
+class _FakeDriver:
+    """Captures the full-screen images the sheet pushes straight to the panel."""
+
+    def __init__(self):
+        self.pushed = []
+
+    def full_refresh(self, img, output_path=None, flash=False, reason=''):
+        self.pushed.append((img, reason))
+
+
 def _app_with_tabs(make_app, *titles):
     app = make_app()
     app._tabs = [_make_tab(t) for t in titles]
@@ -25,6 +36,13 @@ def _app_with_tabs(make_app, *titles):
     app._palette_active = app._clipboard_active = False
     app._prockill_active = app._svcmgr_active = app._power_active = False
     app._sshpick_active = app._search_active = False
+    app._copy_active = False
+    app._help_sheet_active = False
+    app._help_sheet_pages = []
+    app._help_sheet_idx = 0
+    app._dark_mode = False
+    app._font_path = ''
+    app._driver = _FakeDriver()
     return app
 
 
@@ -43,10 +61,11 @@ def test_help_items_cover_tab_and_split_actions():
 
 # ── _handle_hotkeys: Ctrl+/ opens the overlay ─────────────────────────────────
 
-def test_ctrl_slash_stripped_from_hotkey_data(make_app):
+def test_ctrl_slash_opens_the_command_sheet(make_app):
     app = _app_with_tabs(make_app, 'shell')
     result = app._handle_hotkeys(_CTRL_SLASH + b'hello')
-    assert app._help_active is True
+    assert app._help_sheet_active is True
+    assert app._driver.pushed, 'the sheet is drawn straight to the panel'
     assert _CTRL_SLASH not in result
     assert b'hello' in result
 

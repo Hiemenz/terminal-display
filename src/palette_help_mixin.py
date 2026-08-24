@@ -2,24 +2,31 @@
 and the snippets picker."""
 from __future__ import annotations
 
+import logging
 import os
 import re
 
 from terminal_state import (
     _BEAM_OPEN,
     _BIGTEXT_OPEN,
+    _HELP_FOOTER,
     _HELP_ITEMS,
+    _HELP_SECTIONS,
     _HUD_TOGGLE,
     _LLM_CHAT_OPEN,
     _MARKDOWN_VIEW,
     _NOTES_OPEN,
     _PALETTE_ACTIONS,
+    _PGDN,
+    _PGUP,
     _RENAME_TAB,
     _REPO_ROOT,
     _RESTART_TERMINAL,
     _SETTINGS_OPEN,
     _SNIPPETS_OPEN,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class PaletteHelpMixin:
@@ -262,3 +269,56 @@ class PaletteHelpMixin:
             self._palette_active = False; self._render(); return b''
         self._palette_active = False; self._render()
         return data
+
+    # ─── Full-screen command sheet (Ctrl+/) ───────────────────────────────────
+
+    def _show_help_sheet(self):
+        """Draw every command at once, laid out in columns.
+
+        The picker below answers "run this for me" one line at a time; this
+        answers "what can this thing do?", including what happens when you
+        exit your last terminal — which no list of keys can tell you.
+        """
+        from help_sheet import render_help_pages
+        try:
+            pages = render_help_pages(
+                _HELP_SECTIONS, _HELP_FOOTER,
+                dark_mode=self._dark_mode,
+                font_path=getattr(self, '_font_path', ''),
+            )
+        except Exception as e:
+            logger.warning('Help sheet render error: %s', e)
+            return
+        # Close anything else owning the screen first.
+        self._help_active = self._palette_active = self._clipboard_active = False
+        self._copy_active = self._search_active = False
+        self._help_sheet_pages = pages
+        self._help_sheet_idx = 0
+        self._help_sheet_active = True
+        self._driver.full_refresh(pages[0], reason='help-sheet')
+        self._last_image = pages[0]
+        logger.info('Command sheet shown (%d page(s))', len(pages))
+
+    def _close_help_sheet(self):
+        self._help_sheet_active = False
+        self._help_sheet_pages = []
+        self._help_sheet_idx = 0
+        self._render(force_full=True)
+
+    def _handle_help_sheet_key(self, data: bytes) -> bytes:
+        if not self._help_sheet_active:
+            return data
+        for key, step in ((_PGDN, 1), (_PGUP, -1)):
+            if key in data:
+                data = data.replace(key, b'')
+                idx = self._help_sheet_idx + step
+                if 0 <= idx < len(self._help_sheet_pages):
+                    self._help_sheet_idx = idx
+                    img = self._help_sheet_pages[idx]
+                    self._driver.full_refresh(img, reason='help-sheet')
+                    self._last_image = img
+                return data
+        # Any other key closes it, and is swallowed so it doesn't land in the
+        # shell underneath — same convention as the Markdown viewer.
+        self._close_help_sheet()
+        return b''

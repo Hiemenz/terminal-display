@@ -346,36 +346,74 @@ _ALT_DIGITS = {('\x1b' + d).encode(): int(d) for d in '123456789'}
 # Help overlay (Ctrl+/): every hotkey with a one-line label. Enter runs the
 # selected item; see _run_help_action for the label → method mapping. Ordered
 # with tab/split management first since that's what people ask about most.
-_HELP_ITEMS = [
-    ('New Tab',             'Ctrl+T'),
-    ('Close Tab',           'F2'),
-    ('Next Tab',            'Ctrl+Right'),
-    ('Prev Tab',            'Ctrl+Left'),
-    ('Jump to Tab N',       'Alt+1..9'),
-    ('Toggle Split Pane',   'Ctrl+\\'),
-    ('Swap Split Focus',    'Ctrl+]'),
-    ('Rename Tab',          'F6 > Rename'),
-    ('Cycle Mode',          'Ctrl+N'),
-    ('Notes',               'F6 > Notes'),
-    ('Chat with local LLM', 'F6 > LLM Chat'),
-    ('Restart Terminal',    'F6 > Restart'),
-    ('View Notes as Markdown', 'F6 > Markdown'),
-    ('SSH Picker',          'F1'),
-    ('Command Palette',     'F6'),
-    ('Kill Process',        'F3'),
-    ('Service Manager',     'F4'),
-    ('Power Menu',          'F5'),
-    ('Dark Mode',           'F7'),
-    ('Clipboard',           'F8'),
-    ('Copy Mode',           'Ctrl+Space'),
-    ('Font Smaller',        'F9'),
-    ('Font Larger',         'F12'),
-    ('Full Refresh',        'F10'),
-    ('Switch to Dashboard', 'F11'),
-    ('Scrollback Search',   'Ctrl+F'),
-    ('Scroll Up',           'PgUp'),
-    ('Scroll Down',         'PgDn'),
+# The command reference, grouped. Both views read from here: the Ctrl+/ full
+# screen cheat sheet (help_sheet.render_help_pages) and the runnable picker in
+# the F6 palette, so neither can drift from the other.
+_HELP_SECTIONS = [
+    ('Tabs', [
+        ('New Tab',             'Ctrl+T'),
+        ('Close Tab',           'F2'),
+        ('Next Tab',            'Ctrl+Right'),
+        ('Prev Tab',            'Ctrl+Left'),
+        ('Jump to Tab N',       'Alt+1..9'),
+        ('Rename Tab',          'F6 > Rename'),
+    ]),
+    ('Split Pane', [
+        ('Toggle Split Pane',   'Ctrl+\\'),
+        ('Swap Split Focus',    'Ctrl+]'),
+    ]),
+    ('Modes', [
+        ('Cycle Mode',          'Ctrl+N'),
+        ('Notes',               'F6 > Notes'),
+        ('Chat with local LLM', 'F6 > LLM Chat'),
+        ('Notes as Markdown',   'F6 > Markdown'),
+        ('Switch to Dashboard', 'F11'),
+    ]),
+    ('Text', [
+        ('Copy Mode',           'Ctrl+Space'),
+        ('Clipboard',           'F8'),
+        ('Scrollback Search',   'Ctrl+F'),
+        ('Scroll Up',           'PgUp'),
+        ('Scroll Down',         'PgDn'),
+    ]),
+    ('Display', [
+        ('Dark Mode',           'F7'),
+        ('Font Smaller',        'F9'),
+        ('Font Larger',         'F12'),
+        ('Full Refresh',        'F10'),
+        ('This Help',           'Ctrl+/'),
+    ]),
+    ('System', [
+        ('Command Palette',     'F6'),
+        ('SSH Picker',          'F1'),
+        ('Kill Process',        'F3'),
+        ('Service Manager',     'F4'),
+        ('Power Menu',          'F5'),
+        ('Restart Terminal',    'F6 > Restart'),
+    ]),
+    # Typed at any shell prompt — they signal the running app (see
+    # _install_command_scripts in shell_mixin.py), so they work from an SSH
+    # session too, not just the attached keyboard.
+    ('Type at the prompt', [
+        ('Settings editor',     'settings'),
+        ('Clear + ghosting',    'clear-eink'),
+        ('Notes mode',          'notes'),
+        ('Local LLM chat',      'llmchat'),
+        ('Plain shell tab',     'terminal'),
+    ]),
 ]
+
+# What happens when you exit your last terminal — the question a key list
+# can't answer. Printed under the sheet.
+_HELP_FOOTER = (
+    'Exiting: `exit` (or F2) closes the tab and moves you to the next one. '
+    'The last tab will not close - exiting its shell leaves a "Shell exited" '
+    'bar: Enter restarts it now, Ctrl+C quits to the dashboard, and it '
+    'auto-restarts after 10 s. Other tabs are untouched.'
+)
+
+# Flat list for the runnable picker, derived so the two cannot drift.
+_HELP_ITEMS = [item for _title, items in _HELP_SECTIONS for item in items]
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
