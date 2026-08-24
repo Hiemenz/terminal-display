@@ -424,7 +424,8 @@ class EinkTerminal(
         self._install_command_scripts()
     def _force_full_refresh(self):
         if self._last_image is not None:
-            self._driver.flash_refresh(self._last_image, deep=True)
+            self._driver.flash_refresh(self._last_image, deep=True,
+                                       reason='force-refresh')
             self._last_full_refresh_mono = time.monotonic()
     def _clear_screen(self):
         """Clear the active terminal's screen + scrollback and ghost-clear the
@@ -502,7 +503,7 @@ class EinkTerminal(
         try:
             from render import render_text_message
             img = render_text_message(text, label, self._config)
-            self._driver.full_refresh(img)
+            self._driver.full_refresh(img, reason='text-message')
             self._last_image = img
             self._in_text_message = True
             self._screensaver_show_mono = time.monotonic()
@@ -517,7 +518,7 @@ class EinkTerminal(
         try:
             from render import render_card
             img = render_card(card, self._config)
-            self._driver.full_refresh(img)
+            self._driver.full_refresh(img, reason='card')
             self._last_image = img
             self._in_text_message = True   # any key dismisses it, like a message
             self._screensaver_show_mono = time.monotonic()
@@ -604,7 +605,7 @@ class EinkTerminal(
             # Must be a flash (ordered _FULL task): full_refresh(flash=False) only
             # sets _pending_partial, which the sleep() below immediately cancels —
             # the screensaver would never reach the panel.
-            self._driver.flash_refresh(img)
+            self._driver.flash_refresh(img, reason='screensaver')
             self._last_image = img
             logger.info('Screensaver activated — img=%s cycle=%s',
                         os.path.basename(image_path), self._screensaver_is_cycle)
@@ -780,11 +781,15 @@ class EinkTerminal(
         """Overlay a small debug box of live refresh counters (top-left)."""
         s = self._driver.stats()
         age = s.get('last_flash_age')
+        top = sorted(s.get('flash_reasons', {}).items(),
+                     key=lambda kv: -kv[1])[:3]
         lines = [
             'REFRESH HUD',
             f"part {s['partial']}  reg {s['region']}  full {s['full']}",
             f"bytes {s['bytes']}  du {s['du_frames']}f  font {self._font_size}",
             f"last flash {int(age)}s ago" if age is not None else 'last flash --',
+            f"why {s.get('last_reason') or '--'}  {s.get('flashes_per_min', 0)}/min",
+            'top ' + ('  '.join(f'{k}:{v}' for k, v in top) if top else '--'),
         ]
         fg = 255 if self._dark_mode else 0
         bg = 0 if self._dark_mode else 255
@@ -922,7 +927,7 @@ class EinkTerminal(
             self._deep_flash_pending = False   # split view has no flash path (below) to consume it
             self._scrolled_since_render = False
             if kind in ('full', 'flash'):
-                self._driver.full_refresh(img)
+                self._driver.full_refresh(img, reason='split-view')
                 self._last_full_refresh_mono = time.monotonic()
                 self._needs_periodic_flash = False
             else:
@@ -1025,7 +1030,7 @@ class EinkTerminal(
         kind = self._refresh_kind(force_full, force_flash, heavy_change)
         if kind == 'full':
             # Clean full repaint with no flash (overlays, font change, resize).
-            self._driver.full_refresh(img)
+            self._driver.full_refresh(img, reason='full-repaint')
             self._last_full_refresh_mono = time.monotonic()
             self._needs_periodic_flash = False
         elif kind == 'flash':
@@ -1035,7 +1040,11 @@ class EinkTerminal(
             # comes up blank instead of showing faint traces of prior content.
             deep = self._deep_flash_pending
             self._deep_flash_pending = False
-            self._driver.flash_refresh(img, deep=deep)
+            # Name the cause so "why did it flash?" is answerable from the log
+            # and the HUD instead of by correlating timestamps.
+            reason = ('clear' if deep else
+                      'periodic' if force_flash else 'heavy-redraw')
+            self._driver.flash_refresh(img, deep=deep, reason=reason)
             self._last_full_refresh_mono = time.monotonic()
             self._needs_periodic_flash = False
         else:

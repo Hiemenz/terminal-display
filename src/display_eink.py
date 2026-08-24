@@ -153,7 +153,13 @@ class EinkDriver:
 
         # Live refresh counters for the debug HUD (read by the app via stats()).
         self._stats: dict = {'partial': 0, 'region': 0, 'full': 0,
-                             'bytes': 0, 'last_flash_mono': 0.0, 'du_frames': 0}
+                             'bytes': 0, 'last_flash_mono': 0.0, 'du_frames': 0,
+                             'last_reason': ''}
+        # Why each whole-panel flash happened, and when. "It flashes too much"
+        # is otherwise only diagnosable by correlating journal timestamps by
+        # hand — the counters say how many, never which cause.
+        self._flash_reasons: dict = {}
+        self._flash_times: list = []
 
         # Ghost clearing: once `partial_refresh_limit` partials have stacked up,
         # flash just the rows that changed (the portion that changed) rather than
@@ -202,7 +208,8 @@ class EinkDriver:
                 if img is not None:
                     self._hw_partial_diff(img)
             elif kind == self._FULL:
-                self._hw_full(item[1], deep=item[2])
+                self._hw_full(item[1], deep=item[2],
+                              reason=item[3] if len(item) > 3 else '')
             elif kind == self._SLEEP:
                 self._hw_sleep()
                 item[1].set()   # unblock sleep() caller
@@ -221,9 +228,23 @@ class EinkDriver:
     def stats(self) -> dict:
         """Snapshot of the live refresh counters (for the debug HUD)."""
         s = dict(self._stats)
-        s['last_flash_age'] = (time.monotonic() - s['last_flash_mono']
+        now = time.monotonic()
+        s['last_flash_age'] = (now - s['last_flash_mono']
                                if s['last_flash_mono'] else None)
+        s['flash_reasons'] = dict(self._flash_reasons)
+        recent = [t for t in self._flash_times if now - t <= 60.0]
+        s['flashes_per_min'] = len(recent)
         return s
+
+    def _note_flash(self, reason: str) -> None:
+        """Record why a whole-panel flash fired, for the HUD and the log."""
+        reason = reason or 'unknown'
+        self._stats['last_reason'] = reason
+        self._flash_reasons[reason] = self._flash_reasons.get(reason, 0) + 1
+        now = time.monotonic()
+        self._flash_times.append(now)
+        # One minute of history is all the rolling rate needs.
+        self._flash_times = [t for t in self._flash_times if now - t <= 60.0]
 
     def _du_frames_for(self, buf) -> int:
         """Pick the DU drive-frame count from the frame's black-pixel density:
@@ -236,7 +257,8 @@ class EinkDriver:
         return (self._du_frames_heavy if black_frac >= self._du_heavy_threshold
                 else self._du_frames_text)
 
-    def full_refresh(self, image: Image.Image, output_path: str = None, flash: bool = False):
+    def full_refresh(self, image: Image.Image, output_path: str = None, flash: bool = False,
+                     reason: str = ''):
         """Update the full screen. By default uses partial mode (no flash).
         Pass flash=True to force a full black/white clear (clears ghosting but visible flash)."""
         _save(image, output_path)
@@ -244,7 +266,7 @@ class EinkDriver:
             return
         if flash:
             record_full_refresh()
-            self._q.put((self._FULL, image, False))
+            self._q.put((self._FULL, image, False, reason or 'full'))
         else:
             with self._partial_lock:
                 already_queued = self._pending_partial is not None
@@ -252,7 +274,8 @@ class EinkDriver:
             if not already_queued:
                 self._q.put((self._PARTIAL,))
 
-    def flash_refresh(self, image: Image.Image, output_path: str = None, deep: bool = False):
+    def flash_refresh(self, image: Image.Image, output_path: str = None, deep: bool = False,
+                      reason: str = ''):
         """Force a full flash refresh (black/white clear) — use for anti-ghosting or F10.
 
         Pass deep=True for the slow, quality full-init waveform (epd.init()) instead
@@ -265,7 +288,7 @@ class EinkDriver:
         record_full_refresh()
         if self._local:
             return
-        self._q.put((self._FULL, image, deep))
+        self._q.put((self._FULL, image, deep, reason or 'flash'))
 
     def partial_refresh_diff(self, image: Image.Image, output_path: str = None):
         """Async partial refresh. Returns immediately; hardware write runs in background.
@@ -300,12 +323,14 @@ class EinkDriver:
             self._epd = epd7in5_V2.EPD()
         return self._epd
 
-    def _hw_full(self, image: Image.Image, deep: bool = False):
+    def _hw_full(self, image: Image.Image, deep: bool = False, reason: str = ''):
         epd = self._epd_instance()
         if epd is None:
             return
-        logging.info('E-ink full flash refresh (hw_sleeping=%s, deep=%s)',
-                     self._hw_sleeping, deep)
+        self._note_flash(reason)
+        logging.info('E-ink full flash refresh (reason=%s, deep=%s, hw_sleeping=%s, %d/min)',
+                     reason or 'unknown', deep, self._hw_sleeping,
+                     self.stats()['flashes_per_min'])
         try:
             buf = epd.getbuffer(image)
             # Always use the full-quality init() here, not init_fast(). This path
@@ -366,7 +391,7 @@ class EinkDriver:
             # No known prior frame (cold start / post-sleep): establish a clean
             # baseline with one full refresh, then DU-update from there on.
             if self._hw_sleeping and self._prev_buf is None:
-                self._hw_full(image)
+                self._hw_full(image, reason='baseline')
                 return
 
             buf = epd.getbuffer(image)
@@ -417,7 +442,7 @@ class EinkDriver:
             # diff needs). With no known prior frame, do one clean full refresh
             # to re-establish it; otherwise re-prime 0x10 from _prev_buf below.
             if self._hw_sleeping and self._prev_buf is None:
-                self._hw_full(image)
+                self._hw_full(image, reason='baseline')
                 return
             # Always re-prime the panel's 0x10 back-buffer with the frame that is
             # currently on screen (_prev_buf). The panel computes a partial update
@@ -598,7 +623,7 @@ class EinkDriver:
                 and self._prev_buf is not None and not self._hw_sleeping):
             self._hw_flash_region(image, change_y[0], change_y[1])
         else:
-            self._hw_full(image)
+            self._hw_full(image, reason='partial-limit')
         return True
 
     def _hw_flash_region(self, image: Image.Image, y0: int, y1: int):
@@ -618,7 +643,7 @@ class EinkDriver:
             buf = epd.getbuffer(image)
             if (self._prev_buf is None or len(self._prev_buf) != len(buf)
                     or self._hw_sleeping):
-                self._hw_full(image); return
+                self._hw_full(image, reason='region-fallback'); return
             if not self._partial_ready:
                 epd.init_part()
                 self._partial_ready = True

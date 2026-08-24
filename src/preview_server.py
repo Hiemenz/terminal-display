@@ -139,15 +139,10 @@ _CONFIG_SCHEMA = [
         ['terminal_prompt_show_git',            'bool',   'Prompt: Git Branch',   None],
         ['terminal_start_dir',                  'str',    'Start Directory',      "home, last, root, or a path"],
         ['terminal_idle_timeout',               'int',    'Idle Timeout (s)',      '0 = disabled'],
-        ['terminal_full_refresh_interval',      'int',    'Full Refresh (s)',      '0 = disabled'],
         ['terminal_use_tmux',                   'bool',   'Use tmux',              None],
         ['terminal_tmux_session',               'str',    'tmux Session',          None],
         ['terminal_keyboard_prefer_bluetooth',  'bool',   'Prefer BT Keyboard',   'Rank Bluetooth keyboards first'],
         ['terminal_hq_render',                  'bool',   'HQ Render',             '2× supersample → sharper text'],
-        ['terminal_region_flash',               'bool',   'Region Flash',          'Flash only the changed rows, not the whole panel'],
-        ['terminal_full_refresh_interval',      'int',    'Full Flash Interval',   'Seconds between whole-panel flashes (0 = off)'],
-        ['terminal_flash_idle_gap',             'int',    'Flash Idle Gap',        'Wait for this quiet gap before the full flash'],
-        ['terminal_du_adaptive',                'bool',   'Adaptive DU',           'More DU frames for heavy/inverse content'],
         ['terminal_split_view',                 'bool',   'Split View',            '600 px terminal + 200 px sidebar'],
         ['terminal_status_bar_extras',          'bool',   'Status Bar Extras',     'Time, CWD, git branch'],
         ['terminal_status_bar_compact',         'bool',   'Compact Status Bar',    'Short labels, no uptime/sizes'],
@@ -159,6 +154,20 @@ _CONFIG_SCHEMA = [
         ['terminal_alert_cpu_threshold',        'int',    'CPU Alert %',           '0 = disabled'],
         ['terminal_alert_disk_free_threshold',  'int',    'Disk Free Alert %',     '0 = disabled'],
         ['terminal_alert_ssh_logins',           'bool',   'SSH Login Alerts',      None],
+    ]],
+    # How the panel is driven. The right values are per-panel and per-taste —
+    # how much flashing you'll tolerate against how much ghosting — so they
+    # belong here rather than in a YAML file that needs a restart to edit.
+    ['Refresh & Ghosting', [
+        ['terminal_flicker_free_partial', 'bool',   'Flicker-Free Partials', 'DU waveform: updates without flashing'],
+        ['terminal_region_flash',         'bool',   'Region Flash',          'Flash only the changed rows, not the whole panel'],
+        ['terminal_full_refresh_interval', 'int',   'Full Flash Interval',   'Seconds between whole-panel anti-ghost flashes (0 = off)'],
+        ['terminal_flash_idle_gap',       'int',    'Flash Idle Gap',        'Wait for this many quiet seconds before the full flash'],
+        ['partial_refresh_before_full',   'int',    'Partials Before Flash', 'Partial updates allowed before a ghost-clearing flash'],
+        ['terminal_du_adaptive',          'bool',   'Adaptive DU',           'More DU drive frames for heavy/inverse content'],
+        ['terminal_du_frames_text',       'int',    'DU Frames (text)',      'Drive frames for light content — fewer is faster, too few is faint'],
+        ['terminal_du_frames_heavy',      'int',    'DU Frames (heavy)',     'Drive frames for dark/inverse content — too few ghosts'],
+        ['terminal_du_heavy_threshold',   'float',  'Heavy Threshold',       'Black fraction (0–1) that counts as heavy content'],
     ]],
     ['Screensaver', [
         ['screensaver_sleep_minutes',   'select', 'Sleep After (min)',    [0, 5, 10, 15, 30, 60]],
@@ -414,6 +423,11 @@ _CONFIG_HTML = '''\
         minus.addEventListener("click", function() { si.value = parseInt(si.value||0) - 1; });
         plus.addEventListener("click",  function() { si.value = parseInt(si.value||0) + 1; });
         ctrl.appendChild(minus); ctrl.appendChild(si); ctrl.appendChild(plus);
+      } else if (type === "float") {
+        ctrl = mk("input", {className: "txt-inp float-inp", type: "number"});
+        ctrl.dataset.key = key;
+        ctrl.step = "0.01";
+        ctrl.value = val != null ? String(val) : "0";
       } else if (type === "select") {
         ctrl = mk("select", {className: "sel-inp"});
         ctrl.dataset.key = key;
@@ -443,7 +457,8 @@ _CONFIG_HTML = '''\
       document.querySelectorAll("[data-key]").forEach(function(e) {
         var k = e.dataset.key;
         if (e.type === "checkbox")    out[k] = e.checked;
-        else if (e.classList.contains("step-inp")) out[k] = parseInt(e.value) || 0;
+        else if (e.classList.contains("step-inp"))  out[k] = parseInt(e.value) || 0;
+        else if (e.classList.contains("float-inp")) out[k] = parseFloat(e.value) || 0;
         else out[k] = e.value;
       });
       return out;
@@ -588,8 +603,12 @@ def _save_config_values(config_path: str, updates: dict):
     for key, value in updates.items():
         if isinstance(value, bool):
             val_str = 'true' if value else 'false'
-        elif isinstance(value, (int, float)):
-            val_str = str(int(value))
+        elif isinstance(value, int):
+            val_str = str(value)
+        elif isinstance(value, float):
+            # Not str(int(value)): a fractional setting (the DU heavy-content
+            # threshold, say) would silently save as 0.
+            val_str = repr(value)
         else:
             s = str(value)
             needs_quotes = not s or any(c in s for c in ':#{}[]|>&!\'"@`')
