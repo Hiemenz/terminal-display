@@ -68,6 +68,8 @@ import time
 from PIL import ImageDraw
 
 from alert_monitor import AlertMonitor
+from command_watch import SHELL_COMMANDS as _SHELL_NAMES
+from command_watch import CommandWatcher, format_duration
 from display_eink import EinkDriver
 from evdev_input import EvdevKeyboard, find_keyboard
 from hotkeys_mixin import HotkeysMixin
@@ -295,6 +297,12 @@ class EinkTerminal(
             config.get('terminal_paste_file', '~/eink-paste.txt')
         )
         self._alert_monitor = AlertMonitor(config)
+        # Tell the user when the long thing they were waiting on has finished
+        # — the panel is something you glance at from across the room, and the
+        # existing background-tab bullet only says "output happened".
+        self._long_command_seconds = config.get('terminal_long_command_seconds', 30)
+        self._command_watcher = CommandWatcher(min_seconds=self._long_command_seconds)
+        self._command_poll_mono = 0.0
         self._web_input_queue = None   # set in run() when preview server starts
 
         # Split-view stats
@@ -721,6 +729,58 @@ class EinkTerminal(
 
     # ─── Rendering ───────────────────────────────────────────────────────────
 
+    def _poll_finished_commands(self, now: float) -> bool:
+        """Flag long-running commands that have just finished.
+
+        One `tmux list-panes -a` covers every tab, so this costs a single
+        subprocess every few seconds no matter how many tabs are open. Without
+        tmux there's no per-tab command name to read, so the watcher simply
+        never fires.
+        """
+        if self._long_command_seconds <= 0 or not self._use_tmux:
+            return False
+        if (now - self._command_poll_mono) < 3.0:
+            return False
+        self._command_poll_mono = now
+        try:
+            r = subprocess.run(
+                ['tmux', 'list-panes', '-a', '-F',
+                 '#{session_name}\t#{pane_current_command}'],
+                capture_output=True, text=True, timeout=2,
+            )
+        except Exception:
+            return False
+        commands: dict = {}
+        for line in r.stdout.splitlines():
+            session, _, command = line.partition('\t')
+            # A tab with a split pane reports two lines; either one being busy
+            # means the tab is busy, so first non-shell wins.
+            if session not in commands or commands[session] in _SHELL_NAMES:
+                commands[session] = command.strip()
+
+        changed = False
+        live_keys = set()
+        for idx, tab in enumerate(self._tabs):
+            key = tab.tmux_session or ('tab%d' % idx)
+            if key not in commands and idx == 0 and self._tmux_session in commands:
+                key = self._tmux_session   # startup tab of an older session
+            live_keys.add(key)
+            if key not in commands:
+                continue
+            finished = self._command_watcher.update(key, commands[key], now)
+            if finished is None:
+                continue
+            name, duration = finished
+            label = tab.title or ('tab %d' % (idx + 1))
+            self._alert_monitor.note('%s done in %s (%s)'
+                                     % (name, format_duration(duration), label))
+            logger.info('Command finished: %s after %s in %s',
+                        name, format_duration(duration), label)
+            changed = True
+        for key in set(self._command_watcher.running()) - live_keys:
+            self._command_watcher.forget(key)   # tab closed while it ran
+        return changed
+
     def _consume_screen_flags(self, screen, active: bool) -> None:
         """Turn a screen's post-feed flags into hints for the next render.
 
@@ -1089,8 +1149,13 @@ class EinkTerminal(
         self._watchdog.ready()
 
         # Wrap initial shell in a Tab
+        # tmux_session matters beyond bookkeeping: _tab_is_busy and the
+        # finished-command watcher both look a tab up by it. _reset_session
+        # already set it; the startup tab didn't, so the very first tab — the
+        # one most likely to be running something — was invisible to both.
         self._tabs = [_Tab(screen=self._screen, stream=self._stream,
                            pty_master=self._pty_master, child_pid=self._child_pid,
+                           tmux_session=self._tmux_session if self._use_tmux else '',
                            logger=self._make_tab_logger())]
         self._active_tab = 0
 
@@ -1547,7 +1612,9 @@ class EinkTerminal(
             # Alerts bypass the status-bar throttle: a warning must appear (and
             # clear) promptly, so force the status bar to repaint this render.
             if now - last_alert_tick >= 1.0:
-                if self._alert_monitor.tick() and not in_screensaver and not panel_asleep:
+                changed = self._alert_monitor.tick()
+                changed |= self._poll_finished_commands(now)
+                if changed and not in_screensaver and not panel_asleep:
                     self._status_force = True
                     has_pending = True  # alert changed — re-render status bar
                 last_alert_tick = now

@@ -49,6 +49,11 @@ class AlertMonitor:
             changed |= self._check_network()
         return changed
 
+    def note(self, msg: str) -> None:
+        """Show a message in the status bar, from outside the periodic checks
+        (e.g. a long-running command finishing)."""
+        self._push(msg)
+
     def active(self) -> list:
         """Return messages for currently-active (non-expired) alerts."""
         now = time.monotonic()
