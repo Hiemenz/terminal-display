@@ -995,11 +995,7 @@ class EinkTerminal(
     # ─── Main entry point ─────────────────────────────────────────────────────
 
     def run(self):
-        try:
-            with open('/tmp/eink-terminal-active', 'w') as f:
-                f.write(str(os.getpid()))
-        except Exception:
-            pass
+        self._claim_pidfile()
 
         # Let the `settings` shell command open the config editor (see
         # _install_command_scripts). The handler only flips a flag; the loop acts.
@@ -1061,10 +1057,7 @@ class EinkTerminal(
             # Remember where the shell ended so terminal_start_dir: last can
             # resume there after a restart/reboot.
             self._save_last_cwd()
-            try:
-                os.unlink('/tmp/eink-terminal-active')
-            except Exception:
-                pass
+            self._release_pidfile()
             self._exit_raw()
             if self._evdev_kb:
                 self._evdev_kb.ungrab()

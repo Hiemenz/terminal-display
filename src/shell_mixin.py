@@ -27,6 +27,58 @@ logger = logging.getLogger(__name__)
 class ShellMixin:
     """PTY/shell lifecycle, custom prompt construction, TTY raw mode, scrollback."""
 
+    _PIDFILE = '/tmp/eink-terminal-active'
+
+    def _claim_pidfile(self):
+        """Publish this PID for the typeable commands (`clear-eink`, `settings`,
+        `notes`, ...) to signal — but only if no other live instance already
+        holds it.
+
+        The claim is guarded by an exclusive flock held for the process
+        lifetime. Without it, a second instance that lost the race for the
+        panel and the keyboard — e.g. a stale duplicate systemd unit — would
+        still overwrite the file on startup and silently capture every command
+        script, which exits 0 after signalling it. The visible terminal then
+        ignores `clear-eink` entirely."""
+        self._pidfile_fd = None
+        try:
+            # O_RDWR (not 'w') so the file isn't truncated before we know we won.
+            fd = os.open(self._PIDFILE, os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError as e:
+            logger.warning('could not open %s: %s', self._PIDFILE, e)
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            try:
+                holder = os.pread(fd, 32, 0).decode().strip()
+            except OSError:
+                holder = '?'
+            logger.warning(
+                '%s already held by pid %s — not claiming it. Another e-ink '
+                'terminal is running; the typeable commands will drive that one.',
+                self._PIDFILE, holder)
+            os.close(fd)
+            return
+        os.ftruncate(fd, 0)
+        os.pwrite(fd, str(os.getpid()).encode(), 0)
+        self._pidfile_fd = fd   # keep open: closing it would drop the lock
+
+    def _release_pidfile(self):
+        """Drop the PID file, but only if this process is the one that claimed it."""
+        fd = getattr(self, '_pidfile_fd', None)
+        if fd is None:
+            return
+        self._pidfile_fd = None
+        try:
+            os.unlink(self._PIDFILE)
+        except OSError:
+            pass
+        try:
+            os.close(fd)   # releases the flock
+        except OSError:
+            pass
+
     @staticmethod
     def _write_signal_script(bindir: str, names, signum: int, description: str):
         """Write a `sh` script that signals this process (PID from
