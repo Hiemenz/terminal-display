@@ -20,6 +20,8 @@ Endpoints:
   GET  /logout → clears the session cookie
   GET  /status, /status.json → live app/host status (open)
   GET  /logs, /logs.json     → journald tail for the service (PIN-gated)
+  GET  /session-logs         → search/browse terminal session log files (PIN-gated)
+  GET  /session-logs.json    → JSON search/list of session log files (PIN-gated)
   GET  /controls             → quick-action buttons page
   POST /action                → JSON {"action": "..."} — a quick action, incl.
                                 restart/reboot (PIN-gated)
@@ -68,8 +70,8 @@ _CONFIG_SNAPSHOT_DIR = 'config_snapshots'
 # tradeoff for a LAN deterrent, not a bank vault).
 _active_sessions: set = set()
 _SESSION_COOKIE = 'eink_session'
-_GATED_HTML_GET = {'/config', '/clipboard', '/beam', '/notes', '/logs'}
-_GATED_JSON_GET = {'/clipboard/list', '/logs.json'}
+_GATED_HTML_GET = {'/config', '/clipboard', '/beam', '/notes', '/logs', '/session-logs'}
+_GATED_JSON_GET = {'/clipboard/list', '/logs.json', '/session-logs.json'}
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -989,6 +991,7 @@ _PAGE_HTML = '''\
       <a href="/controls" class="pill-btn">&#127918; Controls</a>
       <a href="/card" class="pill-btn">&#128203; Card</a>
       <a href="/logs" class="pill-btn">&#128220; Logs</a>
+      <a href="/session-logs" class="pill-btn">&#128269; Session logs</a>
       <a href="/config" class="pill-btn">&#9881; Config</a>
       <a href="/gallery" class="pill-btn">&#128247; Gallery</a>
       <a href="/clipboard" class="pill-btn">&#128203; Clips</a>
@@ -1875,6 +1878,107 @@ function toggleAuto(){ if(document.getElementById("auto").checked){timer=setInte
 load();
 </script></body></html>'''
 
+_SESSION_LOGS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Session Logs</title><style>''' + _SUBPAGE_CSS + '''
+  #results{white-space:pre-wrap;word-break:break-all;font-family:monospace;font-size:12px;
+    background:var(--card);border-radius:8px;padding:12px;min-height:60px;max-height:60vh;overflow-y:auto}
+  .hit-file{color:var(--muted);font-size:11px;margin-bottom:2px}
+  .hit-line{margin-bottom:8px}
+  .match{background:rgba(255,200,0,.3);border-radius:2px}
+  #status{font-size:12px;color:var(--muted);margin:6px 0}
+  select#file{flex:1}
+</style></head><body>
+<header><a class="back" href="/">&#8592; Back</a><h1>Session Logs</h1><span></span></header>
+
+<div class="card">
+  <label>Search across all log files</label>
+  <div class="row">
+    <input id="q" placeholder="grep term…" style="flex:1" onkeydown="if(event.key==='Enter')doSearch()">
+    <button onclick="doSearch()">Search</button>
+  </div>
+  <div id="status"></div>
+  <div id="results"></div>
+</div>
+
+<div class="card">
+  <label>Browse a file</label>
+  <div class="row">
+    <select id="file" onchange="loadFile()"><option value="">— pick a file —</option></select>
+    <button class="ghost" onclick="refreshFiles()">&#8635;</button>
+  </div>
+  <div class="row" style="margin-top:6px">
+    <label style="margin:0;align-self:center">Lines</label>
+    <select id="tail" style="width:auto" onchange="if(document.getElementById('file').value)loadFile()">
+      <option>50</option><option selected>200</option><option>500</option></select>
+  </div>
+</div>
+
+<script>
+function setStatus(s){document.getElementById('status').textContent=s;}
+function setResults(html){document.getElementById('results').innerHTML=html;}
+
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+
+function highlight(line,q){
+  if(!q)return esc(line);
+  var re=new RegExp('('+q.replace(/[.*+?^${}()|[\\]\\\\]/g,'\\\\$&')+')','gi');
+  return esc(line).replace(re,'<span class="match">$1</span>');
+}
+
+function doSearch(){
+  var q=document.getElementById('q').value.trim();
+  if(!q){setStatus('Enter a search term.');return;}
+  setStatus('Searching…');setResults('');
+  fetch('/session-logs.json?q='+encodeURIComponent(q))
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(!d.ok){setStatus('Error: '+(d.error||'?'));return;}
+      var hits=d.results||[];
+      setStatus(hits.length+' match'+(hits.length===1?'':'es')+(d.truncated?' (truncated)':''));
+      if(!hits.length){setResults('(no matches)');return;}
+      var out='',lastFile='';
+      hits.forEach(function(h){
+        if(h.file!==lastFile){out+='<div class="hit-file">'+esc(h.file)+'</div>';lastFile=h.file;}
+        out+='<div class="hit-line"><span style="color:var(--muted)">'+h.line+':</span> '+highlight(h.text,q)+'</div>';
+      });
+      setResults(out);
+    }).catch(function(e){setStatus('Error: '+e);});
+}
+
+function loadFile(){
+  var f=document.getElementById('file').value;
+  if(!f)return;
+  var n=document.getElementById('tail').value;
+  setStatus('Loading…');setResults('');
+  fetch('/session-logs.json?file='+encodeURIComponent(f)+'&lines='+n)
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(!d.ok){setStatus('Error: '+(d.error||'?'));return;}
+      setStatus(d.lines+' lines');
+      setResults('<pre style="margin:0">'+esc(d.text)+'</pre>');
+      document.getElementById('results').scrollTop=9999;
+    }).catch(function(e){setStatus('Error: '+e);});
+}
+
+function refreshFiles(){
+  var sel=document.getElementById('file');
+  var cur=sel.value;
+  fetch('/session-logs.json').then(function(r){return r.json();})
+    .then(function(d){
+      if(!d.ok)return;
+      var opts='<option value="">— pick a file —</option>';
+      (d.files||[]).forEach(function(f){
+        var kb=Math.round(f.size/1024)||'<1';
+        opts+='<option value="'+esc(f.name)+'"'+(f.name===cur?' selected':'')+'>'+esc(f.name)+' ('+kb+' KB)</option>';
+      });
+      sel.innerHTML=opts;
+    });
+}
+
+refreshFiles();
+</script></body></html>'''
+
 _CONTROLS_HTML = '''<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>Controls</title><style>''' + _SUBPAGE_CSS + '''
@@ -2017,6 +2121,10 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._respond(200, 'text/html; charset=utf-8', _LOGS_HTML.encode())
             elif path == '/logs.json':
                 self._serve_logs()
+            elif path == '/session-logs':
+                self._respond(200, 'text/html; charset=utf-8', _SESSION_LOGS_HTML.encode())
+            elif path == '/session-logs.json':
+                self._serve_session_logs()
             elif path == '/card':
                 self._respond(200, 'text/html; charset=utf-8', _CARD_HTML.encode())
             elif path == '/controls':
@@ -2361,6 +2469,103 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 out = f'(could not read logs: {e})'
             self._respond(200, 'application/json',
                           json.dumps({'ok': True, 'text': out}).encode())
+
+        def _serve_session_logs(self):
+            """GET /session-logs.json — list or search terminal session log files. PIN-gated."""
+            raw_log_dir = (config.get('terminal_log_dir') or '').strip()
+            log_dir = raw_log_dir if raw_log_dir else data_path('terminal_logs')
+            q_params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            q = (q_params.get('q', [''])[0] or '').strip()
+            file_name = (q_params.get('file', [''])[0] or '').strip()
+
+            if not os.path.isdir(log_dir):
+                if q or file_name:
+                    self._respond(200, 'application/json',
+                                  json.dumps({'ok': True, 'results': [], 'truncated': False}).encode())
+                else:
+                    self._respond(200, 'application/json',
+                                  json.dumps({'ok': True, 'files': []}).encode())
+                return
+
+            try:
+                names = sorted(
+                    [f for f in os.listdir(log_dir) if f.endswith('.log')],
+                    key=lambda n: os.path.getmtime(os.path.join(log_dir, n)),
+                    reverse=True,
+                )
+            except OSError as e:
+                self._respond(200, 'application/json',
+                              json.dumps({'ok': False, 'error': str(e)}).encode())
+                return
+
+            if file_name:
+                # browse: return tail of one file
+                safe = os.path.basename(file_name)
+                if safe not in names:
+                    self._respond(200, 'application/json',
+                                  json.dumps({'ok': False, 'error': 'File not found'}).encode())
+                    return
+                try:
+                    n = max(1, min(500, int(q_params.get('lines', ['200'])[0])))
+                except ValueError:
+                    n = 200
+                path = os.path.join(log_dir, safe)
+                try:
+                    with open(path, 'r', errors='replace') as fh:
+                        all_lines = fh.readlines()
+                    tail = all_lines[-n:]
+                    self._respond(200, 'application/json',
+                                  json.dumps({'ok': True, 'text': ''.join(tail),
+                                              'lines': len(tail)}).encode())
+                except OSError as e:
+                    self._respond(200, 'application/json',
+                                  json.dumps({'ok': False, 'error': str(e)}).encode())
+                return
+
+            if q:
+                # search across all files, most-recent first
+                results = []
+                truncated = False
+                limit = 500
+                try:
+                    pattern = re.compile(re.escape(q), re.IGNORECASE)
+                except re.error:
+                    self._respond(200, 'application/json',
+                                  json.dumps({'ok': False, 'error': 'Invalid search term'}).encode())
+                    return
+                for name in names:
+                    if len(results) >= limit:
+                        truncated = True
+                        break
+                    path = os.path.join(log_dir, name)
+                    try:
+                        with open(path, 'r', errors='replace') as fh:
+                            for lineno, line in enumerate(fh, 1):
+                                if pattern.search(line):
+                                    results.append({'file': name, 'line': lineno,
+                                                    'text': line.rstrip('\n')})
+                                    if len(results) >= limit:
+                                        truncated = True
+                                        break
+                    except OSError:
+                        continue
+                self._respond(200, 'application/json',
+                              json.dumps({'ok': True, 'results': results,
+                                          'truncated': truncated}).encode())
+                return
+
+            # file listing
+            files = []
+            for name in names:
+                path = os.path.join(log_dir, name)
+                try:
+                    st = os.stat(path)
+                    files.append({'name': name, 'size': st.st_size,
+                                  'mtime': int(st.st_mtime)})
+                except OSError:
+                    pass
+            self._respond(200, 'application/json',
+                          json.dumps({'ok': True, 'files': files}).encode())
 
         def _handle_card(self):
             """POST /card — render a rich card (note/countdown/todo/qr) to e-ink. PIN-gated (see do_POST)."""

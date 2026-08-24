@@ -39,6 +39,7 @@ from terminal_state import (
     _MIN_FONT,
     _PGDN,
     _PGUP,
+    _TrackedScreen,
 )
 
 
@@ -168,7 +169,7 @@ class HotkeysMixin:
         if tab and tab.split_dir and tab.pane2_master >= 0:
             half_w = self._split_half_w()
             cols, rows, _, _ = terminal_dimensions(self._font_size, self._font_path, half_w)
-            tab.pane2_screen = pyte.Screen(cols, rows)
+            tab.pane2_screen = _TrackedScreen(cols, rows)
             tab.pane2_stream = pyte.ByteStream(tab.pane2_screen)
             winsize = struct.pack('HHHH', rows, cols, 0, 0)
             try:

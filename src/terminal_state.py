@@ -7,11 +7,42 @@ import os
 import re
 import socket
 from dataclasses import dataclass
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import pyte
 
 from session_logger import TabLogger
+
+# Mixin is combined with pyte.Screen only at the concrete subclasses below
+# (_TrackedScreen / _TrackedHistoryScreen); this pretend base just tells mypy
+# where `super().erase_in_display` comes from without affecting the runtime MRO.
+if TYPE_CHECKING:
+    _ClearTrackingBase = pyte.Screen
+else:
+    _ClearTrackingBase = object
+
+
+class _ClearTrackingMixin(_ClearTrackingBase):
+    """Flags a true whole-screen clear (ED 2/3 — what `clear`/`tput clear`
+    send, and `reset`) via pyte's own escape parsing, so the render loop can
+    force a real ghost-clearing flash instead of a partial diff. A partial
+    update only drives pixels that changed, which on this panel's fast
+    waveform can leave faint traces of the text that used to be there —
+    exactly the case where the user is asking for a clean screen."""
+    full_clear = False
+
+    def erase_in_display(self, how: int = 0, *args, **kwargs) -> None:
+        super().erase_in_display(how, *args, **kwargs)
+        if how in (2, 3):
+            self.full_clear = True
+
+
+class _TrackedScreen(_ClearTrackingMixin, pyte.Screen):
+    pass
+
+
+class _TrackedHistoryScreen(_ClearTrackingMixin, pyte.HistoryScreen):
+    pass
 
 
 @dataclass

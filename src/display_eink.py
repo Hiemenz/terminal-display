@@ -177,7 +177,7 @@ class EinkDriver:
                 if img is not None:
                     self._hw_partial_diff(img)
             elif kind == self._FULL:
-                self._hw_full(item[1])
+                self._hw_full(item[1], deep=item[2])
             elif kind == self._SLEEP:
                 self._hw_sleep()
                 item[1].set()   # unblock sleep() caller
@@ -219,7 +219,7 @@ class EinkDriver:
             return
         if flash:
             record_full_refresh()
-            self._q.put((self._FULL, image))
+            self._q.put((self._FULL, image, False))
         else:
             with self._partial_lock:
                 already_queued = self._pending_partial is not None
@@ -227,13 +227,20 @@ class EinkDriver:
             if not already_queued:
                 self._q.put((self._PARTIAL,))
 
-    def flash_refresh(self, image: Image.Image, output_path: str = None):
-        """Force a full flash refresh (black/white clear) — use for anti-ghosting or F10."""
+    def flash_refresh(self, image: Image.Image, output_path: str = None, deep: bool = False):
+        """Force a full flash refresh (black/white clear) — use for anti-ghosting or F10.
+
+        Pass deep=True for the slow, quality full-init waveform (epd.init()) instead
+        of the fast one (epd.init_fast()) normally used here. The fast waveform is
+        quicker but — per the panel's own behavior — can leave faint residual
+        ghosting after heavy prior use; deep=True is for explicit user-requested
+        clears (clear-eink, F10) where a guaranteed full clear matters more than
+        the extra second it takes."""
         _save(image, output_path)
         record_full_refresh()
         if self._local:
             return
-        self._q.put((self._FULL, image))
+        self._q.put((self._FULL, image, deep))
 
     def partial_refresh_diff(self, image: Image.Image, output_path: str = None):
         """Async partial refresh. Returns immediately; hardware write runs in background.
@@ -268,11 +275,12 @@ class EinkDriver:
             self._epd = epd7in5_V2.EPD()
         return self._epd
 
-    def _hw_full(self, image: Image.Image):
+    def _hw_full(self, image: Image.Image, deep: bool = False):
         epd = self._epd_instance()
         if epd is None:
             return
-        logging.info('E-ink full flash refresh (hw_sleeping=%s)', self._hw_sleeping)
+        logging.info('E-ink full flash refresh (hw_sleeping=%s, deep=%s)',
+                     self._hw_sleeping, deep)
         try:
             buf = epd.getbuffer(image)
             # Always use the full-quality init() here, not init_fast(). This path
@@ -281,6 +289,18 @@ class EinkDriver:
             # undercuts that guarantee and leaves stale text visibly lingering.
             epd.init()
             self._hw_sleeping = False
+            if deep:
+                # epd.display() forces a full-panel waveform by writing the
+                # bitwise-inverted image as the "old" reference (so every pixel
+                # registers as changed), but that's a software trick against
+                # whatever the panel's actual analog charge state happens to be.
+                # After a lot of partial/DU updates that state can drift enough
+                # that it still leaves faint ghosting. epd.Clear() wipes the
+                # panel to a uniform white state as its own hardware step —
+                # for an explicit user-requested clear (clear-eink, F10, a
+                # detected `clear`/`reset`) that guaranteed wipe matters more
+                # than the extra second it costs.
+                epd.Clear()
             epd.display(buf)
             self._stats['full'] += 1
             self._stats['last_flash_mono'] = time.monotonic()

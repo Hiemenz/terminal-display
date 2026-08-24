@@ -137,6 +137,10 @@ class EinkTerminal(
         # use); force it anyway at 2× the interval.
         self._flash_idle_gap = config.get('terminal_flash_idle_gap', 30)
         self._needs_periodic_flash = False   # set after a content partial
+        # Set when pyte saw a true whole-screen clear (ED 2/3 — `clear`, `reset`)
+        # since the last render; makes the next 'flash' a deep, ghost-free one
+        # instead of the normal fast waveform. See _TrackedScreen in terminal_state.py.
+        self._deep_flash_pending = False
         # Idle → screensaver + panel deep-sleep. screensaver_sleep_minutes (in
         # minutes, editable on-device) takes precedence over the legacy seconds.
         _sleep_min = config.get('screensaver_sleep_minutes')
@@ -413,7 +417,7 @@ class EinkTerminal(
         self._install_command_scripts()
     def _force_full_refresh(self):
         if self._last_image is not None:
-            self._driver.flash_refresh(self._last_image)
+            self._driver.flash_refresh(self._last_image, deep=True)
             self._last_full_refresh_mono = time.monotonic()
     def _clear_screen(self):
         """Clear the active terminal's screen + scrollback and ghost-clear the
@@ -439,7 +443,7 @@ class EinkTerminal(
                 pass
         self._render(force_full=True)
         if self._last_image is not None:
-            self._driver.flash_refresh(self._last_image)
+            self._driver.flash_refresh(self._last_image, deep=True)
         self._last_full_refresh_mono = time.monotonic()
     def _reset_session(self, render: bool = True):
         """Kill the shell (and tmux session/tabs) and start a brand-new one, so a
@@ -880,6 +884,7 @@ class EinkTerminal(
             self._last_cursor_row = self._screen.cursor.y
             self._last_image = img
             kind = self._refresh_kind(force_full, force_flash, heavy_change=False)
+            self._deep_flash_pending = False   # split view has no flash path (below) to consume it
             if kind in ('full', 'flash'):
                 self._driver.full_refresh(img)
                 self._last_full_refresh_mono = time.monotonic()
@@ -984,8 +989,12 @@ class EinkTerminal(
             self._needs_periodic_flash = False
         elif kind == 'flash':
             # Deferred periodic ghost-clearing flash, or a resync flash for a
-            # near-total redraw so it lands cleanly.
-            self._driver.flash_refresh(img)
+            # near-total redraw so it lands cleanly. A detected `clear`/`reset`
+            # gets the deep (slower, full-init) waveform so the screen actually
+            # comes up blank instead of showing faint traces of prior content.
+            deep = self._deep_flash_pending
+            self._deep_flash_pending = False
+            self._driver.flash_refresh(img, deep=deep)
             self._last_full_refresh_mono = time.monotonic()
             self._needs_periodic_flash = False
         else:
@@ -1349,6 +1358,10 @@ class EinkTerminal(
                             if tab_i == self._active_tab and self._scroll_pages > 0 and not in_screensaver:
                                 self._snap_to_live()
                             tab.stream.feed(chunk)
+                            if tab.screen.full_clear:
+                                tab.screen.full_clear = False
+                                if tab_i == self._active_tab:
+                                    self._deep_flash_pending = True
                             if tab.logger:
                                 tab.logger.write(chunk)
                         if tab_i == self._active_tab and not in_screensaver:
@@ -1379,6 +1392,10 @@ class EinkTerminal(
                             chunk = _filter_pty_output(chunk, tab.pane2_master)
                             if chunk and tab.pane2_stream:
                                 tab.pane2_stream.feed(chunk)
+                                if tab.pane2_screen.full_clear:
+                                    tab.pane2_screen.full_clear = False
+                                    if tab_i == self._active_tab:
+                                        self._deep_flash_pending = True
                             if tab_i == self._active_tab and not in_screensaver:
                                 self._last_activity = now
                                 has_pending = True

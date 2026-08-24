@@ -19,7 +19,7 @@ import tty
 import pyte
 
 from terminal_renderer import SPLIT_TERMINAL_W, terminal_dimensions
-from terminal_state import _REPO_ROOT
+from terminal_state import _REPO_ROOT, _TrackedHistoryScreen, _TrackedScreen
 
 logger = logging.getLogger(__name__)
 
@@ -170,10 +170,10 @@ class ShellMixin:
         if hasattr(self, '_driver'):
             self._driver.set_cell_size(cw, ch)
         if self._use_tmux:
-            self._screen = pyte.Screen(cols, rows)
+            self._screen = _TrackedScreen(cols, rows)
         else:
             history = self._config.get('terminal_scrollback', 500)
-            self._screen = pyte.HistoryScreen(cols, rows, history=history)
+            self._screen = _TrackedHistoryScreen(cols, rows, history=history)
         self._stream = pyte.ByteStream(self._screen)
         self._scroll_pages = 0
 
