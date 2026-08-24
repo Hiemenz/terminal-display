@@ -10,8 +10,6 @@ import struct
 import subprocess
 import termios
 
-import pyte
-
 from terminal_renderer import terminal_dimensions
 from terminal_state import _TrackedByteStream, _TrackedScreen
 

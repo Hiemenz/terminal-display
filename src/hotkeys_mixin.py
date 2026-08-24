@@ -9,8 +9,6 @@ import struct
 import termios
 import time
 
-import pyte
-
 from terminal_renderer import terminal_dimensions
 from terminal_state import (
     _ALT_DIGITS,
