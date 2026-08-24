@@ -16,11 +16,8 @@ import subprocess
 import termios
 import tty
 
-import pyte
-
 from terminal_renderer import SPLIT_TERMINAL_W, terminal_dimensions
-from terminal_state import (_REPO_ROOT, _TrackedByteStream, _TrackedHistoryScreen,
-                            _TrackedScreen)
+from terminal_state import _REPO_ROOT, _TrackedByteStream, _TrackedHistoryScreen, _TrackedScreen
 
 logger = logging.getLogger(__name__)
 

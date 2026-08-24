@@ -7,8 +7,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
-from terminal_state import (_TrackedByteStream, _TrackedHistoryScreen,  # noqa: E402
-                            _TrackedScreen)
+from terminal_state import _TrackedByteStream, _TrackedHistoryScreen, _TrackedScreen  # noqa: E402
 
 # What `clear` inside tmux actually emits to the outer PTY (captured live).
 TMUX_CLEAR = b'\x1b[1;23r\x1b[1;1H\x1b[2;23r\x1b[22S\x1b[1;1H\x1b[K\x1b[1;24r\x1b[1;1H'
