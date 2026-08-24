@@ -330,6 +330,12 @@ terminal_reset_minutes: 60
 # When no SSH session or web activity is detected for screensaver_idle_timeout
 # seconds, switch to the screensaver image with a QR code overlay.
 # Scanning the QR code opens the web UI and immediately wakes stats display.
+# Lock screen: show recent Claude Code activity read from the local session
+# transcripts (messages/tokens over the last 5 h and 7 d). This is an activity
+# estimate, not your quota — the real limits live server-side.
+screensaver_show_claude_usage: true
+terminal_claude_usage_ttl: 300   # seconds between transcript scans
+
 screensaver_enabled: true
 
 # Seconds of inactivity before switching to the screensaver (default 1 hour).

@@ -304,6 +304,9 @@ class EinkTerminal(
         self._long_command_seconds = config.get('terminal_long_command_seconds', 30)
         self._command_watcher = CommandWatcher(min_seconds=self._long_command_seconds)
         self._command_poll_mono = 0.0
+        # Lock-screen Claude activity panel (scans ~/.claude transcripts).
+        self._claude_usage_cache: dict = {}
+        self._claude_usage_mono = 0.0
         self._web_input_queue = None   # set in run() when preview server starts
 
         # Split-view stats
@@ -614,7 +617,8 @@ class EinkTerminal(
             ip = _get_local_ip()
             qr_url = f'http://{ip}:{port}/config' if ip else ''
 
-            img = render_screensaver(image_path, qr_url, self._config)
+            img = render_screensaver(image_path, qr_url, self._config,
+                                     claude_usage=self._claude_usage())
             # Must be a flash (ordered _FULL task): full_refresh(flash=False) only
             # sets _pending_partial, which the sleep() below immediately cancels —
             # the screensaver would never reach the panel.
@@ -733,6 +737,37 @@ class EinkTerminal(
         t.start()
 
     # ─── Rendering ───────────────────────────────────────────────────────────
+
+    def _claude_usage(self) -> dict:
+        """Recent Claude Code activity for the lock screen, cached.
+
+        Scanning the transcripts takes about a second on a Pi, so it's done at
+        most once every terminal_claude_usage_ttl seconds — and only here,
+        where the panel is on its way to sleep and a pause costs nothing.
+        Returns {} when disabled or unreadable, which renders no panel.
+        """
+        if not self._config.get('screensaver_show_claude_usage', True):
+            return {}
+        # getattr throughout: this panel is decoration on the lock screen, and
+        # nothing about it may be able to stop the panel going to sleep.
+        cached = getattr(self, '_claude_usage_cache', {})
+        now = time.monotonic()
+        ttl = self._config.get('terminal_claude_usage_ttl', 300)
+        if cached and (now - getattr(self, '_claude_usage_mono', 0.0)) < ttl:
+            return cached
+        try:
+            from claude_usage import collect_usage
+            started = time.monotonic()
+            usage = collect_usage()
+            logger.info('Claude activity scan: %d msgs in 5 h (%.1fs)',
+                        usage.get('5h', {}).get('messages', 0),
+                        time.monotonic() - started)
+        except Exception as e:
+            logger.warning('Claude activity scan failed: %s', e)
+            return cached or {}
+        self._claude_usage_cache = usage
+        self._claude_usage_mono = now
+        return usage
 
     def _poll_finished_commands(self, now: float) -> bool:
         """Flag long-running commands that have just finished.

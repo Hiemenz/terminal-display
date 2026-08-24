@@ -176,6 +176,7 @@ _CONFIG_SCHEMA = [
         ['screensaver_enabled',         'bool',   'Enabled',              None],
         ['screensaver_idle_timeout',    'int',    'Idle Timeout (s)',      'Before screensaver activates'],
         ['screensaver_mode',            'select', 'Mode',                 ['static', 'cycle']],
+        ['screensaver_show_claude_usage', 'bool',  'Claude Activity Panel', 'Recent Claude Code usage (local estimate, not your quota)'],
         ['screensaver_cycle_interval',  'int',    'Cycle Interval (min)', 'Cycle mode only'],
     ]],
     ['Startup & Web', [

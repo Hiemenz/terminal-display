@@ -449,8 +449,47 @@ def _weekly_percent(config: dict) -> float | None:
         return None
 
 
-def render_screensaver(image_path: str, qr_url: str, config: dict) -> Image.Image:
-    """Render the idle screensaver: background image + QR code + week-progress overlay."""
+def _draw_claude_usage(d, font_path: str, usage: dict) -> None:
+    """Panel of recent Claude Code activity, top-right of the lock screen.
+
+    Deliberately labelled an estimate: Claude Code's real 5-hour and weekly
+    limits are enforced server-side and written nowhere on disk, so this is
+    what the local transcripts show going through, not a quota reading.
+    """
+    from claude_usage import format_tokens
+
+    rows = []
+    for label, key in (('5 h', '5h'), ('7 d', '7d')):
+        bucket = usage.get(key) or {}
+        rows.append('%-4s %4d msg  %6s in  %6s out'
+                    % (label, bucket.get('messages', 0),
+                       format_tokens(bucket.get('sent', 0)),
+                       format_tokens(bucket.get('generated', 0))))
+    busiest = (usage.get('5h') or {}).get('top_project', '')
+
+    f_title = _find_font(font_path, 13)
+    f_row = _find_font(font_path, 13)
+    widths = [int(d.textlength(r, font=f_row)) for r in rows]
+    box_w = max(widths + [int(d.textlength('CLAUDE ACTIVITY (local est.)', font=f_title))]) + 20
+    box_h = 26 + len(rows) * 16 + (16 if busiest else 4)
+    box_x = W - PAD - box_w
+    box_y = PAD
+    d.rounded_rectangle([box_x, box_y, box_x + box_w, box_y + box_h],
+                        radius=8, fill=_WHITE, outline=_BLACK, width=1)
+    d.text((box_x + 10, box_y + 6), 'CLAUDE ACTIVITY (local est.)',
+           font=f_title, fill=_BLACK)
+    y = box_y + 24
+    for row in rows:
+        d.text((box_x + 10, y), row, font=f_row, fill=_BLACK)
+        y += 16
+    if busiest:
+        d.text((box_x + 10, y), 'busiest: %s' % busiest[:24], font=f_row, fill=_BLACK)
+
+
+def render_screensaver(image_path: str, qr_url: str, config: dict,
+                       claude_usage: dict = None) -> Image.Image:
+    """Render the idle screensaver: background image + QR code + week-progress
+    overlay, and optionally a Claude Code activity panel."""
     font_path = config.get('font_path', '')
 
     img = Image.new('L', (W, H), color=_BLACK)
@@ -477,6 +516,12 @@ def render_screensaver(image_path: str, qr_url: str, config: dict) -> Image.Imag
             f_week = _find_font(font_path, 16)
             d.text((box_x + 10, box_y + 6), f'Week {pct:.0f}%', font=f_week, fill=_BLACK)
             _bar(d, box_x + 10, box_y + 28, box_w - 20, 8, pct, _BLACK, _WHITE, _BLACK)
+        except Exception:
+            pass
+
+    if claude_usage:
+        try:
+            _draw_claude_usage(d, font_path, claude_usage)
         except Exception:
             pass
 
