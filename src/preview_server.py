@@ -154,6 +154,7 @@ _CONFIG_SCHEMA = [
         ['terminal_alert_cpu_threshold',        'int',    'CPU Alert %',           '0 = disabled'],
         ['terminal_alert_disk_free_threshold',  'int',    'Disk Free Alert %',     '0 = disabled'],
         ['terminal_alert_ssh_logins',           'bool',   'SSH Login Alerts',      None],
+        ['terminal_long_command_seconds',       'int',    'Long Command Notice (s)', 'Announce commands that ran at least this long (0 = off)'],
     ]],
     # How the panel is driven. The right values are per-panel and per-taste —
     # how much flashing you'll tolerate against how much ghosting — so they

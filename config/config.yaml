@@ -144,6 +144,10 @@ terminal_split_view: false
 # Alert thresholds (0 = disabled)
 terminal_alert_cpu_threshold: 90
 terminal_alert_disk_free_threshold: 10
+# Announce in the status bar when a command that ran at least this long
+# finishes ("make done in 2m14s (build)"). 0 disables. Needs tmux mode.
+terminal_long_command_seconds: 30
+
 terminal_alert_ssh_logins: true
 
 # System-health alerts: throttling, failed services, a dying SD card, and a
