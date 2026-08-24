@@ -7,7 +7,11 @@
  "source": "raw-pty",
  "cols": 80,
  "rows": 24,
- "recorded": "2026-08-23",
+ "final_size": [
+  80,
+  24
+ ],
+ "recorded": "2026-08-24",
  "tmux": "tmux 3.5a",
  "chunks": [
   "G1s/MjAwNGg=",
@@ -28,8 +32,7 @@
   "GyhCG1swOzdtXlgbKEIbW20gRXhpdBtbMTRH",
   "GyhCG1swOzdtXlIbKEIbW20gUmVhZCBGaWxlIBsoQhtbMDs3bV5cGyhCG1ttIFJlcGxhY2UgICAbKEIbWzA7N21eVRsoQhtbbSBQYXN0ZSAgICAgGyhCG1swOzdtXkobKEIbW20gSnVzdGlmeSAgIBsoQhtbMDs3bV4vGyhCG1ttIEdvIFRvIExpbmU=",
   "DRtbMmQ=",
-  "aGllbWVuelplcm8N",
-  "G1s/MTJsG1s/MjVo"
+  "aGllbWVuelplcm8NG1s/MTJsG1s/MjVo"
  ],
  "expected": [
   "  GNU nano 8.4                      /etc/hostname",

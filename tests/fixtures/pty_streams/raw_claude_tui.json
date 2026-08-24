@@ -1,0 +1,52 @@
+{
+ "name": "raw_claude_tui",
+ "command": [
+  "claude"
+ ],
+ "source": "raw-pty",
+ "cols": 80,
+ "rows": 24,
+ "final_size": [
+  80,
+  24
+ ],
+ "recorded": "2026-08-24",
+ "tmux": "tmux 3.5a",
+ "chunks": [
+  "GzcbW3IbOBtbPzI1aA==",
+  "G1s/MjVs",
+  "G1s/MjAwNGgbWz8xMDA0aBtbPzIwMzFo",
+  "G1s+MHE=",
+  "G1tj",
+  "G1s/MTA0OWgbWzJKG1tIG1s/MTAwMGgbWz8xMDAyaBtbPzEwMDNoG1s/MTAwNmg=",
+  "G10wO+KcsyBDbGF1ZGUgQ29kZQc=",
+  "G1tIDRtbMUIbWzM4OzU7MTc0bSDilpAbWzQ4OzU7MTZt4pab4paI4paI4paI4pab4paIG1sxMkcbWzM5bRtbNDltG1sxbUNsYXVkZSBDb2RlG1syNEcbWzIybRtbMzg7NTsyNDZtdjIuMS4yNDENG1sxQhtbMzg7NTsxNzRt4pad4pacG1s0ODs1OzE2beKWiOKWiOKWiOKWiOKWiBtbNDlt4paI4paAG1sxMkcbWzM4OzU7MjQ2bU9wdXMgNSDCtyBDbGF1ZGUgUHJvDRtbMUIbWzM4OzU7MTc0bSAg4pad4padIOKWneKWnSAgG1sxMkcbWzM4OzU7MjQ2bX4vdGVybWluYWwtZGlzcGxheQ0bWzYyQxtbMTVC4pePIGhpZ2ggwrcgL2VmZm9ydA0bWzFCG1szODs1OzI0NG3ilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIANG1sxQhtbMzlt4p2vwqAbWzJtVHJ5ICJmaXggdHlwZWNoZWNrIGVycm9ycyING1sxQhtbMjJtG1szODs1OzI0NG3ilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIDilIANG1syQxtbMUIbWzM4OzU7MjIwbeKaoCBUcmFuc2NyaXB0IHNhdmluZyBpcyBvZmYg4oCUIGluaGVyaXRlZCBDTEFVREVfQ09ERV9DSElMRF9TRVNTSU9OIG1hcmtlchtbMzg7NTsyNDZtIMK3IHLigKYNG1syQxtbMUIbWzM4OzU7MjIwbeKPteKPtSBhdXRvIG1vZGUgb24bWzM4OzU7MjQ2bSAoc2hpZnQrdGFiIHRvIGN5Y2xlKRtbNjRHG1szODs1OzIyMG0vcmMgY29ubmVjdGluZ+KAphtbMzltG1syNDsxSBtbMjE7M0gbWz8yNWg=",
+  "G1s/MjVsG1tIDRtbNjNDG1syM0IgICAgICAgICAgICAbWzM4OzU7MTE0bS9yYxtbMzltG1syNDsxSBtbMjE7M0gbWz8yNWg="
+ ],
+ "expected": [
+  "",
+  " \u2590\u259b\u2588\u2588\u2588\u259b\u2588   Claude Code v2.1.241",
+  "\u259d\u259c\u2588\u2588\u2588\u2588\u2588\u2588\u2580  Opus 5 \u00b7 Claude Pro",
+  "  \u259d\u259d \u259d\u259d    ~/terminal-display",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "",
+  "                                                              \u25cf high \u00b7 /effort",
+  "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+  "\u276f\u00a0Try \"fix typecheck errors\"",
+  "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+  "  \u26a0 Transcript saving is off \u2014 inherited CLAUDE_CODE_CHILD_SESSION marker \u00b7 r\u2026",
+  "  \u23f5\u23f5 auto mode on (shift+tab to cycle)                                     /rc"
+ ]
+}

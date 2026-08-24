@@ -61,6 +61,10 @@ FIXTURE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 TMUX_CONF = 'set -g status off\nset -g default-terminal "xterm-256color"\n'
 
 
+def _set_size(fd: int, cols: int, rows: int) -> None:
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+
+
 def _drain(fd: int, seconds: float, chunks: list) -> None:
     """Collect output for `seconds`, in the 4096-byte reads the app uses."""
     end = time.monotonic() + seconds
@@ -103,6 +107,13 @@ def record_raw(name: str, command: list, cols: int, rows: int,
     The bytes come from a bare PTY — no tmux in the middle to normalize them.
     To get an authoritative grid for those bytes we then `cat` them into a
     tmux pane, which interprets them as any terminal would, and capture it.
+
+    `stty -echo` in the replay pane matters: a recorded stream from a program
+    that queries the terminal (claude and other TUIs ask for device
+    attributes) makes tmux write a *reply* to the pane's tty, and with echo on
+    the shell prints that reply onto the screen. The oracle would then show
+    "^[P>|tmux 3.5a^[\\" where the program's own text belongs, and the
+    fixture would encode tmux's answer rather than what the bytes mean.
     """
     pid, fd = pty.fork()
     if pid == 0:
@@ -135,7 +146,8 @@ def record_raw(name: str, command: list, cols: int, rows: int,
         subprocess.run(
             ['tmux', '-L', socket_name, '-f', conf_path, 'new-session', '-d',
              '-s', 'rec', '-x', str(cols), '-y', str(rows),
-             'sh', '-c', 'cat %s; sleep 30' % shlex.quote(raw_path)],
+             'sh', '-c', 'stty -echo 2>/dev/null; cat %s; sleep 30'
+             % shlex.quote(raw_path)],
             capture_output=True, timeout=10, check=True,
         )
         time.sleep(1.5)
@@ -152,7 +164,7 @@ def record_raw(name: str, command: list, cols: int, rows: int,
 
 
 def record_tmux(name: str, command: list, cols: int, rows: int,
-                settle: float) -> dict:
+                settle: float, resize=None) -> dict:
     socket_name = 'rec-' + uuid.uuid4().hex[:8]
     conf_path = _write_conf(socket_name)
 
@@ -166,13 +178,23 @@ def record_tmux(name: str, command: list, cols: int, rows: int,
 
     # Size the PTY before tmux paints anything, so every recorded byte belongs
     # to the grid we are going to assert on.
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', rows, cols, 0, 0))
+    _set_size(fd, cols, rows)
 
     chunks: list = []
     try:
         _drain(fd, 2.0, chunks)            # session start + first prompt
         os.write(fd, ' '.join(shlex.quote(a) for a in command).encode() + b'\n')
         _drain(fd, settle, chunks)
+        if resize:
+            # A resize mid-stream is what the app does on every font-size
+            # change (F9/F12): the grid changes under a program that is
+            # already drawing. Recorded as a marker in the chunk list so the
+            # replay resizes at the same point in the byte stream.
+            new_cols, new_rows = resize
+            chunks.append({'resize': [new_cols, new_rows]})
+            _set_size(fd, new_cols, new_rows)
+            cols, rows = new_cols, new_rows
+            _drain(fd, 2.5, chunks)
 
         expected = _capture_pane_of(socket_name)
     finally:
@@ -190,26 +212,34 @@ def record_tmux(name: str, command: list, cols: int, rows: int,
         except OSError:
             pass
 
-    return {'chunks': chunks, 'expected': expected}
+    return {'chunks': chunks, 'expected': expected, 'cols': cols, 'rows': rows}
 
 
 def record(name: str, command: list, cols: int, rows: int, settle: float,
-           raw: bool) -> str:
-    recorded = (record_raw if raw else record_tmux)(name, command, cols, rows,
-                                                    settle)
+           raw: bool, resize=None) -> str:
+    if raw:
+        if resize:
+            raise SystemExit('--resize is only supported in tmux mode: a bare '
+                             'program gets no redraw we could compare against')
+        recorded = record_raw(name, command, cols, rows, settle)
+    else:
+        recorded = record_tmux(name, command, cols, rows, settle, resize)
     chunks, expected = recorded['chunks'], recorded['expected']
     fixture = {
         'name': name,
         'command': command,
         'source': 'raw-pty' if raw else 'tmux',
+        # The size the screen STARTS at; a resize marker in `chunks` moves it.
         'cols': cols,
         'rows': rows,
+        'final_size': [recorded.get('cols', cols), recorded.get('rows', rows)],
         'recorded': time.strftime('%Y-%m-%d'),
         'tmux': subprocess.run(['tmux', '-V'], capture_output=True,
                                text=True).stdout.strip(),
         # base64 so the fixture stays a readable, diffable JSON file even
         # though the payload is raw control codes.
-        'chunks': [base64.b64encode(c).decode() for c in chunks],
+        'chunks': [c if isinstance(c, dict) else base64.b64encode(c).decode()
+                   for c in chunks],
         'expected': [line.rstrip() for line in expected],
     }
     path = os.path.join(FIXTURE_DIR, name + '.json')
@@ -228,6 +258,9 @@ def main() -> int:
     parser.add_argument('--rows', type=int, default=24)
     parser.add_argument('--settle', type=float, default=2.5,
                         help='seconds to keep reading after the command is sent')
+    parser.add_argument('--resize', metavar='COLSxROWS',
+                        help='resize the terminal partway through (tmux mode '
+                             'only) — what a font-size change does')
     parser.add_argument('--raw', action='store_true',
                         help="record the program's own escape stream (no tmux "
                              'in the middle) — the non-tmux input path')
@@ -242,8 +275,15 @@ def main() -> int:
     if not command:
         parser.error('give a command after --')
 
+    resize = None
+    if args.resize:
+        try:
+            new_cols, new_rows = (int(v) for v in args.resize.lower().split('x'))
+        except ValueError:
+            parser.error('--resize wants COLSxROWS, e.g. 100x30')
+        resize = (new_cols, new_rows)
     path = record(args.name, command, args.cols, args.rows, args.settle,
-                  args.raw)
+                  args.raw, resize)
     print('wrote %s' % path)
     return 0
 

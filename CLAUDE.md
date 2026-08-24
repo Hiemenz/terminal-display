@@ -266,12 +266,23 @@ needs neither tmux nor a terminal.
 ```bash
 python tools/record_pty_stream.py scrolling -- ls -la /etc   # what tmux forwards
 python tools/record_pty_stream.py raw_htop --raw -- htop     # the program's own escapes
+python tools/record_pty_stream.py grow --resize 100x30 -- ls # grid changes mid-draw
 ```
 
 `--raw` records the non-tmux input path and still uses tmux as the oracle by
-`cat`ting the bytes into a pane. `test_harness_catches_a_dropped_escape` is
-the guard on the guard: fixtures that exercise SU/SD must *fail* under stock
-pyte, otherwise the suite has gone quietly blind.
+`cat`ting the bytes into a pane (with `stty -echo`, or a TUI that queries the
+terminal gets tmux's *reply* echoed into the grid instead of its own text).
+`--resize` moves the grid partway through the stream — what F9/F12 do to a
+program that is already drawing — and is stored as a marker in the chunk list
+so the replay resizes at the same point.
+
+Two guards keep the suite honest: `test_harness_catches_a_dropped_escape`
+requires that fixtures exercising SU/SD *fail* under stock pyte, and
+`test_corpus_still_exercises` requires the corpus to keep covering SU, ED,
+EL, CUP, DECSTBM, the alternate screen and SGR. A fixture can stop covering
+a sequence silently — a program changes how it draws, someone re-records on
+a different tmux — and without those the suite narrows without anyone
+noticing.
 
 ## Waveshare Driver
 
