@@ -17,6 +17,7 @@ from claude_usage import (  # noqa: E402
     summary_lines,
     weekly_baseline,
     weekly_percent,
+    weekly_totals,
 )
 
 HOUR = 3600
@@ -315,3 +316,57 @@ def test_percentage_row_reaches_the_tile():
     with_pct = render_screensaver('', '', NO_WEEK, claude_usage=usage)
     without = render_screensaver('', '', NO_WEEK, claude_usage=_usage_fixture())
     assert _changed_pixels(with_pct, without), 'the used% row was not drawn'
+
+
+# ── the 4-week history row ────────────────────────────────────────────────────
+
+def test_weekly_totals_are_newest_first(tmp_path):
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    day = 24 * HOUR
+
+    def at(days_ago, tokens):
+        when = now - days_ago * day
+        import datetime
+        stamp = datetime.datetime.fromtimestamp(
+            when, datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+        return {'timestamp': stamp, 'cwd': '/w',
+                'message': {'usage': {'input_tokens': tokens, 'output_tokens': 0}}}
+
+    _write_transcript(tmp_path, 'proj', [
+        at(3, 500),       # this week — excluded
+        at(9, 1000),      # 1 week ago
+        at(16, 2000),     # 2 weeks ago
+        at(23, 3000),     # 3 weeks ago
+        at(30, 4000),     # 4 weeks ago
+    ], mtime=now)
+
+    assert weekly_totals(str(tmp_path), now=now, weeks=4) == [1000, 2000, 3000, 4000]
+
+
+def test_baseline_can_reuse_totals_without_rescanning(tmp_path):
+    """The panel needs both numbers; scanning ~130 MB twice for them is waste."""
+    assert weekly_baseline(totals=[1000, 3000, 0, 0]) == 2000
+
+
+def test_history_row_reaches_the_tile():
+    from render import render_screensaver
+
+    usage = dict(_usage_fixture(), week_totals=[16_000_000, 20_700_000,
+                                                23_600_000, 12_900_000],
+                 week_avg=18_300_000)
+    with_history = render_screensaver('', '', NO_WEEK, claude_usage=usage)
+    without = render_screensaver('', '', NO_WEEK, claude_usage=_usage_fixture())
+    assert _changed_pixels(with_history, without), 'the 4-week row was not drawn'
+
+
+def test_this_week_is_shown_as_one_comparable_number():
+    """The 7 d row splits in/out while the history is combined totals — the
+    percentage line repeats this week as a single figure so the comparison
+    doesn't require mental arithmetic."""
+    from render import render_screensaver
+
+    usage = dict(_usage_fixture(), week_pct=173.0, week_pct_of='usual')
+    drawn = render_screensaver('', '', NO_WEEK, claude_usage=usage)
+    plain = render_screensaver('', '', NO_WEEK,
+                               claude_usage=dict(_usage_fixture()))
+    assert _changed_pixels(drawn, plain)

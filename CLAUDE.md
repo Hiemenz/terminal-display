@@ -248,7 +248,12 @@ server-side and written nowhere on disk — `/usage` fetches them live — so
 what's shown is what the local transcripts record going through, in tokens,
 which is not the unit the limits are counted in.
 
-The tile also carries a "used N%" line for the week. There is no local
+The tile also carries the last four completed weeks in tokens with their
+average (`weekly_totals` / `weekly_baseline`, one scan feeding both), and a
+"used N%" line for the week that repeats this week as a single combined
+figure — the 5 h / 7 d rows split input from output, while the weekly
+history is combined totals, and comparing them shouldn't require mental
+arithmetic. There is no local
 source for the real weekly limit, so the yardstick is either
 `claude_weekly_token_budget` if you set one, or — at 0 — your own average
 over the preceding 4 weeks, and the line says which ("of budget" vs "of a
