@@ -160,6 +160,12 @@ terminal_alert_ssh_logins: true
 terminal_claude_attention: true
 terminal_claude_attention_seconds: 30   # only after it worked at least this long
 terminal_claude_attention_interval: 5   # seconds between pane checks
+# Wake the panel when it fires. The alert lands in the status bar, and the
+# panel is almost certainly asleep by then — a long agent turn is
+# indistinguishable from idle to everything else here — so without this the
+# notice is written to a screen nobody can see. Counts as input, so the panel
+# then stays up for the usual display_sleep_minutes.
+terminal_claude_attention_wake: true
 
 # System-health alerts: throttling, failed services, a dying SD card, and a
 # dead network — the things this device has no other way to tell you about.
@@ -356,6 +362,10 @@ terminal_claude_usage_ttl: 300   # seconds between transcript scans
 # have the same average). The last bar is today and is drawn hollow because
 # the day is still in progress. 0 hides the bars.
 claude_trend_days: 14
+# How many live Claude sessions the tile lists (one line each, most recent
+# first). A project per tmux session is the normal shape here, so showing
+# only the newest hid the others with no clue which one you were looking at.
+claude_session_lines: 2
 
 # When the panel deep-sleeps it keeps showing whatever was last drawn (e-ink
 # retains the image with no power). Draw the screensaver first so what stays

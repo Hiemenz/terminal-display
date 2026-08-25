@@ -287,6 +287,33 @@ def _entry_turn(entry: dict) -> str:
     return ''
 
 
+def session_states(projects_dir: str = None, now: float = None,
+                   idle_after: float = IDLE_AFTER, limit: int = 2) -> list:
+    """(project, state, age) for each live Claude session, most recent first.
+
+    More than one session is the normal case on this device — a project per
+    tmux session — and reporting only the newest meant the other one was
+    invisible, with no way to tell which you were being shown.
+
+    Transcripts last written before the window can't hold a live session, so
+    they are never opened; only the handful that could are tailed.
+    """
+    projects_dir = projects_dir or DEFAULT_PROJECTS_DIR
+    now = time.time() if now is None else now
+    found = []
+    for path in glob.glob(os.path.join(projects_dir, '*', '*.jsonl')):
+        try:
+            if os.path.getmtime(path) < now - idle_after:
+                continue
+        except OSError:
+            continue
+        state = _state_of(path, now, idle_after)
+        if state[1]:
+            found.append(state)
+    found.sort(key=lambda s: s[2])          # smallest age = most recent
+    return found[:limit] if limit else found
+
+
 def session_state(projects_dir: str = None, now: float = None,
                   idle_after: float = IDLE_AFTER) -> tuple:
     """(project, state, age) for the most recently active Claude session.
@@ -305,9 +332,11 @@ def session_state(projects_dir: str = None, now: float = None,
     projects_dir = projects_dir or DEFAULT_PROJECTS_DIR
     now = time.time() if now is None else now
     path = _newest_transcript(projects_dir)
-    if not path:
-        return ('', '', 0.0)
+    return _state_of(path, now, idle_after) if path else ('', '', 0.0)
 
+
+def _state_of(path: str, now: float, idle_after: float) -> tuple:
+    """(project, state, age) for one transcript, or ('', '', 0.0)."""
     project, state, when = '', '', 0.0
     for entry in _tail_entries(path):
         # A subagent finishing its own turn says nothing about whether the

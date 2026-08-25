@@ -85,3 +85,13 @@ def test_a_closed_tab_is_forgotten():
     assert w.tracked() == {}
     # And a fresh tab reusing the key doesn't inherit the old clock.
     assert w.update('t1', WAITING, 'build', 120.0) is None
+
+
+def test_panes_are_tracked_separately():
+    """Two claude panes in one tmux session are two sessions — keyed by pane
+    id, so one going quiet doesn't speak for the other."""
+    w = AttentionWatcher(min_seconds=30)
+    w.update('%1', WORKING, 'alpha', 0.0)
+    w.update('%2', WORKING, 'beta', 0.0)
+    assert w.update('%1', WAITING, 'alpha', 120.0) is not None
+    assert w.update('%2', WORKING, 'beta', 120.0) is None

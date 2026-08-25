@@ -17,6 +17,7 @@ from claude_usage import (  # noqa: E402
     format_tokens,
     session_line,
     session_state,
+    session_states,
     summary_lines,
     weekly_baseline,
     weekly_percent,
@@ -528,3 +529,50 @@ def test_the_session_line_reaches_the_lock_screen():
     assert _changed_pixels(render_screensaver('', '', NO_WEEK, claude_usage=usage),
                            render_screensaver('', '', NO_WEEK,
                                               claude_usage=_usage_fixture()))
+
+
+def test_every_live_session_is_reported(tmp_path):
+    """A project per tmux session is the normal shape on this device, and
+    reporting only the newest hid the others with no clue which you saw."""
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    _write_transcript(tmp_path, 'a', [
+        _turn('2026-08-24T11:59:00Z', 'assistant', cwd='/home/pi/alpha'),
+    ], mtime=now)
+    _write_transcript(tmp_path, 'b', [
+        _turn('2026-08-24T11:50:00Z', 'assistant', tool=True, cwd='/home/pi/beta'),
+    ], mtime=now - 60)
+    states = session_states(str(tmp_path), now=now, limit=5)
+    assert [s[0] for s in states] == ['alpha', 'beta']     # most recent first
+    assert [s[1] for s in states] == ['waiting', 'working']
+
+
+def test_session_states_respects_the_limit(tmp_path):
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    for name in ('a', 'b', 'c'):
+        _write_transcript(tmp_path, name, [
+            _turn('2026-08-24T11:59:00Z', 'assistant', cwd='/home/pi/' + name),
+        ], mtime=now)
+    assert len(session_states(str(tmp_path), now=now, limit=2)) == 2
+
+
+def test_stale_sessions_are_left_out(tmp_path):
+    """Yesterday's finished session is not something you'd walk over for."""
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    _write_transcript(tmp_path, 'live', [
+        _turn('2026-08-24T11:59:00Z', 'assistant', cwd='/home/pi/live'),
+    ], mtime=now)
+    _write_transcript(tmp_path, 'old', [
+        _turn('2026-08-23T09:00:00Z', 'assistant', cwd='/home/pi/old'),
+    ], mtime=now - 30 * 3600)
+    assert [s[0] for s in session_states(str(tmp_path), now=now, limit=5)] == ['live']
+
+
+def test_two_sessions_reach_the_lock_screen():
+    from render import render_screensaver
+
+    one = dict(_usage_fixture())
+    one['sessions'] = [('alpha', 'waiting', 60.0)]
+    two = dict(_usage_fixture())
+    two['sessions'] = [('alpha', 'waiting', 60.0), ('beta', 'working', 90.0)]
+    assert _changed_pixels(render_screensaver('', '', NO_WEEK, claude_usage=two),
+                           render_screensaver('', '', NO_WEEK, claude_usage=one))

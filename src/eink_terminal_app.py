@@ -111,6 +111,20 @@ from text_actions_mixin import TextActionsMixin
 logger = logging.getLogger(__name__)
 
 
+def _session_label(session: str) -> str:
+    """A tmux session name, shortened for the status bar.
+
+    Sessions are often named `<host>-<project>`, and the host is the machine
+    you are standing in front of — pure noise in an alert on its own panel.
+    """
+    host = socket.gethostname().split('.')[0]
+    for prefix in (host + '-', host + '_'):
+        if session.startswith(prefix):
+            session = session[len(prefix):]
+            break
+    return session[:20] or session
+
+
 class EinkTerminal(
     ShellMixin,
     HotkeysMixin,
@@ -311,6 +325,7 @@ class EinkTerminal(
         self._attention_watcher = AttentionWatcher(
             float(config.get('terminal_claude_attention_seconds', 30) or 30))
         self._attention_poll_mono = 0.0
+        self._attention_wake_pending = False
         self._web_input_queue = None   # set in run() when preview server starts
 
         # Split-view stats
@@ -763,7 +778,7 @@ class EinkTerminal(
             from claude_usage import (
                 collect_usage,
                 daily_totals,
-                session_state,
+                session_states,
                 weekly_baseline,
                 weekly_percent,
                 weekly_totals,
@@ -774,8 +789,9 @@ class EinkTerminal(
             # the fortnight had — which is the thing a total cannot show.
             trend_days = int(self._config.get('claude_trend_days', 14) or 0)
             usage['daily'] = daily_totals(days=trend_days) if trend_days > 0 else []
-            # Whose turn it is right now, for a session anywhere on the box.
-            usage['session'] = session_state()
+            # Whose turn it is right now, for every session on the box.
+            usage['sessions'] = session_states(
+                limit=int(self._config.get('claude_session_lines', 2) or 2))
             # How heavy a week this is. The real weekly limit is server-side,
             # so the yardstick is either a budget the user set or, failing
             # that, what their own recent weeks looked like.
@@ -849,11 +865,16 @@ class EinkTerminal(
         return changed
 
     def _poll_claude_attention(self, now: float) -> bool:
-        """Say in the status bar when a Claude session in a tab stops for you.
+        """Say in the status bar when a Claude session stops for you.
 
-        Only panes already running `claude` are captured, so the usual case —
-        no Claude tab open — costs the same single `tmux list-panes` the
-        command watcher makes and no capture-pane at all.
+        Every pane on the tmux server running `claude` counts, not just this
+        app's own tabs: the sessions you actually care about are as likely to
+        be ones you started yourself (`tmux new -s work`) as ones opened with
+        Ctrl+T, and watching only our tabs meant the feature never fired on
+        the machine it was written for.
+
+        Only panes already running `claude` are captured, so the usual case
+        costs one `tmux list-panes` and no `capture-pane` at all.
         """
         if not self._config.get('terminal_claude_attention', True) or not self._use_tmux:
             return False
@@ -870,36 +891,40 @@ class EinkTerminal(
         except Exception:
             return False
 
-        panes: dict = {}
-        for line in r.stdout.splitlines():
-            session, _, rest = line.partition('\t')
-            pane_id, _, command = rest.partition('\t')
-            if command.strip() == 'claude':
-                panes.setdefault(session, pane_id)
+        # Our own tabs get their tab title; anything else is named by its
+        # tmux session, which is what the user called it.
+        titles = {tab.tmux_session: (tab.title or ('tab %d' % (idx + 1)))
+                  for idx, tab in enumerate(self._tabs) if tab.tmux_session}
 
         changed = False
         live_keys = set()
-        for idx, tab in enumerate(self._tabs):
-            key = tab.tmux_session or ('tab%d' % idx)
-            if key not in panes and idx == 0 and self._tmux_session in panes:
-                key = self._tmux_session   # startup tab of an older session
-            if key not in panes:
+        for line in r.stdout.splitlines():
+            session, _, rest = line.partition('\t')
+            pane_id, _, command = rest.partition('\t')
+            if command.strip() != 'claude':
                 continue
-            live_keys.add(key)
+            # Pane ids are unique for the life of the tmux server, so two
+            # claude panes in one session stay separate.
+            live_keys.add(pane_id)
             try:
-                cap = subprocess.run(['tmux', 'capture-pane', '-p', '-t', panes[key]],
+                cap = subprocess.run(['tmux', 'capture-pane', '-p', '-t', pane_id],
                                      capture_output=True, text=True, timeout=2)
             except Exception:
                 continue
-            label = tab.title or ('tab %d' % (idx + 1))
+            label = titles.get(session) or _session_label(session)
             message = self._attention_watcher.update(
-                key, pane_state(cap.stdout), label, now)
+                pane_id, pane_state(cap.stdout), label, now)
             if message:
                 self._alert_monitor.note(message)
                 logger.info('Claude attention: %s', message)
+                # The panel is almost certainly asleep — a long agent turn is
+                # indistinguishable from idle to everything else here — so a
+                # status-bar line nobody can see is no use on its own.
+                if self._config.get('terminal_claude_attention_wake', True):
+                    self._attention_wake_pending = True
                 changed = True
         for key in set(self._attention_watcher.tracked()) - live_keys:
-            self._attention_watcher.forget(key)   # tab closed, or claude exited
+            self._attention_watcher.forget(key)   # pane closed, or claude exited
         return changed
 
     def _consume_screen_flags(self, screen, active: bool) -> None:
@@ -1765,6 +1790,25 @@ class EinkTerminal(
                     self._status_force = True
                     has_pending = True  # alert changed — re-render status bar
                 last_alert_tick = now
+
+            # ── Claude wants you: wake the panel so the alert is readable ─────
+            # Counts as input on purpose. Without it the very next pass sees
+            # the same idle time and puts the panel straight back to sleep,
+            # and the session that just asked for you would be a candidate
+            # for idle-reset.
+            if self._attention_wake_pending:
+                self._attention_wake_pending = False
+                self._last_activity = now
+                self._last_input = now
+                self._did_idle_reset = False
+                if in_screensaver or panel_asleep:
+                    in_screensaver = False
+                    panel_asleep = False
+                    self._render(force_full=True)
+                    self._last_full_refresh_mono = time.monotonic()
+                else:
+                    self._status_force = True
+                    has_pending = True
 
             _idle = now - self._last_activity
 

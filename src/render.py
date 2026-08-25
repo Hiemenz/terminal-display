@@ -544,14 +544,19 @@ def _draw_claude_usage(d, font_path: str, usage: dict,
     trend = ('%dd peak %s (local est.)'
              % (len(daily), format_tokens(max(daily)))) if daily else ''
 
-    live = session_line(usage.get('session') or ('', '', 0.0))
+    # One line per live session: a project per tmux session is the normal
+    # shape here, and showing only the newest hid the other one entirely.
+    sessions = usage.get('sessions')
+    if sessions is None:
+        sessions = [usage.get('session') or ('', '', 0.0)]
+    live = [line for line in (session_line(s) for s in sessions) if line]
 
     f_row = _find_font(font_path, _TILE_FONT)
-    measured = rows + [r for r in (live, trend) if r]
+    measured = rows + live + ([trend] if trend else [])
     box_w = max(int(d.textlength(r, font=f_row)) for r in measured) + 14
     box_h = 10 + len(rows) * _TILE_LINE_H
     if live:
-        box_h += _TILE_LINE_H + 2
+        box_h += len(live) * _TILE_LINE_H + 2
     if daily:
         box_h += _DAILY_BAR_H + 6 + _TILE_LINE_H
     if week_pct is not None:
@@ -563,10 +568,12 @@ def _draw_claude_usage(d, font_path: str, usage: dict,
     pad = 7
     y = box_y + 5
     if live:
-        # Whose turn it is, on top: every other row is history, this one is
-        # the only thing on the tile you might act on.
-        d.text((box_x + pad, y), live, font=f_row, fill=_BLACK)
-        y += _TILE_LINE_H + 2
+        # Whose turn it is, on top: every other row is history, these are the
+        # only ones on the tile you might act on.
+        for line in live:
+            d.text((box_x + pad, y), line, font=f_row, fill=_BLACK)
+            y += _TILE_LINE_H
+        y += 2
     for row in rows:
         d.text((box_x + pad, y), row, font=f_row, fill=_BLACK)
         y += _TILE_LINE_H

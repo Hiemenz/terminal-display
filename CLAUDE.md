@@ -140,8 +140,17 @@ the path for a long stack trace, where reading a QR code is miserable. The
 app publishes the text each loop via `set_screen_text`.
 
 **"claude is waiting" / "claude needs you"** (`terminal_claude_attention`,
-tmux mode only): when a tab running `claude` stops for an approval or an
-answer, the status bar says so. This is the thing the panel is glanced at
+tmux mode only): when *any* pane on the tmux server running `claude` stops
+for an approval or an answer, the status bar says so, and — unless
+`terminal_claude_attention_wake` is off — the panel wakes so the notice is
+readable. Every pane counts, not just this app's own tabs: the sessions that
+matter are as likely to be ones you started yourself (`tmux new -s work`) as
+ones opened with Ctrl+T, and watching only our tabs meant the feature never
+fired on the machine it was written for. Panes are keyed by `pane_id` and
+labelled by tab title, or by tmux session name with the host prefix stripped
+(`hiemenzZero-MlbDisplay` → `MlbDisplay`). The wake counts as input, so the
+panel then stays up for the usual `display_sleep_minutes` and the session
+that just asked for you is no longer a candidate for idle-reset. This is the thing the panel is glanced at
 for, and a long agent turn looks exactly like idle to everything else here —
 no keyboard input, so the panel deep-sleeps right when the session starts
 wanting you.
@@ -256,7 +265,8 @@ web-UI QR code sits inside the Network card.
 - `screensaver_show_qr: false` — the lock screen's wake QR code
 - `screensaver_show_claude_usage: true` / `terminal_claude_usage_ttl: 300` — lock-screen Claude Code activity panel (local estimate, not quota) and how often the transcripts are rescanned
 - `claude_trend_days: 14` — daily token bars on the lock-screen tile (0 hides them)
-- `terminal_claude_attention: true` / `terminal_claude_attention_seconds: 30` / `terminal_claude_attention_interval: 5` — status-bar note when a `claude` tab stops for an approval or an answer (tmux mode only)
+- `terminal_claude_attention: true` / `terminal_claude_attention_seconds: 30` / `terminal_claude_attention_interval: 5` / `terminal_claude_attention_wake: true` — status-bar note (and a panel wake) when any `claude` pane stops for an approval or an answer (tmux mode only)
+- `claude_session_lines: 2` — how many live Claude sessions the lock-screen tile lists
 - `terminal_long_command_seconds: 30` — announce a command finishing when it ran at least this long (0 = off, tmux mode only)
 - `terminal_notes_file: data/notes.txt` — plain text file opened by the Notes mode/palette entry (in `nano`) and served as raw text at `/notes`
 
@@ -288,9 +298,10 @@ server-side and written nowhere on disk — `/usage` fetches them live — so
 what's shown is what the local transcripts record going through, in tokens,
 which is not the unit the limits are counted in.
 
-The tile's top line is whose turn it is right now — `claude waiting 4m20s
-(terminal-display)` — from `session_state()` in `src/claude_usage.py`, which
-reads the tail of the most recently written transcript and asks what the
+The tile's top lines are whose turn it is right now — `claude waiting 4m20s
+(terminal-display)`, one line per live session up to `claude_session_lines`
+— from `session_states()` in `src/claude_usage.py`, which tails every
+transcript written inside the idle window (the rest are never opened) and asks what the
 last entry left it as: an assistant turn with no tool call means the session
 is yours to move, anything else means it still has the ball. Sidechain
 (subagent) entries are skipped, since a subagent finishing says nothing

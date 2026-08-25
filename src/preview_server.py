@@ -183,6 +183,8 @@ _CONFIG_SCHEMA = [
         ['claude_trend_days',            'int',    'Activity Trend (days)', 'Daily token bars on the lock screen (0 = hide)'],
         ['terminal_claude_attention',    'bool',   'Claude Needs You Alerts', 'Status-bar note when a claude tab stops for an approval or an answer'],
         ['terminal_claude_attention_seconds', 'int', 'Attention Min Seconds', 'Only announce after claude has been working at least this long'],
+        ['terminal_claude_attention_wake', 'bool', 'Wake Panel For Claude', 'Wake the display when a claude session stops for you'],
+        ['claude_session_lines',          'int',    'Session Lines',        'How many live claude sessions the lock-screen tile lists'],
         ['screensaver_cycle_interval',  'int',    'Cycle Interval (min)', 'Cycle mode only'],
     ]],
     ['Startup & Web', [
