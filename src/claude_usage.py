@@ -162,22 +162,40 @@ def weekly_percent(usage: dict, budget: int = 0, baseline: int = 0) -> tuple:
     return (None, '')
 
 
-def weekly_baseline(projects_dir: str = None, now: float = None,
-                    weeks: int = BASELINE_WEEKS) -> int:
-    """Average tokens per week over the preceding `weeks` weeks, excluding the
-    current one — the yardstick for "is this a heavy week for me?".
+def weekly_totals(projects_dir: str = None, now: float = None,
+                  weeks: int = BASELINE_WEEKS) -> list:
+    """Tokens per week for the `weeks` completed weeks before this one.
+
+    Index 0 is the most recently finished week. The week in progress is left
+    out: it is only part of a week, so including it would drag any average
+    down and flatter the current figure by comparison.
     """
     projects_dir = projects_dir or DEFAULT_PROJECTS_DIR
     now = time.time() if now is None else now
     totals = [0] * weeks
-    for when, usage, _project in _iter_messages(projects_dir, now - (weeks + 1) * ONE_WEEK):
+    for when, usage, _project in _iter_messages(projects_dir,
+                                                now - (weeks + 1) * ONE_WEEK):
         age = now - when
         if age < ONE_WEEK:
-            continue            # the week in progress isn't a full week yet
+            continue
         index = int(age // ONE_WEEK) - 1
         if 0 <= index < weeks:
             totals[index] += (int(usage.get('input_tokens') or 0)
                               + int(usage.get('cache_creation_input_tokens') or 0)
                               + int(usage.get('output_tokens') or 0))
+    return totals
+
+
+def weekly_baseline(projects_dir: str = None, now: float = None,
+                    weeks: int = BASELINE_WEEKS, totals: list = None) -> int:
+    """Average tokens per week over the preceding weeks — the yardstick for
+    "is this a heavy week for me?".
+
+    Weeks with no activity are left out: an idle week is not evidence of a
+    light workload, and averaging zeros in would make any active week look
+    enormous.
+    """
+    if totals is None:
+        totals = weekly_totals(projects_dir, now, weeks)
     counted = [t for t in totals if t > 0]
     return int(sum(counted) / len(counted)) if counted else 0

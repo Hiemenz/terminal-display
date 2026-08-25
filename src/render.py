@@ -476,11 +476,23 @@ def _draw_claude_usage(d, font_path: str, usage: dict,
                        format_tokens(bucket.get('sent', 0)),
                        format_tokens(bucket.get('generated', 0))))
     busiest = (usage.get('5h') or {}).get('top_project', '')
+    # Per-week history, newest first, so a heavy week is visible as a trend
+    # rather than as a single percentage with nothing to compare it to.
+    totals = usage.get('week_totals') or []
+    if totals:
+        rows.append('4 wk %s  avg %s'
+                    % ('  '.join(format_tokens(t) for t in totals),
+                       format_tokens(usage.get('week_avg', 0))))
     used_pct, used_of = usage.get('week_pct'), usage.get('week_pct_of', '')
-    used_row = ('used %.0f%% of %s' % (used_pct, 'a usual week' if used_of == 'usual'
-                                       else 'budget')) if used_pct is not None else ''
-    if used_row:
-        rows.append(used_row)
+    if used_pct is not None:
+        # The 7 d row splits in/out; the weekly history is combined totals.
+        # Repeat this week as one number so it can be read against them
+        # without adding two figures in your head.
+        week = usage.get('7d') or {}
+        this_week = week.get('sent', 0) + week.get('generated', 0)
+        rows.append('this wk %s = %.0f%% of %s'
+                    % (format_tokens(this_week), used_pct,
+                       'a usual week' if used_of == 'usual' else 'budget'))
 
     f_title = _find_font(font_path, 13)
     f_row = _find_font(font_path, 13)

@@ -756,14 +756,16 @@ class EinkTerminal(
         if cached and (now - getattr(self, '_claude_usage_mono', 0.0)) < ttl:
             return cached
         try:
-            from claude_usage import collect_usage, weekly_baseline, weekly_percent
+            from claude_usage import collect_usage, weekly_baseline, weekly_percent, weekly_totals
             started = time.monotonic()
             usage = collect_usage()
             # How heavy a week this is. The real weekly limit is server-side,
             # so the yardstick is either a budget the user set or, failing
             # that, what their own recent weeks looked like.
             budget = int(self._config.get('claude_weekly_token_budget', 0) or 0)
-            baseline = 0 if budget > 0 else weekly_baseline()
+            totals = weekly_totals()
+            baseline = weekly_baseline(totals=totals)
+            usage['week_totals'], usage['week_avg'] = totals, baseline
             pct, of_what = weekly_percent(usage, budget, baseline)
             usage['week_pct'], usage['week_pct_of'] = pct, of_what
             logger.info('Claude activity scan: %d msgs in 5 h, week %s (%.1fs)',
