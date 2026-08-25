@@ -47,9 +47,11 @@ def test_alt_digits_map_esc_plus_digit_to_int():
 
 
 def test_help_items_cover_copy_mode_and_tab_jump():
-    labels = [label for label, _keys in _HELP_ITEMS]
-    assert 'Copy Mode' in labels
-    assert 'Jump to Tab N' in labels
+    # Matched on the key, not the label: the label is wording that gets
+    # tuned for discoverability, the binding is the contract.
+    keys = {keys: label for label, keys in _HELP_ITEMS}
+    assert 'copy' in keys['Ctrl+Space'].lower()
+    assert 'Jump to Tab N' in keys.values()
 
 
 # ── _handle_hotkeys: Ctrl+Space opens copy mode ───────────────────────────────

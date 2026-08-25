@@ -24,6 +24,7 @@ from terminal_state import (
     _RESTART_TERMINAL,
     _SETTINGS_OPEN,
     _SNIPPETS_OPEN,
+    _get_local_ip,
 )
 
 logger = logging.getLogger(__name__)
@@ -285,6 +286,7 @@ class PaletteHelpMixin:
                 _HELP_SECTIONS, _HELP_FOOTER,
                 dark_mode=self._dark_mode,
                 font_path=getattr(self, '_font_path', ''),
+                qr_url=self._settings_url(),
             )
         except Exception as e:
             logger.warning('Help sheet render error: %s', e)
@@ -298,6 +300,20 @@ class PaletteHelpMixin:
         self._driver.full_refresh(pages[0], reason='help-sheet')
         self._last_image = pages[0]
         logger.info('Command sheet shown (%d page(s))', len(pages))
+
+    def _settings_url(self) -> str:
+        """LAN URL of the web settings page, or '' when it can't be reached.
+
+        The sheet lists what you press on the device; everything you'd rather
+        type lives in that page, and a QR is the only way to hand a phone a
+        URL off an e-ink panel.
+        """
+        if not self._config.get('preview_server_enabled', True):
+            return ''
+        ip = _get_local_ip()
+        if not ip:
+            return ''
+        return 'http://%s:%d/config' % (ip, self._config.get('preview_server_port', 8080))
 
     def _close_help_sheet(self):
         self._help_sheet_active = False

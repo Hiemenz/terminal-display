@@ -13,7 +13,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 from claude_usage import (  # noqa: E402
     _parse_timestamp,
     collect_usage,
+    daily_totals,
     format_tokens,
+    session_line,
+    session_state,
     summary_lines,
     weekly_baseline,
     weekly_percent,
@@ -21,6 +24,11 @@ from claude_usage import (  # noqa: E402
 )
 
 HOUR = 3600
+
+
+def _iso(epoch: float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
 def _write_transcript(tmp_path, project, entries, mtime=None):
@@ -370,3 +378,153 @@ def test_this_week_is_shown_as_one_comparable_number():
     plain = render_screensaver('', '', NO_WEEK,
                                claude_usage=dict(_usage_fixture()))
     assert _changed_pixels(drawn, plain)
+
+
+# ─── Daily trend + whose turn it is ──────────────────────────────────────────
+
+def _turn(when_iso, kind, tool=False, cwd='/home/pi/work', sidechain=False):
+    """A transcript entry that carries a turn but no usage block."""
+    content = [{'type': 'tool_use', 'name': 'Bash'}] if tool else [{'type': 'text'}]
+    return {'type': kind, 'timestamp': when_iso, 'cwd': cwd,
+            'isSidechain': sidechain, 'message': {'content': content}}
+
+
+def test_daily_totals_are_oldest_first_with_today_last(tmp_path):
+    """Opposite order to weekly_totals, because these are drawn as bars."""
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    day = 24 * HOUR
+    _write_transcript(tmp_path, 'proj', [
+        _message(_iso(now), sent=100, generated=1),            # today
+        _message(_iso(now - day), sent=200, generated=2),      # yesterday
+        _message(_iso(now - 2 * day), sent=300, generated=3),
+    ], mtime=now)
+    totals = daily_totals(str(tmp_path), now=now, days=4)
+    assert len(totals) == 4
+    assert totals[-1] == 101          # today, last
+    assert totals[-2] == 202
+    assert totals[-3] == 303
+    assert totals[0] == 0             # nothing that far back
+
+
+def test_daily_totals_combine_input_and_output(tmp_path):
+    """The weekly history is combined totals, so the bars have to match it —
+    a chart in different units than the number above it is worse than none."""
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    _write_transcript(tmp_path, 'proj',
+                      [_message(_iso(now), sent=1000, generated=250)], mtime=now)
+    assert daily_totals(str(tmp_path), now=now, days=2)[-1] == 1250
+
+
+def test_daily_totals_ignore_cache_reads(tmp_path):
+    """Cache reads dwarf everything else; a bar chart including them would be
+    a chart of cache reads."""
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    _write_transcript(tmp_path, 'proj',
+                      [_message(_iso(now), sent=10, cached=9_000_000)], mtime=now)
+    assert daily_totals(str(tmp_path), now=now, days=2)[-1] == 10
+
+
+def test_a_finished_assistant_turn_is_your_move(tmp_path):
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    _write_transcript(tmp_path, 'proj', [
+        _turn('2026-08-24T11:58:00Z', 'user'),
+        _turn('2026-08-24T11:59:00Z', 'assistant'),
+    ], mtime=now)
+    project, state, age = session_state(str(tmp_path), now=now)
+    assert state == 'waiting'
+    assert project == 'work'
+    assert 55 < age < 65
+
+
+def test_a_tool_call_means_it_still_has_the_ball(tmp_path):
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    _write_transcript(tmp_path, 'proj', [
+        _turn('2026-08-24T11:59:00Z', 'assistant', tool=True),
+    ], mtime=now)
+    assert session_state(str(tmp_path), now=now)[1] == 'working'
+
+
+def test_a_subagent_finishing_is_not_your_turn(tmp_path):
+    """A sidechain assistant turn ends a subagent, not the session you're
+    looking at — reporting it as 'waiting' would be a lie you'd walk over to."""
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    _write_transcript(tmp_path, 'proj', [
+        _turn('2026-08-24T11:58:00Z', 'assistant', tool=True),
+        _turn('2026-08-24T11:59:00Z', 'assistant', sidechain=True),
+    ], mtime=now)
+    assert session_state(str(tmp_path), now=now)[1] == 'working'
+
+
+def test_a_stale_session_reports_nothing(tmp_path):
+    """Yesterday's finished session is not 'waiting' on you."""
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    _write_transcript(tmp_path, 'proj', [
+        _turn('2026-08-23T09:00:00Z', 'assistant'),
+    ], mtime=now)
+    assert session_state(str(tmp_path), now=now) == ('', '', 0.0)
+
+
+def test_no_transcripts_at_all_is_survivable(tmp_path):
+    assert session_state(str(tmp_path), now=1_000_000.0) == ('', '', 0.0)
+
+
+def test_the_newest_transcript_wins(tmp_path):
+    """Several projects can have sessions; the panel reports the live one."""
+    now = _parse_timestamp('2026-08-24T12:00:00Z')
+    _write_transcript(tmp_path, 'old', [
+        _turn('2026-08-24T11:00:00Z', 'assistant', cwd='/home/pi/old'),
+    ], mtime=now - 3600)
+    _write_transcript(tmp_path, 'live', [
+        _turn('2026-08-24T11:59:00Z', 'assistant', cwd='/home/pi/live'),
+    ], mtime=now)
+    assert session_state(str(tmp_path), now=now)[0] == 'live'
+
+
+def test_session_line_is_empty_when_there_is_no_session():
+    assert session_line(('', '', 0.0)) == ''
+
+
+def test_session_line_names_the_state_and_the_project():
+    line = session_line(('terminal-display', 'waiting', 260.0))
+    assert 'waiting' in line and 'terminal-display' in line and '4m' in line
+
+
+def test_daily_bars_reach_the_lock_screen():
+    """Four weekly totals say how much; the bars say what shape it had."""
+    from render import render_screensaver
+
+    usage = dict(_usage_fixture())
+    usage['daily'] = [10, 500, 0, 900, 120, 0, 40]
+    assert _changed_pixels(render_screensaver('', '', NO_WEEK, claude_usage=usage),
+                           render_screensaver('', '', NO_WEEK,
+                                              claude_usage=_usage_fixture()))
+
+
+def test_an_empty_trend_draws_no_bars():
+    """A device with no history must not draw an empty chart frame."""
+    from render import render_screensaver
+
+    usage = dict(_usage_fixture())
+    usage['daily'] = []
+    assert not _changed_pixels(render_screensaver('', '', NO_WEEK, claude_usage=usage),
+                               render_screensaver('', '', NO_WEEK,
+                                                  claude_usage=_usage_fixture()))
+
+
+def test_an_idle_day_does_not_crash_the_scale():
+    """All-zero days would make the bar scale divide by zero."""
+    from render import render_screensaver
+
+    usage = dict(_usage_fixture())
+    usage['daily'] = [0] * 14
+    render_screensaver('', '', NO_WEEK, claude_usage=usage)
+
+
+def test_the_session_line_reaches_the_lock_screen():
+    from render import render_screensaver
+
+    usage = dict(_usage_fixture())
+    usage['session'] = ('terminal-display', 'waiting', 260.0)
+    assert _changed_pixels(render_screensaver('', '', NO_WEEK, claude_usage=usage),
+                           render_screensaver('', '', NO_WEEK,
+                                              claude_usage=_usage_fixture()))

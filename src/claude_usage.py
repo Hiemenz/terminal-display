@@ -20,8 +20,16 @@ import time
 from datetime import datetime, timezone
 
 FIVE_HOURS = 5 * 3600
+ONE_DAY = 24 * 3600
 ONE_WEEK = 7 * 24 * 3600
 BASELINE_WEEKS = 4
+TREND_DAYS = 14
+
+# How long after the last transcript entry a session stops counting as live.
+IDLE_AFTER = 30 * 60
+# How much of a transcript's tail to read to decide whose turn it is. Entries
+# are a few KB at most, so this covers the last handful either way.
+TAIL_BYTES = 64 * 1024
 
 DEFAULT_PROJECTS_DIR = os.path.expanduser('~/.claude/projects')
 
@@ -199,3 +207,135 @@ def weekly_baseline(projects_dir: str = None, now: float = None,
         totals = weekly_totals(projects_dir, now, weeks)
     counted = [t for t in totals if t > 0]
     return int(sum(counted) / len(counted)) if counted else 0
+
+
+def daily_totals(projects_dir: str = None, now: float = None,
+                 days: int = TREND_DAYS) -> list:
+    """Tokens per local calendar day, oldest first — the shape of the week.
+
+    Oldest first because this is drawn as a bar chart and that is the order
+    the bars go in, which is the opposite of `weekly_totals`. The last entry
+    is today, and it is a day in progress: a short final bar means the day
+    is young, not that the work stopped.
+
+    Read straight from the transcripts rather than sampled into
+    `stats_history`, so it is correct for days the device spent asleep.
+    """
+    projects_dir = projects_dir or DEFAULT_PROJECTS_DIR
+    now = time.time() if now is None else now
+    totals = [0] * days
+    # Local midnight today: the boundary a person means by "yesterday".
+    midnight = datetime.fromtimestamp(now).replace(
+        hour=0, minute=0, second=0, microsecond=0).timestamp()
+    for when, usage, _project in _iter_messages(projects_dir,
+                                                midnight - (days - 1) * ONE_DAY):
+        index = days - 1 + int((when - midnight) // ONE_DAY)
+        if 0 <= index < days:
+            totals[index] += (int(usage.get('input_tokens') or 0)
+                              + int(usage.get('cache_creation_input_tokens') or 0)
+                              + int(usage.get('output_tokens') or 0))
+    return totals
+
+
+def _newest_transcript(projects_dir: str) -> str:
+    """The most recently written transcript across every project, or ''."""
+    newest, newest_mtime = '', 0.0
+    for path in glob.glob(os.path.join(projects_dir, '*', '*.jsonl')):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime > newest_mtime:
+            newest, newest_mtime = path, mtime
+    return newest
+
+
+def _tail_entries(path: str, limit: int = TAIL_BYTES) -> list:
+    """The last complete JSON entries of a transcript, in file order."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, 'rb') as fh:
+            fh.seek(max(0, size - limit))
+            chunk = fh.read()
+    except OSError:
+        return []
+    lines = chunk.split(b'\n')
+    if size > limit and lines:
+        lines = lines[1:]      # the first line was cut in half by the seek
+    entries = []
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            entries.append(json.loads(line))
+        except ValueError:
+            continue
+    return entries
+
+
+def _entry_turn(entry: dict) -> str:
+    """Whose turn the transcript entry leaves it as: 'waiting' or 'working'."""
+    kind = entry.get('type')
+    if kind == 'assistant':
+        content = (entry.get('message') or {}).get('content')
+        blocks = content if isinstance(content, list) else []
+        if any(isinstance(b, dict) and b.get('type') == 'tool_use' for b in blocks):
+            return 'working'   # it asked for a tool, so it is mid-turn
+        return 'waiting'       # it finished its turn: your move
+    if kind == 'user':
+        return 'working'       # a prompt or a tool result — Claude has the ball
+    return ''
+
+
+def session_state(projects_dir: str = None, now: float = None,
+                  idle_after: float = IDLE_AFTER) -> tuple:
+    """(project, state, age) for the most recently active Claude session.
+
+    state is 'waiting' when the last thing to happen was Claude finishing a
+    turn — nothing will move until a human does something — or 'working' when
+    it has the ball. ('', '', 0.0) when nothing has happened recently enough
+    to be worth reporting.
+
+    The caveat that matters: an entry is appended when a turn *completes*, so
+    a session that has been thinking for two minutes still reads as whatever
+    it was doing two minutes ago. For a session running in a local tmux tab
+    the pane's own text is the faster signal — see src/claude_attention.py.
+    This is the path for sessions running anywhere else on the machine.
+    """
+    projects_dir = projects_dir or DEFAULT_PROJECTS_DIR
+    now = time.time() if now is None else now
+    path = _newest_transcript(projects_dir)
+    if not path:
+        return ('', '', 0.0)
+
+    project, state, when = '', '', 0.0
+    for entry in _tail_entries(path):
+        # A subagent finishing its own turn says nothing about whether the
+        # session you are looking at wants you.
+        if entry.get('isSidechain'):
+            continue
+        turn = _entry_turn(entry)
+        if not turn:
+            continue
+        stamp = _parse_timestamp(entry.get('timestamp', ''))
+        if stamp >= when:
+            state, when = turn, stamp
+            cwd = entry.get('cwd') or ''
+            project = (os.path.basename(cwd.rstrip('/'))
+                       or os.path.basename(os.path.dirname(path)))
+
+    age = now - when
+    if not state or when <= 0 or age > idle_after:
+        return ('', '', 0.0)
+    return (project, state, age)
+
+
+def session_line(state: tuple) -> str:
+    """The session state as one lock-screen line, or '' when there isn't one."""
+    from command_watch import format_duration
+
+    project, kind, age = state
+    if not kind:
+        return ''
+    line = 'claude %s %s' % (kind, format_duration(age))
+    return '%s  (%s)' % (line, project[:18]) if project else line

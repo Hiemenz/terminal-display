@@ -449,6 +449,51 @@ def _weekly_percent(config: dict) -> float | None:
         return None
 
 
+# The tile sits on top of the screensaver photo, so it is sized to stay a
+# corner note rather than the subject: small type, tight leading, short bars.
+_TILE_FONT = 11
+_TILE_LINE_H = 14
+_DAILY_BAR_H = 16
+# How much of each day's slot the bar fills. Below ~0.4 the thinnest bars
+# start dropping out on the panel's 1-bit dither; at 1.0 they touch and the
+# chart reads as one solid mass instead of a day count.
+_DAILY_BAR_FILL = 0.5
+
+
+def _daily_bars(d, x: int, y: int, width: int, totals: list) -> None:
+    """Tokens per day as a bar chart, oldest to newest.
+
+    Four weekly totals say how much; this says what shape it had — a steady
+    fortnight and one enormous Tuesday have the same average. Scaled to the
+    tallest day in the window, because the question is which days were heavy
+    relative to each other, not against any absolute number.
+
+    The last bar is today, still in progress, so it is drawn hollow: a short
+    solid bar would read as a quiet day rather than an early hour.
+    """
+    if not totals:
+        return
+    peak = max(totals) or 1
+    # Each day gets an equal slot and the bar sits centred in it, so the
+    # chart still spans the full width however skinny the bars are.
+    slot = width / len(totals)
+    bar_w = max(2, int(slot * _DAILY_BAR_FILL))
+    baseline = y + _DAILY_BAR_H
+    d.line([(x, baseline), (x + width, baseline)], fill=_BLACK)
+    for i, total in enumerate(totals):
+        bx = int(round(x + i * slot + (slot - bar_w) / 2))
+        height = int(round(_DAILY_BAR_H * total / peak))
+        if total > 0:
+            height = max(1, height)
+        if height <= 0:
+            continue
+        box = [bx, baseline - height, bx + bar_w - 1, baseline - 1]
+        if i == len(totals) - 1:
+            d.rectangle(box, fill=_WHITE, outline=_BLACK, width=1)
+        else:
+            d.rectangle(box, fill=_BLACK)
+
+
 def _draw_claude_usage(d, font_path: str, usage: dict,
                        reserved_bottom: int = 0,
                        week_pct: float = None) -> None:
@@ -466,23 +511,23 @@ def _draw_claude_usage(d, font_path: str, usage: dict,
     limits are enforced server-side and written nowhere on disk, so this is
     what the local transcripts show going through, not a quota reading.
     """
-    from claude_usage import format_tokens
+    from claude_usage import format_tokens, session_line
 
     rows = []
-    for label, key in (('5 h', '5h'), ('7 d', '7d')):
+    for label, key in (('5h', '5h'), ('7d', '7d')):
         bucket = usage.get(key) or {}
-        rows.append('%-4s %4d msg  %6s in  %6s out'
+        rows.append('%-3s %4d msg %6s in %6s out'
                     % (label, bucket.get('messages', 0),
                        format_tokens(bucket.get('sent', 0)),
                        format_tokens(bucket.get('generated', 0))))
-    busiest = (usage.get('5h') or {}).get('top_project', '')
     # Per-week history, newest first, so a heavy week is visible as a trend
     # rather than as a single percentage with nothing to compare it to.
     totals = usage.get('week_totals') or []
     if totals:
-        rows.append('4 wk %s  avg %s'
-                    % ('  '.join(format_tokens(t) for t in totals),
+        rows.append('4wk %s av %s'
+                    % (' '.join(format_tokens(t) for t in totals),
                        format_tokens(usage.get('week_avg', 0))))
+    daily = [t for t in (usage.get('daily') or [])]
     used_pct, used_of = usage.get('week_pct'), usage.get('week_pct_of', '')
     if used_pct is not None:
         # The 7 d row splits in/out; the weekly history is combined totals.
@@ -490,38 +535,54 @@ def _draw_claude_usage(d, font_path: str, usage: dict,
         # without adding two figures in your head.
         week = usage.get('7d') or {}
         this_week = week.get('sent', 0) + week.get('generated', 0)
-        rows.append('this wk %s = %.0f%% of %s'
+        rows.append('wk %s = %.0f%% of %s'
                     % (format_tokens(this_week), used_pct,
-                       'a usual week' if used_of == 'usual' else 'budget'))
+                       'usual' if used_of == 'usual' else 'budget'))
 
-    f_title = _find_font(font_path, 13)
-    f_row = _find_font(font_path, 13)
-    widths = [int(d.textlength(r, font=f_row)) for r in rows]
-    box_w = max(widths + [int(d.textlength('CLAUDE ACTIVITY (local est.)', font=f_title))]) + 20
-    box_h = 26 + len(rows) * 16 + (16 if busiest else 4)
+    # The bars' own row, drawn under them: what the tallest bar is worth, so
+    # the chart carries a scale instead of being pure shape.
+    trend = ('%dd peak %s (local est.)'
+             % (len(daily), format_tokens(max(daily)))) if daily else ''
+
+    live = session_line(usage.get('session') or ('', '', 0.0))
+
+    f_row = _find_font(font_path, _TILE_FONT)
+    measured = rows + [r for r in (live, trend) if r]
+    box_w = max(int(d.textlength(r, font=f_row)) for r in measured) + 14
+    box_h = 10 + len(rows) * _TILE_LINE_H
+    if live:
+        box_h += _TILE_LINE_H + 2
+    if daily:
+        box_h += _DAILY_BAR_H + 6 + _TILE_LINE_H
     if week_pct is not None:
-        box_h += 30
+        box_h += 24
     box_x = W - PAD - box_w
     box_y = H - PAD - box_h - reserved_bottom
     d.rounded_rectangle([box_x, box_y, box_x + box_w, box_y + box_h],
                         radius=8, fill=_WHITE, outline=_BLACK, width=1)
-    d.text((box_x + 10, box_y + 6), 'CLAUDE ACTIVITY (local est.)',
-           font=f_title, fill=_BLACK)
-    y = box_y + 24
+    pad = 7
+    y = box_y + 5
+    if live:
+        # Whose turn it is, on top: every other row is history, this one is
+        # the only thing on the tile you might act on.
+        d.text((box_x + pad, y), live, font=f_row, fill=_BLACK)
+        y += _TILE_LINE_H + 2
     for row in rows:
-        d.text((box_x + 10, y), row, font=f_row, fill=_BLACK)
-        y += 16
-    if busiest:
-        d.text((box_x + 10, y), 'busiest: %s' % busiest[:24], font=f_row, fill=_BLACK)
-        y += 16
+        d.text((box_x + pad, y), row, font=f_row, fill=_BLACK)
+        y += _TILE_LINE_H
+    if daily:
+        _daily_bars(d, box_x + pad, y + 3, box_w - 2 * pad, daily)
+        y += _DAILY_BAR_H + 6
+        d.text((box_x + pad, y), trend, font=f_row, fill=_BLACK)
+        y += _TILE_LINE_H
     if week_pct is not None:
-        y += 4
-        d.line([(box_x + 10, y), (box_x + box_w - 10, y)], fill=_BLACK)
-        y += 6
+        y += 3
+        d.line([(box_x + pad, y), (box_x + box_w - pad, y)], fill=_BLACK)
+        y += 5
         label = 'Week %.0f%%' % week_pct
-        d.text((box_x + 10, y), label, font=f_row, fill=_BLACK)
-        label_w = int(d.textlength(label, font=f_row)) + 8
-        _bar(d, box_x + 10 + label_w, y + 3, box_w - 20 - label_w, 9,
+        d.text((box_x + pad, y), label, font=f_row, fill=_BLACK)
+        label_w = int(d.textlength(label, font=f_row)) + 6
+        _bar(d, box_x + pad + label_w, y + 2, box_w - 2 * pad - label_w, 7,
              week_pct, _BLACK, _WHITE, _BLACK)
 
 

@@ -61,6 +61,7 @@ python eink_terminal.py         # terminal emulator, live on Pi hardware
 | `src/markdown_renderer.py` | Parses/paginates Markdown into 800×480 PIL images (headers, bold/italic, lists, code, quotes, hr) — no hardware/app dependency |
 | `src/help_sheet.py` | Renders the full command reference as a two-column 800×480 cheat sheet (Ctrl+/ or the `commands` command) — no app dependency |
 | `src/command_watch.py` | `CommandWatcher` — pure bookkeeping over per-tab foreground commands; reports long-running ones finishing |
+| `src/claude_attention.py` | `AttentionWatcher` / `pane_state` — pure logic deciding when a `claude` tab has stopped for a human, from the pane's own text |
 | `src/markdown_viewer_mixin.py` | Full-screen paginated Markdown viewer over the notes file: PgUp/PgDn page, any other key closes. F6 → "View notes as Markdown" |
 
 Hotkeys: F1 SSH picker, F2 close tab, Ctrl+T new tab, Ctrl+N cycle mode
@@ -82,6 +83,16 @@ drawn straight to the panel (PgUp/PgDn if it ever needs a second page, any
 other key closes), with the tab lifecycle spelled out underneath — `exit` or
 F2 closes a tab, the last tab won't close, and exiting its shell leaves the
 "Shell exited" bar (Enter restarts, Ctrl+C quits, auto-restart after 10 s).
+The sheet also carries a QR to the web settings page in its bottom-right
+(`_settings_url` in `src/palette_help_mixin.py` → `qr_url` in
+`render_help_pages`): the sheet lists what you *press* on the device, and
+everything you'd rather type lives in that browser page — a QR is the only
+way to hand a phone a LAN URL off an e-ink panel. It costs the last column
+its bottom few rows, which the sheet can afford because `_paginate` packs by
+real row height rather than line count (a section gap is 6px, not a whole
+line). `test_the_whole_reference_is_one_page` is the guard: the sheet must
+stay one page.
+
 `_HELP_SECTIONS` in `src/terminal_state.py` is the single source: the flat
 `_HELP_ITEMS` the runnable picker reads (↑↓ to browse, Enter runs the
 selected one — `_toggle_help` / `_run_help_action`) is derived from it, so
@@ -127,6 +138,27 @@ is on the panel right now as selectable text with a Copy button (`/screen.txt`
 for raw text), PIN-gated and HTML-escaped like `/beam` and `/notes`. That's
 the path for a long stack trace, where reading a QR code is miserable. The
 app publishes the text each loop via `set_screen_text`.
+
+**"claude is waiting" / "claude needs you"** (`terminal_claude_attention`,
+tmux mode only): when a tab running `claude` stops for an approval or an
+answer, the status bar says so. This is the thing the panel is glanced at
+for, and a long agent turn looks exactly like idle to everything else here —
+no keyboard input, so the panel deep-sleeps right when the session starts
+wanting you.
+
+The signal is the pane's own text, not the transcript on disk: Claude Code
+prints `esc to interrupt` in its footer for as long as it is busy, so its
+presence is "working" and its absence is "your move" (with `Do you want
+to…` / `Do you trust…` separated out as `approval`, since that one cannot
+proceed without you). The transcript would also answer this, but it only
+gains an entry when a turn *completes*, so it lags a live session by however
+long the current step takes. Only panes already running `claude` are
+captured, so the usual case costs one `tmux list-panes` and no
+`capture-pane` at all. `terminal_claude_attention_seconds` (default 30)
+keeps it quiet: a turn that resolved in four seconds was never something you
+walked away from. Decision logic is pure and lives in
+`src/claude_attention.py`; the poll is `_poll_claude_attention` in
+`src/eink_terminal_app.py`.
 
 Long-running commands announce themselves in the status bar when they finish
 ("make done in 2m14s (build)"), controlled by `terminal_long_command_seconds`
@@ -223,14 +255,16 @@ web-UI QR code sits inside the Network card.
 - `claude_weekly_token_budget: 0` — yardstick for the "used N%" line (0 = compare against your own 4-week average)
 - `screensaver_show_qr: false` — the lock screen's wake QR code
 - `screensaver_show_claude_usage: true` / `terminal_claude_usage_ttl: 300` — lock-screen Claude Code activity panel (local estimate, not quota) and how often the transcripts are rescanned
+- `claude_trend_days: 14` — daily token bars on the lock-screen tile (0 hides them)
+- `terminal_claude_attention: true` / `terminal_claude_attention_seconds: 30` / `terminal_claude_attention_interval: 5` — status-bar note when a `claude` tab stops for an approval or an answer (tmux mode only)
 - `terminal_long_command_seconds: 30` — announce a command finishing when it ran at least this long (0 = off, tmux mode only)
 - `terminal_notes_file: data/notes.txt` — plain text file opened by the Notes mode/palette entry (in `nano`) and served as raw text at `/notes`
 
 ## Lock Screen: Claude Activity Panel
 
 The screensaver can show how much Claude Code work has gone through recently
-— messages and tokens over the last 5 h and 7 d, plus the busiest project —
-read from the session transcripts under `~/.claude/projects/*/*.jsonl`
+— messages and tokens over the last 5 h and 7 d — read from the session
+transcripts under `~/.claude/projects/*/*.jsonl`
 (`src/claude_usage.py`, `screensaver_show_claude_usage`). The panel deep-sleeps onto this image rather than onto the terminal
 (`display_sleep_shows_screensaver`): e-ink retains whatever was last drawn,
 so sleeping on the terminal left the session on the glass and looked exactly
@@ -242,11 +276,44 @@ default (`screensaver_show_qr`); turned back on, the tile stacks above it
 rather than over it. With the activity panel disabled the week bar falls
 back to its own box in the top-left.
 
-It is labelled "local est." on screen for a reason: **this is not your quota
-status.** Claude Code's real 5-hour and weekly limits are enforced
+The tile has no title bar and no busiest-project line: on a panel this size
+every row has to earn its place, and neither told you anything you'd act on.
+It is sized to stay a corner note on top of the screensaver photo rather than
+the subject of it — `_TILE_FONT` / `_TILE_LINE_H` / `_DAILY_BAR_H` in
+`src/render.py` are the knobs, and at their current values it covers under a
+tenth of the panel.
+"local est." moved onto the trend row instead, and it is there for a reason:
+**this is not your quota status.** Claude Code's real 5-hour and weekly limits are enforced
 server-side and written nowhere on disk — `/usage` fetches them live — so
 what's shown is what the local transcripts record going through, in tokens,
 which is not the unit the limits are counted in.
+
+The tile's top line is whose turn it is right now — `claude waiting 4m20s
+(terminal-display)` — from `session_state()` in `src/claude_usage.py`, which
+reads the tail of the most recently written transcript and asks what the
+last entry left it as: an assistant turn with no tool call means the session
+is yours to move, anything else means it still has the ball. Sidechain
+(subagent) entries are skipped, since a subagent finishing says nothing
+about the session you're looking at, and a session with nothing in the last
+30 minutes reports nothing at all. This is the path for sessions running
+anywhere on the machine; a session in a local tab is caught faster by
+`src/claude_attention.py` above.
+
+Under the numbers is a bar per day for the last `claude_trend_days` (default
+14, 0 hides them), captioned with what the tallest bar is worth so the chart
+carries a scale rather than being pure shape. Each day gets an equal slot
+with the bar centred in it (`_DAILY_BAR_FILL`, 0.5 — the chart spans the full
+width however skinny the bars are; much below 0.4 and the thinnest bars start
+dropping out on the panel's 1-bit dither) from `daily_totals()` — the shape of the fortnight, which
+four weekly totals cannot show, since a steady fortnight and one enormous
+Tuesday have the same average. Bars are scaled to the tallest day in the
+window (the question is which days were heavy relative to each other, not
+against any absolute number), combine input+output the way the weekly
+history does, and exclude cache reads — including them would make it a chart
+of cache reads. The last bar is today and is drawn hollow, because a short
+solid bar would read as a quiet day rather than an early hour. It comes
+straight from the transcripts rather than `stats_history`, so it stays
+correct for days the device spent asleep.
 
 The tile also carries the last four completed weeks in tokens with their
 average (`weekly_totals` / `weekly_baseline`, one scan feeding both), and a

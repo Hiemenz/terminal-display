@@ -150,6 +150,17 @@ terminal_long_command_seconds: 30
 
 terminal_alert_ssh_logins: true
 
+# "claude is waiting" / "claude needs you": when a tab running `claude` stops
+# for an approval or an answer, say so in the status bar. This is the thing
+# the panel is glanced at for, and a long agent turn looks exactly like idle
+# to everything else here — no keyboard input, so the panel deep-sleeps right
+# when it starts wanting you. Read from the tmux pane's own text (immediate),
+# not the transcript on disk (which only gains an entry once a turn ends).
+# tmux mode only.
+terminal_claude_attention: true
+terminal_claude_attention_seconds: 30   # only after it worked at least this long
+terminal_claude_attention_interval: 5   # seconds between pane checks
+
 # System-health alerts: throttling, failed services, a dying SD card, and a
 # dead network — the things this device has no other way to tell you about.
 # These run on their own slower timer (terminal_alert_health_interval,
@@ -340,6 +351,11 @@ screensaver_show_claude_usage: true
 # budget here — or leave 0 to compare against your own 4-week average.
 claude_weekly_token_budget: 0
 terminal_claude_usage_ttl: 300   # seconds between transcript scans
+# Daily token bars on the lock-screen tile: the shape of the fortnight, which
+# four weekly totals can't show (a steady fortnight and one enormous Tuesday
+# have the same average). The last bar is today and is drawn hollow because
+# the day is still in progress. 0 hides the bars.
+claude_trend_days: 14
 
 # When the panel deep-sleeps it keeps showing whatever was last drawn (e-ink
 # retains the image with no power). Draw the screensaver first so what stays

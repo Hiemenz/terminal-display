@@ -180,6 +180,9 @@ _CONFIG_SCHEMA = [
         ['screensaver_show_qr',         'bool',   'Wake QR Code',         'QR in the lock screen corner'],
         ['screensaver_show_claude_usage', 'bool',  'Claude Activity Panel', 'Recent Claude Code usage (local estimate, not your quota)'],
         ['claude_weekly_token_budget',   'int',    'Weekly Token Budget',  'Yardstick for "used N%" (0 = compare to your own 4-week average)'],
+        ['claude_trend_days',            'int',    'Activity Trend (days)', 'Daily token bars on the lock screen (0 = hide)'],
+        ['terminal_claude_attention',    'bool',   'Claude Needs You Alerts', 'Status-bar note when a claude tab stops for an approval or an answer'],
+        ['terminal_claude_attention_seconds', 'int', 'Attention Min Seconds', 'Only announce after claude has been working at least this long'],
         ['screensaver_cycle_interval',  'int',    'Cycle Interval (min)', 'Cycle mode only'],
     ]],
     ['Startup & Web', [

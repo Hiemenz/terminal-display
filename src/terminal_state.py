@@ -370,8 +370,9 @@ _HELP_SECTIONS = [
         ('Switch to Dashboard', 'F11'),
     ]),
     ('Text', [
-        ('Copy Mode',           'Ctrl+Space'),
-        ('Clipboard',           'F8'),
+        ('Copy (select+yank)',  'Ctrl+Space'),
+        ('Paste / Clipboard',   'F8'),
+        ('Copy off device',     'web /screen'),
         ('Scrollback Search',   'Ctrl+F'),
         ('Scroll Up',           'PgUp'),
         ('Scroll Down',         'PgDn'),

@@ -76,3 +76,33 @@ def test_a_heading_never_ends_a_column_alone():
     for page in _paginate(rows, 3):
         for column in page:
             assert not (column and column[-1][0] == 'head')
+
+
+def test_the_sheet_carries_the_settings_qr():
+    """The sheet lists what you press; the config you'd rather type lives in
+    the web page, and a QR is the only way to hand a phone a LAN URL off an
+    e-ink panel."""
+    url = 'http://192.168.1.145:8080/config'
+    with_qr = render_help_pages(_HELP_SECTIONS, _HELP_FOOTER, qr_url=url)[0]
+    without = render_help_pages(_HELP_SECTIONS, _HELP_FOOTER)[0]
+    assert list(with_qr.getdata()) != list(without.getdata())
+    # And it must not have cost a command its place on the single page.
+    assert len(render_help_pages(_HELP_SECTIONS, _HELP_FOOTER, qr_url=url)) == 1
+
+
+def test_qr_block_never_overlaps_the_commands():
+    """The QR eats the bottom of the last column, so the columns have to give
+    it that room rather than draw through it."""
+    url = 'http://192.168.1.145:8080/config'
+    rows = _column_rows(_HELP_SECTIONS)
+    plain = _paginate(rows, 27)
+    assert sum(len(c) for c in plain[0]) == len(rows)
+    pages = render_help_pages(_HELP_SECTIONS, _HELP_FOOTER, qr_url=url)
+    assert len(pages) == 1
+
+
+def test_copy_and_paste_are_findable_by_name():
+    """Both were on the sheet under names that didn't say 'copy' or 'paste'."""
+    labels = ' '.join(label for label, _keys in _HELP_ITEMS).lower()
+    assert 'copy' in labels
+    assert 'paste' in labels

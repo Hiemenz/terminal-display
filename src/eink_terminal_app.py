@@ -68,6 +68,7 @@ import time
 from PIL import ImageDraw
 
 from alert_monitor import AlertMonitor
+from claude_attention import AttentionWatcher, pane_state
 from command_watch import SHELL_COMMANDS as _SHELL_NAMES
 from command_watch import CommandWatcher, format_duration
 from display_eink import EinkDriver
@@ -307,6 +308,9 @@ class EinkTerminal(
         # Lock-screen Claude activity panel (scans ~/.claude transcripts).
         self._claude_usage_cache: dict = {}
         self._claude_usage_mono = 0.0
+        self._attention_watcher = AttentionWatcher(
+            float(config.get('terminal_claude_attention_seconds', 30) or 30))
+        self._attention_poll_mono = 0.0
         self._web_input_queue = None   # set in run() when preview server starts
 
         # Split-view stats
@@ -756,9 +760,22 @@ class EinkTerminal(
         if cached and (now - getattr(self, '_claude_usage_mono', 0.0)) < ttl:
             return cached
         try:
-            from claude_usage import collect_usage, weekly_baseline, weekly_percent, weekly_totals
+            from claude_usage import (
+                collect_usage,
+                daily_totals,
+                session_state,
+                weekly_baseline,
+                weekly_percent,
+                weekly_totals,
+            )
             started = time.monotonic()
             usage = collect_usage()
+            # Four weekly numbers say how much; the daily bars say what shape
+            # the fortnight had — which is the thing a total cannot show.
+            trend_days = int(self._config.get('claude_trend_days', 14) or 0)
+            usage['daily'] = daily_totals(days=trend_days) if trend_days > 0 else []
+            # Whose turn it is right now, for a session anywhere on the box.
+            usage['session'] = session_state()
             # How heavy a week this is. The real weekly limit is server-side,
             # so the yardstick is either a budget the user set or, failing
             # that, what their own recent weeks looked like.
@@ -829,6 +846,60 @@ class EinkTerminal(
             changed = True
         for key in set(self._command_watcher.running()) - live_keys:
             self._command_watcher.forget(key)   # tab closed while it ran
+        return changed
+
+    def _poll_claude_attention(self, now: float) -> bool:
+        """Say in the status bar when a Claude session in a tab stops for you.
+
+        Only panes already running `claude` are captured, so the usual case —
+        no Claude tab open — costs the same single `tmux list-panes` the
+        command watcher makes and no capture-pane at all.
+        """
+        if not self._config.get('terminal_claude_attention', True) or not self._use_tmux:
+            return False
+        interval = float(self._config.get('terminal_claude_attention_interval', 5) or 5)
+        if (now - self._attention_poll_mono) < interval:
+            return False
+        self._attention_poll_mono = now
+        try:
+            r = subprocess.run(
+                ['tmux', 'list-panes', '-a', '-F',
+                 '#{session_name}\t#{pane_id}\t#{pane_current_command}'],
+                capture_output=True, text=True, timeout=2,
+            )
+        except Exception:
+            return False
+
+        panes: dict = {}
+        for line in r.stdout.splitlines():
+            session, _, rest = line.partition('\t')
+            pane_id, _, command = rest.partition('\t')
+            if command.strip() == 'claude':
+                panes.setdefault(session, pane_id)
+
+        changed = False
+        live_keys = set()
+        for idx, tab in enumerate(self._tabs):
+            key = tab.tmux_session or ('tab%d' % idx)
+            if key not in panes and idx == 0 and self._tmux_session in panes:
+                key = self._tmux_session   # startup tab of an older session
+            if key not in panes:
+                continue
+            live_keys.add(key)
+            try:
+                cap = subprocess.run(['tmux', 'capture-pane', '-p', '-t', panes[key]],
+                                     capture_output=True, text=True, timeout=2)
+            except Exception:
+                continue
+            label = tab.title or ('tab %d' % (idx + 1))
+            message = self._attention_watcher.update(
+                key, pane_state(cap.stdout), label, now)
+            if message:
+                self._alert_monitor.note(message)
+                logger.info('Claude attention: %s', message)
+                changed = True
+        for key in set(self._attention_watcher.tracked()) - live_keys:
+            self._attention_watcher.forget(key)   # tab closed, or claude exited
         return changed
 
     def _consume_screen_flags(self, screen, active: bool) -> None:
@@ -1689,6 +1760,7 @@ class EinkTerminal(
             if now - last_alert_tick >= 1.0:
                 changed = self._alert_monitor.tick()
                 changed |= self._poll_finished_commands(now)
+                changed |= self._poll_claude_attention(now)
                 if changed and not in_screensaver and not panel_asleep:
                     self._status_force = True
                     has_pending = True  # alert changed — re-render status bar
