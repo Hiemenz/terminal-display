@@ -44,6 +44,27 @@ terminal_region_flash: true
 # active use). Forced anyway at 2× the interval. 0 = flash as soon as due.
 terminal_flash_idle_gap: 30
 
+# ── Four-level greyscale ─────────────────────────────────────────────────────
+# The panel is 1-bit for every fast path, but the controller can address four
+# grey levels through a slower whole-panel write (seconds, with a flash). That
+# is far too slow to type through, and exactly right for a screen that is drawn
+# once and then looked at.
+#
+# eink_grayscale covers those: the lock screen (a photograph in four dithered
+# levels instead of two), the Markdown viewer, the command sheet, and pushed
+# text/cards.
+eink_grayscale: true
+
+# …and the terminal itself. The 1-bit path renders glyphs at 2× and then
+# thresholds the greys away, because that is what makes text crisp when every
+# pixel must be black or white. Once typing stops there is no reason to keep
+# paying that: this redraws the same frame in grey with its anti-aliasing
+# intact — markedly easier to read at small font sizes, and in grey the ANSI
+# colours become ink weights, so a diff or a build log regains its structure.
+# Seconds of no keyboard input before that happens; 0 = off. Keep it well below
+# display_sleep_minutes or the panel sleeps before it fires.
+terminal_gray_idle_seconds: 20
+
 # Content-adaptive DU waveform: heavy/inverse content (TUIs like htop/vim) is
 # driven with more frames so it fully transitions and ghosts less; light text
 # uses fewer (crisper + faster). Frames are 0x14=20 by default; bump _heavy if
@@ -183,6 +204,19 @@ terminal_alert_network_fails: 3        # consecutive misses required before aler
 # High-quality rendering: render at 2× then downsample (sharper text on e-ink).
 # Adds ~15ms to render time — negligible vs. display refresh time.
 terminal_hq_render: true
+
+# ── Text attributes (SGR) ────────────────────────────────────────────────────
+# Honour the per-cell attributes pyte tracks — bold, underline, strikethrough —
+# instead of drawing every cell the same. Every TUI encodes its structure in
+# weight and colour (git diff, grep --color, error text, claude's own footer),
+# and without this all of it flattens into identical black text.
+terminal_sgr_attributes: true
+
+# Draw *normal* text in the family's bold face, the way this panel did before
+# it could tell bold from normal ("bold for e-ink"). Bold cells are then
+# double-struck on top. Leave false for a real weight contrast; set true if
+# regular-weight text reads too thin on your panel.
+terminal_font_heavy_base: false
 
 # Paste file: F8 reads this file and types its contents into the terminal.
 # SSH in from another device, save text here, press F8 to paste.

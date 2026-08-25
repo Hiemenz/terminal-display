@@ -75,6 +75,13 @@ def make_app():
         app._beam_until_mono = 0.0
         app._needs_periodic_flash = True
         app._img_cache = None
+        app._last_image = None
+        app._last_full_refresh_mono = 0.0
+        app._sgr = cfg.get('terminal_sgr_attributes', True)
+        app._heavy_base = cfg.get('terminal_font_heavy_base', False)
+        app._gray_screens = cfg.get('eink_grayscale', True)
+        app._gray_idle = float(cfg.get('terminal_gray_idle_seconds', 0) or 0)
+        app._gray_at_input = None
         # Overlay code calls _render after every change; make it a no-op.
         app._render = lambda *a, **k: None
         return app

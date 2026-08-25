@@ -109,6 +109,80 @@ def _frame_is_blank(buf, row_bytes: int = 100, threshold: float = 0.85) -> bool:
     return blank / rows >= threshold
 
 
+# ── Four-level greyscale ─────────────────────────────────────────────────────
+
+# The four levels the panel can hold, as 8-bit grey values. Anything rendered
+# for grey mode is quantised onto these before being split into bit-planes.
+GRAY_LEVELS = (0x00, 0x80, 0xC0, 0xFF)
+
+
+def quantize_4gray(image: Image.Image, dither: bool = True) -> Image.Image:
+    """Snap a greyscale image onto the panel's four levels.
+
+    dither=True (Floyd–Steinberg) is for photographs, where four flat bands
+    would look far worse than four dithered ones. dither=False is for rendered
+    text, where the anti-aliasing already *is* the gradient and dithering would
+    just speckle the glyph edges.
+    """
+    img = image.convert('L')
+    palette = Image.new('P', (1, 1))
+    # PIL wants 256 palette entries; the unused tail repeats the last level so
+    # nothing can quantise to an undefined colour.
+    entries = []
+    for level in GRAY_LEVELS:
+        entries += [level, level, level]
+    entries += entries[-3:] * (256 - len(GRAY_LEVELS))
+    palette.putpalette(entries)
+    mode = Image.Dither.FLOYDSTEINBERG if dither else Image.Dither.NONE
+    return img.convert('RGB').quantize(palette=palette, dither=mode).convert('L')
+
+
+def pack_4gray(image: Image.Image, dither: bool = True) -> tuple:
+    """Quantise to four levels and split into the panel's two bit-planes.
+
+    Returns (plane0, plane1) as bytes, MSB-first, 100 bytes per row. The
+    controller reads the pair per pixel to choose a waveform:
+
+        (0, 0) white      (0, 1) dark grey
+        (1, 0) light grey (1, 1) black
+
+    so plane0 marks {black, light grey} and plane1 marks {black, dark grey}.
+    Kept here rather than in the panel driver so it can be tested without a
+    panel attached — the bit order is exactly the sort of thing that is
+    invisible until it renders as garbage.
+    """
+    quantised = quantize_4gray(image, dither=dither)
+    if _HAS_NUMPY:
+        arr = _np.frombuffer(quantised.tobytes(), dtype=_np.uint8)
+        # Level index 0..3 (black → white) from the quantised grey value.
+        level = _np.zeros(arr.shape, dtype=_np.uint8)
+        for idx, value in enumerate(GRAY_LEVELS):
+            level[arr == value] = idx
+        # Anything that missed an exact level (a caller that skipped
+        # quantize_4gray) falls to the nearest one rather than silently to black.
+        unmatched = ~_np.isin(arr, _np.array(GRAY_LEVELS, dtype=_np.uint8))
+        if unmatched.any():
+            nearest = _np.abs(arr[unmatched].astype(_np.int16)
+                              - _np.array(GRAY_LEVELS, dtype=_np.int16)[:, None])
+            level[unmatched] = nearest.argmin(axis=0).astype(_np.uint8)
+        p0 = ((level & 1) ^ 1).astype(_np.uint8)
+        p1 = ((level >> 1) ^ 1).astype(_np.uint8)
+        return _np.packbits(p0).tobytes(), _np.packbits(p1).tobytes()
+
+    plane0 = bytearray(len(quantised.tobytes()) // 8)
+    plane1 = bytearray(len(plane0))
+    data = quantised.tobytes()
+    for i, value in enumerate(data):
+        idx = min(range(len(GRAY_LEVELS)),
+                  key=lambda k: abs(GRAY_LEVELS[k] - value))
+        bit = 7 - (i % 8)
+        if not (idx & 1):
+            plane0[i // 8] |= 1 << bit
+        if not (idx >> 1):
+            plane1[i // 8] |= 1 << bit
+    return bytes(plane0), bytes(plane1)
+
+
 class EinkDriver:
     """
     Persistent e-ink driver with a background hardware-write thread.
@@ -127,6 +201,7 @@ class EinkDriver:
     # ── task kinds sent to the worker ─────────────────────────────────────────
     _PARTIAL = 'partial'
     _FULL    = 'full'
+    _GRAY    = 'gray'
     _SLEEP   = 'sleep'
 
     # Above this many disjoint changed regions in one frame, collapse to a single
@@ -152,7 +227,7 @@ class EinkDriver:
         self._du_frames_loaded: Optional[int] = None  # frame count currently in the DU LUT
 
         # Live refresh counters for the debug HUD (read by the app via stats()).
-        self._stats: dict = {'partial': 0, 'region': 0, 'full': 0,
+        self._stats: dict = {'partial': 0, 'region': 0, 'full': 0, 'gray': 0,
                              'bytes': 0, 'last_flash_mono': 0.0, 'du_frames': 0,
                              'last_reason': ''}
         # Why each whole-panel flash happened, and when. "It flashes too much"
@@ -186,6 +261,12 @@ class EinkDriver:
         self._partial_ready = False
         self._prev_buf: Optional[bytearray] = None
         self._hw_sleeping   = True    # assume display is sleeping on startup; forces full init()
+        # Set when the panel holds a frame this driver cannot diff against — a
+        # 4-grey write, whose two bit-planes have no 1-bit equivalent to keep as
+        # _prev_buf. A partial update against a missing reference drives the
+        # whole panel from an unknown state and leaves the old frame smeared
+        # underneath, so the next write has to be a clean full one.
+        self._needs_baseline = False
 
         # Worker communication.
         self._q: _queue.Queue = _queue.Queue()    # ordered task queue
@@ -210,6 +291,8 @@ class EinkDriver:
             elif kind == self._FULL:
                 self._hw_full(item[1], deep=item[2],
                               reason=item[3] if len(item) > 3 else '')
+            elif kind == self._GRAY:
+                self._hw_gray(item[1], dither=item[2], reason=item[3])
             elif kind == self._SLEEP:
                 self._hw_sleep()
                 item[1].set()   # unblock sleep() caller
@@ -289,6 +372,21 @@ class EinkDriver:
         if self._local:
             return
         self._q.put((self._FULL, image, deep, reason or 'flash'))
+
+    def gray_refresh(self, image: Image.Image, output_path: str = None,
+                     dither: bool = True, reason: str = ''):
+        """Draw `image` in the panel's four-level greyscale mode.
+
+        Slow (a whole-panel write with a flash, seconds not milliseconds) and it
+        leaves the panel needing a re-init before the next partial, so this is
+        only for frames that are drawn once and then looked at: the lock
+        screen, the Markdown viewer, the command sheet, the idle re-render.
+        Never call it on the typing path."""
+        _save(image, output_path)
+        record_full_refresh()
+        if self._local:
+            return
+        self._q.put((self._GRAY, image, dither, reason or 'gray'))
 
     def partial_refresh_diff(self, image: Image.Image, output_path: str = None):
         """Async partial refresh. Returns immediately; hardware write runs in background.
@@ -371,11 +469,48 @@ class EinkDriver:
                 epd.init_part()
                 self._partial_ready = True
             self._prev_buf = bytearray(buf)
+            self._needs_baseline = False
         except IOError as e:
             logging.error('E-ink full refresh error: %s', e)
             self._hw_sleeping  = True
             self._partial_ready = False
             self._du_ready      = False
+
+    def _hw_gray(self, image: Image.Image, dither: bool = True, reason: str = ''):
+        epd = self._epd_instance()
+        if epd is None:
+            return
+        if not hasattr(epd, 'display_4gray'):
+            # An older vendored driver — fall back to the 1-bit path rather
+            # than dropping the frame. The image is still correct, just flat.
+            logging.warning('Panel driver has no 4-grey support; using 1-bit')
+            self._hw_full(image, reason=reason or 'gray-fallback')
+            return
+        self._note_flash(reason)
+        logging.info('E-ink 4-grey refresh (reason=%s, dither=%s, hw_sleeping=%s, %d/min)',
+                     reason or 'unknown', dither, self._hw_sleeping,
+                     self.stats()['flashes_per_min'])
+        try:
+            plane0, plane1 = pack_4gray(image, dither=dither)
+            epd.init_4gray()
+            self._hw_sleeping = False
+            epd.display_4gray(plane0, plane1)
+            self._stats['full'] += 1
+            self._stats['gray'] = self._stats.get('gray', 0) + 1
+            self._stats['last_flash_mono'] = time.monotonic()
+        except IOError as e:
+            logging.error('E-ink 4-grey refresh error: %s', e)
+            self._hw_sleeping = True
+        finally:
+            # 4-grey leaves the panel in OTP-LUT mode with a forced temperature.
+            # Whatever comes next — DU, partial, full — has to re-init, and the
+            # cached previous frame no longer describes what is on the glass, so
+            # a diff against it would leave stale pixels behind.
+            self._partial_ready     = False
+            self._du_ready          = False
+            self._du_frames_loaded  = None
+            self._prev_buf          = None
+            self._needs_baseline    = True
 
     def _hw_partial_du(self, image: Image.Image):
         """Flash-free refresh via the DU register-LUT waveform.
@@ -390,7 +525,7 @@ class EinkDriver:
         try:
             # No known prior frame (cold start / post-sleep): establish a clean
             # baseline with one full refresh, then DU-update from there on.
-            if self._hw_sleeping and self._prev_buf is None:
+            if self._needs_baseline or (self._hw_sleeping and self._prev_buf is None):
                 self._hw_full(image, reason='baseline')
                 return
 
@@ -441,7 +576,7 @@ class EinkDriver:
             # 0x10 back-buffer (the "what's on screen" reference the partial
             # diff needs). With no known prior frame, do one clean full refresh
             # to re-establish it; otherwise re-prime 0x10 from _prev_buf below.
-            if self._hw_sleeping and self._prev_buf is None:
+            if self._needs_baseline or (self._hw_sleeping and self._prev_buf is None):
                 self._hw_full(image, reason='baseline')
                 return
             # Always re-prime the panel's 0x10 back-buffer with the frame that is

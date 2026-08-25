@@ -188,6 +188,67 @@ class EPD:
         epdconfig.delay_ms(50)
         self.ReadBusy()
 
+    # ── 4-level greyscale ─────────────────────────────────────────────────────
+    # The panel is 1-bit for every fast path here, but the UC8179 can address
+    # four levels by driving two bit-planes through the OTP waveform with the
+    # controller's temperature forced (0xE0/0xE5 below). That is the vendor's
+    # own approach — no hand-written LUT — which matters because a wrong
+    # waveform is the one class of bug here that shows up as a damaged-looking
+    # panel rather than a stack trace.
+    #
+    # It costs a slow whole-panel write (seconds, with a flash), so it is only
+    # ever for images that are drawn once and then sat on: the lock screen, the
+    # Markdown viewer, the command sheet, and the idle re-render of the
+    # terminal. Never the typing path — that stays on DU (init_du/display_du).
+
+    def init_4gray(self):
+        """Init the panel for four-level greyscale via display_4gray().
+
+        Leaves the panel in OTP-LUT mode with a forced temperature, so any
+        later DU or partial update must re-init (the driver layer tracks this
+        by clearing its _du_ready / _partial_ready flags)."""
+        if epdconfig.module_init() != 0:
+            return -1
+        self.reset()
+
+        self.send_command(0x00)        # PANEL SETTING — LUT from OTP
+        self.send_data(0x1F)
+
+        self.send_command(0x50)        # VCOM and data interval
+        self.send_data(0x10)
+        self.send_data(0x07)
+
+        self.send_command(0x04)        # POWER ON
+        epdconfig.delay_ms(100)
+        self.ReadBusy()
+
+        self.send_command(0x06)        # Booster soft start (enhanced drive)
+        self.send_data(0x27)
+        self.send_data(0x27)
+        self.send_data(0x18)
+        self.send_data(0x17)
+
+        self.send_command(0xE0)        # Cascade setting — enable forced temp
+        self.send_data(0x02)
+        self.send_command(0xE5)        # Force temperature: selects the 4-grey
+        self.send_data(0x5F)           # region of the OTP waveform
+        return 0
+
+    def display_4gray(self, plane0, plane1):
+        """Write a four-level frame from its two bit-planes.
+
+        The controller picks a waveform per pixel from the (0x10, 0x13) bit
+        pair — (0,0) white, (0,1) dark grey, (1,0) light grey, (1,1) black.
+        Build the planes with display_eink.pack_4gray(); it owns the
+        quantisation and is testable without a panel attached."""
+        self.send_command(0x10)
+        self.send_data2(bytes(plane0))
+        self.send_command(0x13)
+        self.send_data2(bytes(plane1))
+        self.send_command(0x12)
+        epdconfig.delay_ms(100)
+        self.ReadBusy()
+
     # Hardware reset
     def reset(self):
         epdconfig.digital_write(self.reset_pin, 1)

@@ -32,49 +32,240 @@ STATUS_H         = 17    # single-line status bar
 TAB_BAR_H        = 0     # tab bar removed; tab indicator shown in status bar
 TERMINAL_H       = H - STATUS_H - TAB_BAR_H  # 463
 
-_font_cache: dict = {}
+_font_cache:  dict = {}
+_faces_cache: dict = {}
 _qr_cache:   dict = {}  # url -> PIL Image, generated once per URL
 
 
 # ── Font helpers ──────────────────────────────────────────────────────────────
 
+def _mono_families() -> list:
+    """Monospace faces as (regular, bold) pairs, best first.
+
+    They are pairs rather than a flat list because bold cells are drawn with
+    the bold face (see _draw_cell). Cell metrics are always taken from the
+    *regular* face — some families (Liberation) give their bold face a taller
+    bbox, and picking metrics per-face would move the grid under the shell
+    whenever a bold character appeared.
+    """
+    home = os.path.expanduser('~')
+    return [
+        # JetBrains Mono — best stroke weight for e-ink 1-bit rendering
+        (f'{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Regular.ttf',
+         f'{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Bold.ttf'),
+        (f'{home}/Library/Fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf',
+         f'{home}/Library/Fonts/JetBrainsMonoNLNerdFontMono-Bold.ttf'),
+        ('/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf',
+         '/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Bold.ttf'),
+        # System monospace fallbacks
+        ('/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
+         '/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf'),
+        ('/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf',
+         '/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf'),
+        ('/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf',
+         '/usr/share/fonts/truetype/noto/NotoSansMono-Bold.ttf'),
+        ('/System/Library/Fonts/Menlo.ttc', ''),
+        ('/usr/share/fonts/truetype/freefont/FreeMono.ttf',
+         '/usr/share/fonts/truetype/freefont/FreeMonoBold.ttf'),
+        ('/System/Library/Fonts/Supplemental/Courier New.ttf',
+         '/System/Library/Fonts/Supplemental/Courier New Bold.ttf'),
+        ('/Library/Fonts/Courier New.ttf', '/Library/Fonts/Courier New Bold.ttf'),
+    ]
+
+
+def _bold_sibling(path: str) -> str:
+    """Guess the bold file next to an explicitly configured regular one."""
+    for suffix in ('-Regular', 'Regular', '-Medium', 'Medium', '-Book', 'Book'):
+        if suffix in path:
+            for bold in ('-Bold', 'Bold'):
+                cand = path.replace(suffix, bold if suffix.startswith('-') else bold.lstrip('-'))
+                if cand != path and os.path.exists(cand):
+                    return cand
+    stem, ext = os.path.splitext(path)
+    for cand in (stem + '-Bold' + ext, stem + 'Bold' + ext, stem + '-bold' + ext):
+        if os.path.exists(cand):
+            return cand
+    return ''
+
+
+def _resolve_family(font_path: str) -> tuple:
+    """(regular_path, bold_path) — bold_path may be '' when the family has none."""
+    if font_path and os.path.exists(font_path):
+        return font_path, _bold_sibling(font_path)
+    for regular, bold in _mono_families():
+        if os.path.exists(regular):
+            return regular, (bold if bold and os.path.exists(bold) else '')
+    return '', ''
+
+
+def _load(path: str, size: int) -> _Font:
+    try:
+        return ImageFont.truetype(path, size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+class _Faces:
+    """The faces one render pass draws with.
+
+    `synthetic` means the family had no bold file, so bold cells are drawn by
+    double-striking the regular face one pixel to the right — which on a 1-bit
+    panel is very close to a real bold face after the threshold pass.
+    """
+    __slots__ = ('regular', 'bold', 'synthetic')
+
+    def __init__(self, regular: _Font, bold: _Font, synthetic: bool):
+        self.regular, self.bold, self.synthetic = regular, bold, synthetic
+
+
 def _find_mono_font(font_path: str, size: int) -> _Font:
+    """The regular face — the one all cell metrics are measured from."""
     key = (font_path, size)
     if key in _font_cache:
         return _font_cache[key]
-    candidates = []
-    if font_path:
-        candidates.append(font_path)
-
-    home = os.path.expanduser('~')
-    candidates += [
-        # JetBrains Mono Medium — best stroke weight for e-ink 1-bit rendering
-        f'{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Medium.ttf',   # macOS (Nerd Font)
-        f'{home}/Library/Fonts/JetBrainsMonoNLNerdFontMono-Medium.ttf', # macOS (NL variant)
-        '/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Medium.ttf',   # Pi (apt)
-        '/usr/share/fonts/truetype/jetbrains-mono/JetBrainsMono-Regular.ttf',  # Pi (apt fallback)
-        f'{home}/Library/Fonts/JetBrainsMonoNerdFontMono-Regular.ttf',  # macOS fallback
-        # System monospace fallbacks
-        '/System/Library/Fonts/Menlo.ttc',
-        '/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf',  # bold for e-ink
-        '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf',
-        '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf',
-        '/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf',
-        '/usr/share/fonts/truetype/freefont/FreeMono.ttf',
-        '/System/Library/Fonts/Supplemental/Courier New.ttf',
-        '/Library/Fonts/Courier New.ttf',
-    ]
-    for fp in candidates:
-        if os.path.exists(fp):
-            try:
-                font: _Font = ImageFont.truetype(fp, size)
-                _font_cache[key] = font
-                return font
-            except Exception:
-                pass
-    font = ImageFont.load_default()
+    regular, _ = _resolve_family(font_path)
+    font = _load(regular, size) if regular else ImageFont.load_default()
     _font_cache[key] = font
     return font
+
+
+def _find_faces(font_path: str, size: int, heavy_base: bool = False) -> _Faces:
+    """Regular + bold faces at `size`.
+
+    heavy_base keeps the pre-SGR look on this panel, where the *base* face was
+    the bold one ("bold for e-ink"): the regular slot becomes the bold file and
+    bold cells are double-struck on top of it. Default off, because the whole
+    point of honouring SGR is that bold reads as different from normal, and a
+    uniformly heavy panel can only express that synthetically.
+    """
+    key = (font_path, size, heavy_base)
+    if key in _faces_cache:
+        return _faces_cache[key]
+    regular_path, bold_path = _resolve_family(font_path)
+    if not regular_path:
+        default = ImageFont.load_default()
+        faces = _Faces(default, default, True)
+    elif heavy_base:
+        base = _load(bold_path or regular_path, size)
+        faces = _Faces(base, base, True)
+    elif bold_path:
+        faces = _Faces(_load(regular_path, size), _load(bold_path, size), False)
+    else:
+        base = _load(regular_path, size)
+        faces = _Faces(base, base, True)
+    _faces_cache[key] = faces
+    return faces
+
+
+# ── SGR attributes ────────────────────────────────────────────────────────────
+# pyte tracks nine per-cell attributes; before this the renderer read exactly
+# one of them (reverse) and every program's use of weight and colour flattened
+# into identical black text. On a 1-bit panel colour cannot be colour, but it
+# can be typography.
+
+# Colour → ink weight, as a fraction of full contrast. The panel has four grey
+# levels at most, so this collapses to roughly three usable weights plus the
+# background; the table is ordered so the colours programs use for *emphasis*
+# (red, blue, magenta) stay darkest and the ones used for chrome (cyan, green)
+# lighten. It is only consulted in grey renders — in 1-bit there is nowhere for
+# it to go, and inventing a second treatment for colour would just add noise on
+# top of bold and underline.
+_ANSI_INK = {
+    'black':   1.00,
+    'blue':    0.95,
+    'red':     0.88,
+    'magenta': 0.80,
+    'brown':   0.68,   # pyte's name for ANSI yellow
+    'green':   0.62,
+    'cyan':    0.52,
+    'white':   1.00,
+    'default': 1.00,
+}
+
+
+def _ink(color, fg: int, bg: int) -> int:
+    """Blend `color`'s ink weight between the background and full foreground."""
+    if not color:
+        return fg
+    weight = _ANSI_INK.get(color)
+    if weight is None:
+        # 256-colour / truecolor arrives as a hex string; fall back to its own
+        # luminance, compressed so nothing lands close enough to the background
+        # to disappear.
+        try:
+            r, g, b = (int(color[i:i + 2], 16) for i in (0, 2, 4))
+        except (ValueError, IndexError):
+            return fg
+        luma = (0.299 * r + 0.587 * g + 0.114 * b) / 255.0
+        weight = 1.0 - 0.45 * (luma if fg < bg else 1.0 - luma)
+    if weight >= 1.0:
+        return fg
+    return int(round(bg + (fg - bg) * weight))
+
+
+def _draw_cell(draw: ImageDraw.ImageDraw, x: int, y: int, cw: int, ch: int,
+               char, fg: int, bg: int, faces: _Faces, scale: int = 1,
+               selected: bool = False, cursor: bool = False,
+               cursor_style: str = 'block', sgr: bool = True,
+               gray: bool = False) -> None:
+    """Draw one terminal cell, honouring its SGR attributes.
+
+    Shared by every screen renderer here (full, partial, split pane) so the
+    three cannot drift apart on what an attribute looks like.
+    """
+    inverted = bool(char.reverse) != bool(selected)
+
+    # A block cursor normally inverts the cell. On a cell that is *already*
+    # inverted — inside a selection, or on a TUI's highlight bar — inverting
+    # again cancels out and the cursor vanishes exactly where it is most
+    # needed, so outline it instead of flipping it.
+    outline_cursor = False
+    if cursor and cursor_style == 'block':
+        if inverted:
+            outline_cursor = True
+        else:
+            inverted = True
+
+    cell_fg = bg if inverted else fg
+    cell_bg = fg if inverted else bg
+    if cell_bg != bg:
+        draw.rectangle([x, y, x + cw - 1, y + ch - 1], fill=cell_bg)
+
+    font = faces.regular
+    bold = bool(sgr and getattr(char, 'bold', False))
+    if bold and not faces.synthetic:
+        font = faces.bold
+
+    glyph_fill = cell_fg
+    if sgr and gray and not inverted and not bold:
+        glyph_fill = _ink(getattr(char, 'fg', 'default'), cell_fg, cell_bg)
+
+    glyph = char.data
+    if glyph and glyph != ' ':
+        draw.text((x, y), glyph, font=font, fill=glyph_fill)
+        if bold and faces.synthetic:
+            # No bold file in this family: double-strike a pixel to the right.
+            draw.text((x + max(1, scale // 2), y), glyph, font=font, fill=glyph_fill)
+
+    if sgr:
+        rule = max(1, scale)
+        if getattr(char, 'underscore', False):
+            uy = y + ch - rule - (1 if ch > 4 * rule else 0)
+            draw.rectangle([x, uy, x + cw - 1, uy + rule - 1], fill=cell_fg)
+        if getattr(char, 'strikethrough', False):
+            sy = y + ch // 2
+            draw.rectangle([x, sy, x + cw - 1, sy + rule - 1], fill=cell_fg)
+
+    if outline_cursor:
+        draw.rectangle([x, y, x + cw - 1, y + ch - 1], outline=cell_fg,
+                       width=max(1, scale))
+    elif cursor and cursor_style != 'block':
+        # cell_fg, not fg: on an inverted cell the two are opposite, and a bar
+        # in the screen foreground is drawn in the cell's own background colour
+        # — an invisible cursor, the same way the block one used to cancel
+        # itself out there.
+        bar_h = max(2, ch // 6)
+        draw.rectangle([x, y + ch - bar_h, x + cw - 1, y + ch - 1], fill=cell_fg)
 
 
 def _in_select_range(row_idx: int, col_idx: int, select: tuple) -> bool:
@@ -137,12 +328,21 @@ def render_screen(
     bar_config: dict = None,
     cursor_style: str = 'block',
     select: tuple = None,
+    sgr: bool = True,
+    heavy_base: bool = False,
+    gray: bool = False,
+    conditions: str = None,
 ) -> Image.Image:
     """
     Render pyte.Screen to an 800×480 grayscale PIL Image.
 
     hq=True (default): render at 2× then downsample — crisper text on e-ink.
     hq=False: render directly at 800×480 (faster, slightly softer edges).
+
+    gray=True keeps the anti-aliased greys the downsample produces instead of
+    thresholding them to black and white, for the panel's 4-grey mode. The
+    threshold is what makes 1-bit text crisp, so this is only for the slow
+    idle re-render — never the typing path.
     """
     scale = 2 if hq else 1
     W_s  = W * scale
@@ -159,7 +359,7 @@ def render_screen(
     # (previously 2× metrics drifted ~0.5px/col → ~50px gap over 100 cols).
     font_layout = _find_mono_font(font_path, font_size)
     cw, ch = _char_size(font_layout)
-    font = _find_mono_font(font_path, font_size * scale) if scale > 1 else font_layout
+    faces = _find_faces(font_path, font_size * scale, heavy_base)
     s_cw, s_ch = cw * scale, ch * scale   # scaled cell dimensions for drawing
 
     img = Image.new('L', (W_s, H_s), bg)
@@ -186,25 +386,13 @@ def render_screen(
             x = col_idx * s_cw
             if x >= tw_s:
                 break
-            char = row[col_idx]
-            is_cursor    = (row_idx == screen.cursor.y and col_idx == screen.cursor.x)
-            cell_inverted = bool(char.reverse)
-            if select is not None and _in_select_range(row_idx, col_idx, select):
-                cell_inverted = not cell_inverted
-            # A block cursor inverts the whole cell (glyph shown in bg over an
-            # fg block); an underline cursor keeps the cell as-is and adds a bar.
-            if is_cursor and cursor_style == 'block':
-                cell_inverted = not cell_inverted
-            cell_fg = bg if cell_inverted else fg
-            cell_bg = fg if cell_inverted else bg
-            if cell_bg != bg:
-                draw.rectangle([x, y, x + s_cw - 1, y + s_ch - 1], fill=cell_bg)
-            glyph = char.data
-            if glyph and glyph != ' ':
-                draw.text((x, y), glyph, font=font, fill=cell_fg)
-            if is_cursor and cursor_style != 'block':
-                bar_h = max(2, s_ch // 6)
-                draw.rectangle([x, y + s_ch - bar_h, x + s_cw - 1, y + s_ch - 1], fill=fg)
+            _draw_cell(
+                draw, x, y, s_cw, s_ch, row[col_idx], fg, bg, faces, scale,
+                selected=(select is not None
+                          and _in_select_range(row_idx, col_idx, select)),
+                cursor=(row_idx == screen.cursor.y and col_idx == screen.cursor.x),
+                cursor_style=cursor_style, sgr=sgr, gray=gray,
+            )
 
     # ── Status bar ───────────────────────────────────────────────────────────
     _draw_status_bar(
@@ -214,14 +402,18 @@ def render_screen(
         scale=scale,
         net_stats=net_stats,
         bar_config=bar_config,
+        conditions=conditions,
     )
 
     # ── HQ downsample + hard threshold ───────────────────────────────────────
     if hq:
         img = img.resize((W, H), Image.Resampling.LANCZOS)
-        # Hard threshold: push anti-aliased gray edges to clean black or white.
-        # 128 is neutral; nudge slightly toward white to preserve thin strokes.
-        img = img.point(lambda p: 255 if p > 112 else 0)
+        if not gray:
+            # Hard threshold: push anti-aliased gray edges to clean black or
+            # white. 128 is neutral; nudge slightly toward white to preserve
+            # thin strokes. In grey mode the anti-aliasing is the point, so the
+            # downsampled image is handed on as-is.
+            img = img.point(lambda p: 255 if p > 112 else 0)
 
     # ── URL QR overlay (after HQ downsample — drawn at 1× for crispness) ─────
     if url_qr:
@@ -405,6 +597,9 @@ def render_screen_partial(
     bar_config: dict = None,
     draw_status: bool = True,
     cursor_style: str = 'block',
+    sgr: bool = True,
+    heavy_base: bool = False,
+    conditions: str = None,
 ) -> Image.Image:
     """Redraw only changed rows onto cached_img — much faster than a full render.
 
@@ -415,6 +610,7 @@ def render_screen_partial(
     Mutates and returns cached_img directly; no allocation."""
     font = _find_mono_font(font_path, font_size)
     cw, ch = _char_size(font)
+    faces = _find_faces(font_path, font_size, heavy_base)
     bg = 0 if dark_mode else 255
     fg = 255 if dark_mode else 0
     visible_rows = max(1, TERMINAL_H // ch)
@@ -441,26 +637,17 @@ def render_screen_partial(
             x = col_idx * cw
             if x >= terminal_width:
                 break
-            char = row[col_idx]
-            is_cursor    = (row_idx == screen.cursor.y and col_idx == screen.cursor.x)
-            cell_inverted = bool(char.reverse)
-            if is_cursor and cursor_style == 'block':
-                cell_inverted = not cell_inverted
-            cell_fg = bg if cell_inverted else fg
-            cell_bg = fg if cell_inverted else bg
-            if cell_bg != bg:
-                draw.rectangle([x, y, x + cw - 1, y + ch - 1], fill=cell_bg)
-            glyph = char.data
-            if glyph and glyph != ' ':
-                draw.text((x, y), glyph, font=font, fill=cell_fg)
-            if is_cursor and cursor_style != 'block':
-                bar_h = max(2, ch // 6)
-                draw.rectangle([x, y + ch - bar_h, x + cw - 1, y + ch - 1], fill=fg)
+            _draw_cell(
+                draw, x, y, cw, ch, row[col_idx], fg, bg, faces, 1,
+                cursor=(row_idx == screen.cursor.y and col_idx == screen.cursor.x),
+                cursor_style=cursor_style, sgr=sgr,
+            )
 
     if draw_status:
         _draw_status_bar(draw, font_size, fg, bg, terminal_width,
                          status_info=status_info, alerts=alerts, scale=1,
-                         net_stats=net_stats, bar_config=bar_config)
+                         net_stats=net_stats, bar_config=bar_config,
+                         conditions=conditions)
 
     if url_qr:
         _draw_url_qr(cached_img, url_qr, terminal_width)
@@ -479,10 +666,13 @@ def render_pane(
     font_path: str = '',
     focused: bool = True,
     cursor_style: str = 'block',
+    sgr: bool = True,
+    heavy_base: bool = False,
 ) -> 'Image.Image':
     """Render a pyte screen into a (pane_w × pane_h) PIL image for split-pane display."""
     font = _find_mono_font(font_path, font_size)
     cw, ch = _char_size(font)
+    faces = _find_faces(font_path, font_size, heavy_base)
     bg = 0 if dark_mode else 255
     fg = 255 if dark_mode else 0
     img = Image.new('L', (pane_w, pane_h), bg)
@@ -500,21 +690,12 @@ def render_pane(
             x = col_idx * cw
             if x >= pane_w:
                 break
-            char = row[col_idx]
-            is_cursor = (focused and row_idx == screen.cursor.y and col_idx == screen.cursor.x)
-            cell_inverted = bool(char.reverse)
-            if is_cursor and cursor_style == 'block':
-                cell_inverted = not cell_inverted
-            cell_fg = bg if cell_inverted else fg
-            cell_bg = fg if cell_inverted else bg
-            if cell_bg != bg:
-                draw.rectangle([x, y, x + cw - 1, y + ch - 1], fill=cell_bg)
-            glyph = char.data
-            if glyph and glyph != ' ':
-                draw.text((x, y), glyph, font=font, fill=cell_fg)
-            if is_cursor and cursor_style != 'block':
-                bar_h = max(2, ch // 6)
-                draw.rectangle([x, y + ch - bar_h, x + cw - 1, y + ch - 1], fill=fg)
+            _draw_cell(
+                draw, x, y, cw, ch, row[col_idx], fg, bg, faces, 1,
+                cursor=(focused and row_idx == screen.cursor.y
+                        and col_idx == screen.cursor.x),
+                cursor_style=cursor_style, sgr=sgr,
+            )
     return img
 
 
@@ -531,6 +712,9 @@ def render_split_lr(
     alerts: list = None,
     bar_config: dict = None,
     cursor_style: str = 'block',
+    sgr: bool = True,
+    heavy_base: bool = False,
+    conditions: str = None,
 ) -> 'Image.Image':
     """Render two panes side-by-side (left/right) into an 800×480 image."""
     bg = 0 if dark_mode else 255
@@ -540,9 +724,11 @@ def render_split_lr(
     pane_h = TERMINAL_H
 
     p0 = render_pane(pane0, half_w, pane_h, font_size, dark_mode, font_path,
-                     focused=(focus == 0), cursor_style=cursor_style)
+                     focused=(focus == 0), cursor_style=cursor_style,
+                     sgr=sgr, heavy_base=heavy_base)
     p1 = render_pane(pane1, half_w, pane_h, font_size, dark_mode, font_path,
-                     focused=(focus == 1), cursor_style=cursor_style)
+                     focused=(focus == 1), cursor_style=cursor_style,
+                     sgr=sgr, heavy_base=heavy_base)
 
     img.paste(p0, (0, 0))
     img.paste(p1, (half_w + SPLIT_DIVIDER_W, 0))
@@ -556,11 +742,31 @@ def render_split_lr(
 
     _draw_status_bar(draw, font_size, fg, bg, W,
                      status_info=status_info, alerts=alerts, scale=1,
-                     bar_config=bar_config)
+                     bar_config=bar_config, conditions=conditions)
     return img
 
 
 # ── Status bar ────────────────────────────────────────────────────────────────
+
+def _text_w(draw: ImageDraw.ImageDraw, text: str, font: _Font) -> int:
+    if not text:
+        return 0
+    try:
+        return int(draw.textlength(text, font=font))
+    except AttributeError:
+        return int(font.getbbox(text)[2])
+
+
+def _fit(draw: ImageDraw.ImageDraw, text: str, font: _Font, max_px: int) -> str:
+    """Trim `text` from the right until it fits in max_px, marking the cut."""
+    if max_px <= 0:
+        return ''
+    if _text_w(draw, text, font) <= max_px:
+        return text
+    while text and _text_w(draw, text + '…', font) > max_px:
+        text = text[:-1]
+    return (text + '…') if text else ''
+
 
 def _draw_status_bar(
     draw: ImageDraw.ImageDraw,
@@ -573,8 +779,16 @@ def _draw_status_bar(
     scale: int = 1,
     net_stats: dict = None,
     bar_config: dict = None,
+    conditions: str = None,
 ):
-    """Single-line status bar: time · CWD:branch · IP/WiFi · net speeds (or alert)."""
+    """Single-line status bar: time · CWD:branch · IP/WiFi · net speeds (or alert).
+
+    `conditions` is drawn right-aligned in a slot of its own and is deliberately
+    outside the alert rotation. Alerts are *events* — they fire once and age
+    out — but some things the panel is glanced at for are *states* that stay
+    true ("claude is waiting"), and routing those through the same short-lived
+    channel meant the line scrolled away while the condition still held.
+    """
     y0    = (TAB_BAR_H + TERMINAL_H) * scale
     H_s   = H * scale
     sfont = _find_mono_font('', 10 * scale)
@@ -583,6 +797,16 @@ def _draw_status_bar(
     bc    = bar_config or {}
 
     draw.rectangle([0, y0, terminal_width, H_s], fill=fg)
+
+    # Right-hand condition slot, claimed before anything else is laid out.
+    left_limit = terminal_width - x_pad
+    if conditions:
+        cond = _fit(draw, conditions, sfont, max(0, terminal_width // 2))
+        if cond:
+            cw_px = _text_w(draw, cond, sfont)
+            draw.text((terminal_width - x_pad - cw_px, y0 + pad), cond,
+                      font=sfont, fill=bg)
+            left_limit = terminal_width - x_pad - cw_px - 2 * x_pad
 
     cwd      = status_info[1] if status_info and len(status_info) > 1 else ''
     branch   = status_info[2] if status_info and len(status_info) > 2 else ''
@@ -593,7 +817,7 @@ def _draw_status_bar(
 
     active = alerts or []
     if active:
-        draw.text((x_pad, y0 + pad), f'⚠ {active[0]}', font=sfont, fill=bg)
+        text = f'⚠ {active[0]}'
     else:
         parts = []
         if bc.get('show_time', True):
@@ -616,4 +840,7 @@ def _draw_status_bar(
             parts.append(f'up {uptime}')
         if not parts:
             parts = [time_str]  # always show something
-        draw.text((x_pad, y0 + pad), '  '.join(parts), font=sfont, fill=bg)
+        text = '  '.join(parts)
+
+    draw.text((x_pad, y0 + pad), _fit(draw, text, sfont, left_limit - x_pad),
+              font=sfont, fill=bg)

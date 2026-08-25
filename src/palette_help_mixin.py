@@ -297,8 +297,7 @@ class PaletteHelpMixin:
         self._help_sheet_pages = pages
         self._help_sheet_idx = 0
         self._help_sheet_active = True
-        self._driver.full_refresh(pages[0], reason='help-sheet')
-        self._last_image = pages[0]
+        self._push_static(pages[0], reason='help-sheet')
         logger.info('Command sheet shown (%d page(s))', len(pages))
 
     def _settings_url(self) -> str:
@@ -330,9 +329,8 @@ class PaletteHelpMixin:
                 idx = self._help_sheet_idx + step
                 if 0 <= idx < len(self._help_sheet_pages):
                     self._help_sheet_idx = idx
-                    img = self._help_sheet_pages[idx]
-                    self._driver.full_refresh(img, reason='help-sheet')
-                    self._last_image = img
+                    self._push_static(self._help_sheet_pages[idx],
+                                      reason='help-sheet')
                 return data
         # Any other key closes it, and is swallowed so it doesn't land in the
         # shell underneath — same convention as the Markdown viewer.

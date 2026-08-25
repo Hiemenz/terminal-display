@@ -59,6 +59,11 @@ class AttentionWatcher:
         self.min_seconds = min_seconds
         # tab key → (last state, when it started)
         self._state: dict = {}
+        # Sessions that have announced themselves and are *still* stopped.
+        # The announcement is an event and ages out of the alert rotation; this
+        # is the condition behind it, which stays true until the session gets
+        # its answer. tab key → (state, label).
+        self._pending: dict = {}
 
     def update(self, tab_key, state: str, label: str,
                now: float) -> Optional[str]:
@@ -67,15 +72,41 @@ class AttentionWatcher:
         if state == previous:
             return None
         self._state[tab_key] = (state, now)
+        # Whatever it is doing now, it is no longer stopped on the old answer.
+        if state not in (WAITING, APPROVAL):
+            self._pending.pop(tab_key, None)
         if previous != WORKING or state not in (WAITING, APPROVAL):
             return None
         if (now - since) < self.min_seconds:
             return None
+        self._pending[tab_key] = (state, label)
         verb = 'needs you' if state == APPROVAL else 'is waiting'
         return 'claude %s (%s)' % (verb, label)
 
     def forget(self, tab_key) -> None:
         self._state.pop(tab_key, None)
+        self._pending.pop(tab_key, None)
 
     def tracked(self) -> dict:
         return dict(self._state)
+
+    def pending(self) -> dict:
+        """Sessions that announced themselves and have not been answered yet."""
+        return dict(self._pending)
+
+    def condition(self) -> str:
+        """One short line for the status bar's condition slot, or ''.
+
+        Deliberately not routed through the alert rotation: an alert is an
+        event that fires once and ages out, but "claude is waiting" stays true
+        until someone answers it, and the notice was scrolling away while the
+        session was still stopped.
+        """
+        if not self._pending:
+            return ''
+        states = [state for state, _ in self._pending.values()]
+        verb = 'needs you' if APPROVAL in states else 'waiting'
+        if len(self._pending) == 1:
+            (_, label), = self._pending.values()
+            return 'claude %s (%s)' % (verb, label) if label else 'claude %s' % verb
+        return 'claude ×%d %s' % (len(self._pending), verb)
