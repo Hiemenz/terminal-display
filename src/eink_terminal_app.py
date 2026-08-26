@@ -736,10 +736,12 @@ class EinkTerminal(
             # Must be a flash (ordered _FULL task): full_refresh(flash=False) only
             # sets _pending_partial, which the sleep() below immediately cancels —
             # the screensaver would never reach the panel.
-            # dither=True: a photograph in four flat bands looks far worse
-            # than four dithered ones.
-            self._push_static(img, reason='screensaver', dither=True)
+            # Photos render better in 1-bit Floyd-Steinberg at full resolution
+            # than in 4-grey; text gains from 4-grey but photographs do not.
+            self._driver.flash_refresh(img, reason='screensaver')
             self._last_image = img
+            self._last_full_refresh_mono = time.monotonic()
+            self._needs_periodic_flash = False
             logger.info('Screensaver activated — img=%s cycle=%s',
                         os.path.basename(image_path), self._screensaver_is_cycle)
         except Exception as e:
