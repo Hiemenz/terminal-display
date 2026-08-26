@@ -485,9 +485,10 @@ class EinkTerminal(
         away while the session was still stopped.
         """
         try:
-            return self._attention_watcher.condition()
+            cond = self._attention_watcher.condition()
         except Exception:
-            return ''
+            cond = ''
+        return cond or 'Ctrl+/ help'
 
     def _gray_rerender(self) -> bool:
         """Redraw the current screen in four-level grey, anti-aliasing intact.
