@@ -53,7 +53,7 @@ terminal_flash_idle_gap: 30
 # eink_grayscale covers those: the lock screen (a photograph in four dithered
 # levels instead of two), the Markdown viewer, the command sheet, and pushed
 # text/cards.
-eink_grayscale: true
+eink_grayscale: false
 
 # …and the terminal itself. The 1-bit path renders glyphs at 2× and then
 # thresholds the greys away, because that is what makes text crisp when every
@@ -63,7 +63,7 @@ eink_grayscale: true
 # colours become ink weights, so a diff or a build log regains its structure.
 # Seconds of no keyboard input before that happens; 0 = off. Keep it well below
 # display_sleep_minutes or the panel sleeps before it fires.
-terminal_gray_idle_seconds: 20
+terminal_gray_idle_seconds: 0
 
 # Content-adaptive DU waveform: heavy/inverse content (TUIs like htop/vim) is
 # driven with more frames so it fully transitions and ghosts less; light text

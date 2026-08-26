@@ -15,7 +15,7 @@ import display_eink as de
 logging.disable(logging.WARNING)
 
 # (0x10 plane bit, 0x13 plane bit) the controller reads per pixel.
-PAIRS = {0x00: (1, 1), 0x80: (0, 1), 0xC0: (1, 0), 0xFF: (0, 0)}
+PAIRS = {0x00: (1, 1), 0x55: (0, 1), 0xAA: (1, 0), 0xFF: (0, 0)}
 
 
 def _bit(plane, x, y, width=800):

@@ -113,7 +113,7 @@ def _frame_is_blank(buf, row_bytes: int = 100, threshold: float = 0.85) -> bool:
 
 # The four levels the panel can hold, as 8-bit grey values. Anything rendered
 # for grey mode is quantised onto these before being split into bit-planes.
-GRAY_LEVELS = (0x00, 0x80, 0xC0, 0xFF)
+GRAY_LEVELS = (0x00, 0x55, 0xAA, 0xFF)
 
 
 def quantize_4gray(image: Image.Image, dither: bool = True) -> Image.Image:

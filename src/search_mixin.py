@@ -78,15 +78,41 @@ class SearchMixin:
             pass
         return b''
 
+    def _find_query_in_viewport(self, query: str):
+        """Return (row, col_start, col_end) of the first occurrence of query
+        in the visible screen buffer, or None if not found."""
+        q = query.lower()
+        for row in range(self._screen.lines):
+            line = ''.join(
+                self._screen.buffer[row][c].data
+                for c in range(self._screen.columns)
+            )
+            col = line.lower().find(q)
+            if col >= 0:
+                return (row, col, col + len(query) - 1)
+        return None
+
     def _search_confirm(self):
-        """Jump to selected search result and close the overlay."""
+        """Jump to selected search result, close the overlay, and enter copy
+        mode with the match pre-selected so the user can yank immediately."""
         if self._search_results and 0 <= self._search_idx < len(self._search_results):
             _, is_history, idx = self._search_results[self._search_idx]
+            query = self._search_query
             if is_history:
                 self._search_scroll_to_history(idx)
-        self._search_active = False
-        self._search_query = ''
-        self._search_results = []
+            match = self._find_query_in_viewport(query)
+            self._search_active = False
+            self._search_query = ''
+            self._search_results = []
+            if match:
+                row, col_start, col_end = match
+                self._enter_copy_mode(row, col_end, anchor_row=row, anchor_col=col_start)
+            else:
+                self._enter_copy_mode(0, 0)
+        else:
+            self._search_active = False
+            self._search_query = ''
+            self._search_results = []
         self._render(force_full=True)
 
     def _search_scroll_to_history(self, history_idx: int):
