@@ -53,7 +53,7 @@ terminal_flash_idle_gap: 30
 # eink_grayscale covers those: the lock screen (a photograph in four dithered
 # levels instead of two), the Markdown viewer, the command sheet, and pushed
 # text/cards.
-eink_grayscale: true
+eink_grayscale: false
 
 # …and the terminal itself. The 1-bit path renders glyphs at 2× and then
 # thresholds the greys away, because that is what makes text crisp when every
