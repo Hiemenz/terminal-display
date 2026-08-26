@@ -488,7 +488,7 @@ class EinkTerminal(
             cond = self._attention_watcher.condition()
         except Exception:
             cond = ''
-        return cond or 'Ctrl+/ help'
+        return cond or 'type: commands'
 
     def _gray_rerender(self) -> bool:
         """Redraw the current screen in four-level grey, anti-aliasing intact.
