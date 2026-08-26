@@ -67,11 +67,13 @@ def test_sgr_off_flattens_every_attribute():
 
 
 def test_colour_is_ignored_in_one_bit_mode():
-    """There is nowhere for colour to go in 1-bit, and inventing a second
-    treatment for it would only add noise on top of bold and underline."""
-    plain = _ink(_render('\x1b[0mabc'))
-    for colour in ('\x1b[31m', '\x1b[32m', '\x1b[36m'):
+    """In 1-bit, red/yellow are promoted to bold for visual weight; neutral
+    colours (green, cyan) stay at the base weight so errors stand out."""
+    plain  = _ink(_render('\x1b[0mabc'))
+    # Neutral colours must not change weight.
+    for colour in ('\x1b[32m', '\x1b[36m'):   # green, cyan
         assert _ink(_render(colour + 'abc')) == plain
+    # High-signal colours gain weight (covered in detail by later tests).
 
 
 def test_colour_becomes_ink_weight_in_grey_mode():
@@ -125,3 +127,49 @@ def test_cursor_is_visible_on_an_already_reversed_cell(style):
     without = tr.render_screen(screen, 14, dark_mode=False, hq=False,
                                cursor_style=style)
     assert _ink(with_cursor, cell) != _ink(without, cell)
+
+
+# ── Color → bold promotion in 1-bit mode ──────────────────────────────────────
+
+def test_red_fg_renders_bolder_than_default_in_1bit():
+    """Red text (errors, deleted diff lines) should gain visual weight in 1-bit."""
+    normal = _ink(_render('\x1b[0mHELLO'))
+    red    = _ink(_render('\x1b[31mHELLO'))
+    assert red > normal
+
+
+def test_yellow_fg_renders_bolder_than_default_in_1bit():
+    """Yellow/brown (warnings) gets the same promotion as red."""
+    normal = _ink(_render('\x1b[0mHELLO'))
+    yellow = _ink(_render('\x1b[33mHELLO'))
+    assert yellow > normal
+
+
+def test_green_fg_stays_regular_in_1bit():
+    """Green is success/added text — it should NOT be promoted to bold."""
+    normal = _ink(_render('\x1b[0mHELLO'))
+    green  = _ink(_render('\x1b[32mHELLO'))
+    assert green == normal
+
+
+def test_red_fg_not_promoted_in_gray_mode():
+    """In grey mode colour already becomes an ink weight — no extra bold."""
+    normal_gray = _ink(_render('\x1b[0mHELLO', gray=True))
+    red_gray    = _ink(_render('\x1b[31mHELLO', gray=True))
+    assert red_gray <= normal_gray
+
+
+def test_red_fg_already_bold_not_double_struck(make_app):
+    """Red + explicit SGR bold should not hit the synthetic double-strike twice."""
+    bold_red    = _ink(_render('\x1b[1;31mHELLO'))
+    just_bold   = _ink(_render('\x1b[1mHELLO'))
+    # Both explicitly bold — ink should be similar (not runaway double-striking).
+    assert abs(bold_red - just_bold) <= just_bold // 2
+
+
+def test_red_fg_inverted_not_promoted():
+    """A selected/reversed red cell must not be additionally bolded."""
+    normal_inv = _ink(_render('\x1b[7mHELLO'))
+    red_inv    = _ink(_render('\x1b[7;31mHELLO'))
+    # Both inverted — ink levels dominated by the fill, not glyph weight.
+    assert abs(red_inv - normal_inv) <= normal_inv // 4
