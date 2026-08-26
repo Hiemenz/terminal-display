@@ -182,6 +182,13 @@ _ANSI_INK = {
     'default': 1.00,
 }
 
+# In 1-bit mode there is nowhere for colour to go as a shade, so these colours
+# are promoted to bold instead. Red = errors / deleted diff lines; brown = ANSI
+# yellow = warnings. Green and cyan stay regular — they are typically success or
+# info text, and making everything bold defeats the contrast that makes errors
+# stand out.
+_COLOR_PROMOTES_BOLD = frozenset({'red', 'brown'})
+
 
 def _ink(color, fg: int, bg: int) -> int:
     """Blend `color`'s ink weight between the background and full foreground."""
@@ -233,6 +240,11 @@ def _draw_cell(draw: ImageDraw.ImageDraw, x: int, y: int, cw: int, ch: int,
 
     font = faces.regular
     bold = bool(sgr and getattr(char, 'bold', False))
+    # 1-bit has no shade for colour, so red/yellow are promoted to bold so that
+    # errors and warnings keep visual weight (git diff, grep, build output).
+    if sgr and not gray and not bold and not inverted:
+        if getattr(char, 'fg', 'default') in _COLOR_PROMOTES_BOLD:
+            bold = True
     if bold and not faces.synthetic:
         font = faces.bold
 
