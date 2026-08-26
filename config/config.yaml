@@ -63,7 +63,7 @@ eink_grayscale: true
 # colours become ink weights, so a diff or a build log regains its structure.
 # Seconds of no keyboard input before that happens; 0 = off. Keep it well below
 # display_sleep_minutes or the panel sleeps before it fires.
-terminal_gray_idle_seconds: 20
+terminal_gray_idle_seconds: 0
 
 # Content-adaptive DU waveform: heavy/inverse content (TUIs like htop/vim) is
 # driven with more frames so it fully transitions and ghosts less; light text
