@@ -198,6 +198,25 @@ class EinkTerminal(
         self._status_extras  = config.get('terminal_status_bar_extras', True)
         self._cursor_style   = config.get('terminal_cursor_style', 'block')
 
+        # ── SGR attributes and 4-grey rendering ───────────────────────────────
+        # pyte tracks nine per-cell attributes; the renderer used to read one
+        # of them (reverse), so every program's use of weight and colour came
+        # out as identical black text.
+        self._sgr = config.get('terminal_sgr_attributes', True)
+        # Keeps the pre-SGR look, where the base face was itself the bold one
+        # ("bold for e-ink") and bold cells are double-struck on top of it.
+        self._heavy_base = config.get('terminal_font_heavy_base', False)
+        # Four-level greyscale for screens that are drawn once and then looked
+        # at — the lock screen, Markdown, the command sheet. Slow (a whole-panel
+        # write, seconds) so it never touches the typing path.
+        self._gray_screens = config.get('eink_grayscale', True)
+        # …and the terminal itself, re-rendered with its anti-aliasing intact
+        # once typing stops for this many seconds. 0 = off.
+        self._gray_idle = float(config.get('terminal_gray_idle_seconds', 0) or 0)
+        # The _last_input value the grey re-render last fired at, so it fires
+        # once per idle period without every input site having to reset a flag.
+        self._gray_at_input = None
+
         # Custom shell prompt (PS1) injected after the shell's rc loads. Each
         # part can be toggled on/off from config / the on-display editor.
         self._prompt_custom    = config.get('terminal_prompt_custom', False)
@@ -457,6 +476,82 @@ class EinkTerminal(
         # editor can be opened by typing, not just F6. Must run before the shell
         # is spawned so the child (and tmux) inherit the updated PATH.
         self._install_command_scripts()
+    def _status_condition(self) -> str:
+        """The sustained-state line for the status bar's right-hand slot.
+
+        Alerts are events — they fire once and age out of the rotation — but
+        "claude is waiting" is a *state* that stays true until someone answers
+        it, and routing it through the alert channel meant the notice scrolled
+        away while the session was still stopped.
+        """
+        try:
+            return self._attention_watcher.condition()
+        except Exception:
+            return ''
+
+    def _gray_rerender(self) -> bool:
+        """Redraw the current screen in four-level grey, anti-aliasing intact.
+
+        The 1-bit path renders glyphs at 2× and then thresholds the greys away,
+        because that is what makes text crisp when every pixel must be black or
+        white. Once typing stops there is no longer any reason to pay that
+        cost: the same frame in the panel's 4-grey mode keeps the anti-aliasing
+        (and, in grey, colour becomes ink weight), which is markedly easier to
+        read at small font sizes. It is a slow whole-panel write, so it only
+        ever happens after the user has gone quiet, once per idle period.
+        """
+        if self._screen is None:
+            return False
+        try:
+            tw = SPLIT_TERMINAL_W if self._split_view else 800
+            img = render_screen(
+                self._screen,
+                self._font_size,
+                dark_mode=self._dark_mode,
+                font_path=self._font_path,
+                terminal_width=tw,
+                status_info=self._get_status_info(),
+                hq=True,
+                net_stats=dict(self._net_stats) if self._net_stats else None,
+                bar_config=self._bar_config,
+                cursor_style=self._cursor_style,
+                sgr=self._sgr,
+                heavy_base=self._heavy_base,
+                gray=True,
+                conditions=self._status_condition(),
+            )
+        except Exception as e:
+            logger.debug('Grey re-render failed: %s', e)
+            return False
+        # dither=False: the anti-aliasing already is the gradient, and
+        # Floyd–Steinberg on top of it just speckles the glyph edges.
+        self._driver.gray_refresh(img, dither=False, reason='gray-idle')
+        # The cached 1-bit frame no longer matches the glass; the driver has
+        # flagged itself for a baseline, and the app must repaint in full
+        # rather than diffing rows against a frame that was never shown.
+        self._img_cache = None
+        self._last_full_refresh_mono = time.monotonic()
+        self._needs_periodic_flash = False
+        return True
+
+    def _push_static(self, img, reason: str, dither: bool = False):
+        """Draw a screen that is looked at rather than typed into.
+
+        The lock screen, Markdown pages and the command sheet are rendered once
+        and then sat on, so they can afford the panel's slow 4-grey write — and
+        they are exactly the frames that lose the most to 1-bit, since PIL
+        anti-aliases their text and getbuffer()'s convert('1') then dithers
+        those grey edges into speckle. Falls back to the ordinary flash when
+        grey is off or unavailable.
+        """
+        if self._gray_screens:
+            self._driver.gray_refresh(img, dither=dither, reason=reason)
+        else:
+            self._driver.flash_refresh(img, reason=reason)
+        self._last_image = img
+        self._last_full_refresh_mono = time.monotonic()
+        self._needs_periodic_flash = False
+
     def _force_full_refresh(self):
         if self._last_image is not None:
             self._driver.flash_refresh(self._last_image, deep=True,
@@ -538,7 +633,7 @@ class EinkTerminal(
         try:
             from render import render_text_message
             img = render_text_message(text, label, self._config)
-            self._driver.full_refresh(img, reason='text-message')
+            self._push_static(img, reason='text-message')
             self._last_image = img
             self._in_text_message = True
             self._screensaver_show_mono = time.monotonic()
@@ -553,7 +648,7 @@ class EinkTerminal(
         try:
             from render import render_card
             img = render_card(card, self._config)
-            self._driver.full_refresh(img, reason='card')
+            self._push_static(img, reason='card')
             self._last_image = img
             self._in_text_message = True   # any key dismisses it, like a message
             self._screensaver_show_mono = time.monotonic()
@@ -641,7 +736,9 @@ class EinkTerminal(
             # Must be a flash (ordered _FULL task): full_refresh(flash=False) only
             # sets _pending_partial, which the sleep() below immediately cancels —
             # the screensaver would never reach the panel.
-            self._driver.flash_refresh(img, reason='screensaver')
+            # dither=True: a photograph in four flat bands looks far worse
+            # than four dithered ones.
+            self._push_static(img, reason='screensaver', dither=True)
             self._last_image = img
             logger.info('Screensaver activated — img=%s cycle=%s',
                         os.path.basename(image_path), self._screensaver_is_cycle)
@@ -896,6 +993,12 @@ class EinkTerminal(
         titles = {tab.tmux_session: (tab.title or ('tab %d' % (idx + 1)))
                   for idx, tab in enumerate(self._tabs) if tab.tmux_session}
 
+        # The standing condition can change without any message firing — a
+        # session going back to work clears it, and that has to repaint the bar
+        # too or the stale "claude is waiting" sits there until the status-bar
+        # throttle next expires, minutes after it stopped being true.
+        was = self._attention_watcher.condition()
+
         changed = False
         live_keys = set()
         for line in r.stdout.splitlines():
@@ -925,7 +1028,7 @@ class EinkTerminal(
                 changed = True
         for key in set(self._attention_watcher.tracked()) - live_keys:
             self._attention_watcher.forget(key)   # pane closed, or claude exited
-        return changed
+        return changed or self._attention_watcher.condition() != was
 
     def _consume_screen_flags(self, screen, active: bool) -> None:
         """Turn a screen's post-feed flags into hints for the next render.
@@ -991,7 +1094,8 @@ class EinkTerminal(
                      key=lambda kv: -kv[1])[:3]
         lines = [
             'REFRESH HUD',
-            f"part {s['partial']}  reg {s['region']}  full {s['full']}",
+            f"part {s['partial']}  reg {s['region']}  full {s['full']}"
+            + (f"  grey {s['gray']}" if s.get('gray') else ''),
             f"bytes {s['bytes']}  du {s['du_frames']}f  font {self._font_size}",
             f"last flash {int(age)}s ago" if age is not None else 'last flash --',
             f"why {s.get('last_reason') or '--'}  {s.get('flashes_per_min', 0)}/min",
@@ -1125,6 +1229,9 @@ class EinkTerminal(
                 alerts=alerts if alerts else None,
                 bar_config=self._bar_config,
                 cursor_style=self._cursor_style,
+                sgr=self._sgr,
+                heavy_base=self._heavy_base,
+                conditions=self._status_condition(),
             )
             self._img_cache = None   # split bypasses incremental cache
             self._last_cursor_row = self._screen.cursor.y
@@ -1197,6 +1304,9 @@ class EinkTerminal(
                 bar_config=self._bar_config,
                 draw_status=draw_status,
                 cursor_style=self._cursor_style,
+                sgr=self._sgr,
+                heavy_base=self._heavy_base,
+                conditions=self._status_condition(),
             )
         else:
             # A full render always repaints the status bar; keep the throttle in sync.
@@ -1217,6 +1327,9 @@ class EinkTerminal(
                 bar_config=self._bar_config,
                 select=self._copy_render_range() if self._copy_active else None,
                 cursor_style=self._cursor_style,
+                sgr=self._sgr,
+                heavy_base=self._heavy_base,
+                conditions=self._status_condition(),
             )
             # Overlay split-view sidebar
             if self._split_view:
@@ -1470,6 +1583,23 @@ class EinkTerminal(
                     self._in_text_message = False
                 self._show_help_sheet()
                 continue
+
+            # ── Idle grey re-render ───────────────────────────────────────────
+            # Typing gets the crisp 1-bit path; reading gets the same frame in
+            # four-level grey with its anti-aliasing intact. Fires once per
+            # idle period — comparing against the _last_input it fired at is
+            # what makes it once, without every input site having to know.
+            if (self._gray_idle > 0 and not panel_asleep and not in_screensaver
+                    and not self._in_text_message
+                    and not getattr(self, '_markdown_active', False)
+                    and self._gray_at_input != self._last_input):
+                if (now - self._last_input) >= self._gray_idle:
+                    if self._gray_rerender():
+                        self._gray_at_input = self._last_input
+                    else:
+                        # Don't retry a failing re-render every loop.
+                        self._gray_at_input = self._last_input
+                    continue
 
             # ── Early panel deep-sleep ────────────────────────────────────────
             # Power the panel down once a shorter idle window passes. E-ink

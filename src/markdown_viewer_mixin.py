@@ -39,8 +39,7 @@ class MarkdownViewerMixin:
         self._markdown_pages = pages
         self._markdown_page_idx = 0
         self._markdown_active = True
-        self._driver.full_refresh(pages[0])
-        self._last_image = pages[0]
+        self._push_static(pages[0], reason='markdown')
 
     def _open_markdown_notes(self):
         """F6 'View notes as Markdown': render the current notes file."""
@@ -65,17 +64,15 @@ class MarkdownViewerMixin:
             data = data.replace(_PGDN, b'')
             if self._markdown_page_idx < len(self._markdown_pages) - 1:
                 self._markdown_page_idx += 1
-                img = self._markdown_pages[self._markdown_page_idx]
-                self._driver.full_refresh(img)
-                self._last_image = img
+                self._push_static(self._markdown_pages[self._markdown_page_idx],
+                                  reason='markdown')
             return data
         if _PGUP in data:
             data = data.replace(_PGUP, b'')
             if self._markdown_page_idx > 0:
                 self._markdown_page_idx -= 1
-                img = self._markdown_pages[self._markdown_page_idx]
-                self._driver.full_refresh(img)
-                self._last_image = img
+                self._push_static(self._markdown_pages[self._markdown_page_idx],
+                                  reason='markdown')
             return data
         # Any other key closes the viewer — mirrors _show_text_message's
         # any-key-to-dismiss convention. Swallowed so it doesn't leak into

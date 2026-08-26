@@ -10,6 +10,12 @@ class _FakeDriver:
     def full_refresh(self, img):
         self.pushed.append(img)
 
+    def gray_refresh(self, img, output_path=None, dither=True, reason=''):
+        self.pushed.append(img)
+
+    def flash_refresh(self, img, output_path=None, deep=False, reason=''):
+        self.pushed.append(img)
+
 
 def _md_app(make_app):
     app = make_app()

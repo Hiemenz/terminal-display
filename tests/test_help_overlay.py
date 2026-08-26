@@ -23,6 +23,12 @@ class _FakeDriver:
     def full_refresh(self, img, output_path=None, flash=False, reason=''):
         self.pushed.append((img, reason))
 
+    def gray_refresh(self, img, output_path=None, dither=True, reason=''):
+        self.pushed.append((img, reason))
+
+    def flash_refresh(self, img, output_path=None, deep=False, reason=''):
+        self.pushed.append((img, reason))
+
 
 def _app_with_tabs(make_app, *titles):
     app = make_app()

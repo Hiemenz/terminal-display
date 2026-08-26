@@ -14,6 +14,9 @@ class _FakeDriver:
     def flash_refresh(self, img, *a, **k):
         self.calls.append('flash')
 
+    def gray_refresh(self, img, *a, **k):
+        self.calls.append('gray')
+
     def sleep(self):
         self.calls.append('sleep')
 
@@ -35,7 +38,7 @@ def test_screensaver_shows_then_sleeps_panel(make_app, monkeypatch):
     monkeypatch.setattr(render_mod, 'render_screensaver',
                         lambda *a, **k: sentinel)
     app._show_screensaver()
-    assert app._driver.calls == ['flash', 'sleep']
+    assert app._driver.calls == ['gray', 'sleep']
     assert app._last_image is sentinel
     assert app._screensaver_show_mono > 0.0
 
@@ -119,7 +122,7 @@ def test_usage_scan_failure_still_shows_the_screensaver(make_app, monkeypatch):
     monkeypatch.setattr('claude_usage.collect_usage',
                         lambda *a, **k: (_ for _ in ()).throw(OSError('boom')))
     app._show_screensaver()
-    assert app._driver.calls == ['flash', 'sleep']
+    assert app._driver.calls == ['gray', 'sleep']
 
 
 def test_usage_panel_can_be_turned_off(make_app):

@@ -156,6 +156,8 @@ _CONFIG_SCHEMA = [
         ['terminal_alert_disk_free_threshold',  'int',    'Disk Free Alert %',     '0 = disabled'],
         ['terminal_alert_ssh_logins',           'bool',   'SSH Login Alerts',      None],
         ['terminal_long_command_seconds',       'int',    'Long Command Notice (s)', 'Announce commands that ran at least this long (0 = off)'],
+        ['terminal_sgr_attributes',             'bool',   'Bold / Underline',      'Honour bold, underline and strikethrough instead of flattening them'],
+        ['terminal_font_heavy_base',            'bool',   'Heavy Base Font',       'Draw normal text in the bold face (bold is then double-struck)'],
     ]],
     # How the panel is driven. The right values are per-panel and per-taste —
     # how much flashing you'll tolerate against how much ghosting — so they
@@ -170,6 +172,8 @@ _CONFIG_SCHEMA = [
         ['terminal_du_frames_text',       'int',    'DU Frames (text)',      'Drive frames for light content — fewer is faster, too few is faint'],
         ['terminal_du_frames_heavy',      'int',    'DU Frames (heavy)',     'Drive frames for dark/inverse content — too few ghosts'],
         ['terminal_du_heavy_threshold',   'float',  'Heavy Threshold',       'Black fraction (0–1) that counts as heavy content'],
+        ['eink_grayscale',                'bool',   '4-Grey Static Screens', 'Lock screen, Markdown and the command sheet in four grey levels'],
+        ['terminal_gray_idle_seconds',    'int',    'Grey Re-render After (s)', 'Redraw the terminal in grey once typing stops (0 = off)'],
     ]],
     ['Screensaver', [
         ['screensaver_sleep_minutes',   'select', 'Sleep After (min)',    [0, 5, 10, 15, 30, 60]],

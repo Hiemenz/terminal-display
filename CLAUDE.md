@@ -53,7 +53,7 @@ python eink_terminal.py         # terminal emulator, live on Pi hardware
 | `eink_terminal.py` | CLI entrypoint. Parses `--local`/`--font-size`/`--config`, builds `EinkTerminal`, calls `.run()` |
 | `src/eink_terminal_app.py` | The app itself: `pty.fork()`'d shell (optionally via tmux), `pyte` screen buffer, hotkeys, tabs, idle-reset/screensaver state machine, main select() loop |
 | `src/evdev_input.py` | Reads raw keycodes from `/dev/input/eventX` (bypasses X11/Wayland), translates to terminal byte sequences — used when a physical keyboard is attached to the Pi directly |
-| `src/terminal_renderer.py` | Renders the `pyte` screen buffer to a PIL image; draws the ambient URL QR overlay, tab bar |
+| `src/terminal_renderer.py` | Renders the `pyte` screen buffer to a PIL image; SGR attributes, the status bar's condition slot, the ambient URL QR overlay, tab bar |
 | `src/alert_monitor.py` | Polls for system conditions, feeds short-lived alerts into the terminal status bar |
 | `src/preview_server.py` | HTTP server: mirrors the display image over LAN, accepts remote/mobile keyboard input into the PTY, serves the on-device settings editor, notes, and clipboard |
 | `src/session_logger.py` | `TabLogger` — optional rotating, ANSI-stripped on-disk log of a tab's output (`terminal_log_enabled`) |
@@ -154,6 +154,18 @@ that just asked for you is no longer a candidate for idle-reset. This is the thi
 for, and a long agent turn looks exactly like idle to everything else here —
 no keyboard input, so the panel deep-sleeps right when the session starts
 wanting you.
+
+The notice lands in two places, because it is two different things. The
+*event* — "claude is waiting (MlbDisplay)" — goes through `alert_monitor` and
+ages out of the rotation like any other alert. The *condition* behind it stays
+true until someone answers, so it also gets a slot of its own on the right of
+the status bar (`AttentionWatcher.condition` → `_status_condition` →
+`_draw_status_bar`'s `conditions=`), outside the rotation, reading `claude
+waiting (MlbDisplay)` or `claude ×2 needs you`. Routing it only through alerts
+meant the line scrolled away while the session was still stopped. It clears
+when the pane goes back to working — answering it is what makes it stop being
+true, not time passing and not the user typing somewhere else. The left-hand
+text is trimmed with `_fit` so the two halves can't overprint.
 
 The signal is the pane's own text, not the transcript on disk: Claude Code
 prints `esc to interrupt` in its footer for as long as it is busy, so its
@@ -268,6 +280,8 @@ web-UI QR code sits inside the Network card.
 - `terminal_claude_attention: true` / `terminal_claude_attention_seconds: 30` / `terminal_claude_attention_interval: 5` / `terminal_claude_attention_wake: true` — status-bar note (and a panel wake) when any `claude` pane stops for an approval or an answer (tmux mode only)
 - `claude_session_lines: 2` — how many live Claude sessions the lock-screen tile lists
 - `terminal_long_command_seconds: 30` — announce a command finishing when it ran at least this long (0 = off, tmux mode only)
+- `terminal_sgr_attributes: true` / `terminal_font_heavy_base: false` — honour bold/underline/strikethrough per cell; heavy_base restores the old uniformly-bold face with bold double-struck on top
+- `eink_grayscale: true` / `terminal_gray_idle_seconds: 20` — four-level greyscale for screens that are drawn once and looked at (lock screen, Markdown, command sheet), and for the terminal itself once typing stops (0 = off)
 - `terminal_notes_file: data/notes.txt` — plain text file opened by the Notes mode/palette entry (in `nano`) and served as raw text at `/notes`
 
 ## Lock Screen: Claude Activity Panel
@@ -346,6 +360,100 @@ second over ~130 MB, so it is cached for `terminal_claude_usage_ttl` seconds
 and only ever runs as the panel goes to sleep. Every part of it is
 defensive — the panel is decoration, and nothing about it may stop the
 display sleeping.
+
+## Text Attributes (SGR)
+
+pyte tracks nine per-cell attributes — `data fg bg bold italics underscore
+strikethrough reverse blink` — and the renderer used to read exactly one of
+them (`reverse`). Everything else flattened to identical black text, which on
+a panel you glance at is the largest single legibility loss available: every
+TUI here encodes its structure in weight and colour (`git diff`, `grep
+--color`, error text, claude's own footer).
+
+`_draw_cell` in `src/terminal_renderer.py` is now the single place a cell is
+drawn, shared by `render_screen`, `render_screen_partial` and `render_pane` so
+the three cannot drift on what an attribute looks like. It honours:
+
+- **bold** → the family's bold face, or a double-strike one pixel right when
+  the family has none (`_Faces.synthetic`).
+- **underscore / strikethrough** → a rule at the cell baseline / mid-height.
+- **reverse** → as before.
+- **fg colour** → an ink weight, *only* in grey renders (`_ANSI_INK`). In 1-bit
+  there is nowhere for colour to go, and inventing a second treatment for it
+  on top of bold and underline would only add noise.
+
+Fonts are `(regular, bold)` **pairs** now (`_mono_families`), and cell metrics
+always come from the *regular* face. That is deliberate: Liberation Mono gives
+its bold face a taller bbox, so measuring per-face would resize the pty
+underneath the shell the moment a bold character appeared. DejaVu's two faces
+have identical metrics at every size, which is what makes this free on this
+device.
+
+The base face used to be DejaVu Sans Mono **Bold** ("bold for e-ink"), so
+turning SGR on necessarily lightens normal text — that contrast is the whole
+point. `terminal_font_heavy_base: true` puts the old uniform weight back, with
+bold double-struck on top.
+
+Two cursor bugs fell out of the same rewrite, both the same shape: a cursor
+drawn against the *screen's* colours rather than the *cell's* becomes invisible
+on an already-inverted cell (inside a copy-mode selection, or on a TUI's
+highlight bar). A block cursor inverted an inverted cell straight back to
+normal; the underline cursor drew its bar in `fg` over a cell whose background
+was already `fg`. The block cursor now outlines instead of flipping, and the
+bar uses `cell_fg`.
+
+## Four-Level Greyscale
+
+The panel is 1-bit for every fast path, but the UC8179 can address four levels
+by driving two bit-planes with the controller's temperature forced (`0xE0`/
+`0xE5`) — the vendor's own approach, no hand-written LUT, which matters because
+a wrong waveform is the one class of bug here that shows up as a
+damaged-looking panel rather than a stack trace. `init_4gray` / `display_4gray`
+in `src/waveshare_epd/epd7in5_V2.py`.
+
+The quantisation and plane packing live in `src/display_eink.py`
+(`quantize_4gray` / `pack_4gray`), not in the driver, so they can be tested
+without a panel — the bit order is exactly the sort of thing that is invisible
+until it renders as garbage. The controller reads a pair per pixel:
+
+```
+(0,0) white   (0,1) dark grey   (1,0) light grey   (1,1) black
+```
+
+It is a slow whole-panel write (seconds, with a flash), so it is only ever for
+frames drawn once and then looked at, via `_push_static`:
+
+- the **lock screen** — a photograph in four dithered levels rather than two
+  (`dither=True`; four *flat* bands would look far worse than four dithered
+  ones),
+- the **Markdown viewer**, the **command sheet**, pushed **text/cards** —
+  which gain the most, because PIL anti-aliases their text and `getbuffer`'s
+  `convert('1')` then dithers those grey edges into speckle,
+- and the terminal itself on idle (below).
+
+`dither=False` is the text setting: the anti-aliasing already *is* the
+gradient, and Floyd–Steinberg on top of it just speckles glyph edges.
+
+A grey frame has no 1-bit equivalent to keep as `_prev_buf`, so `_hw_gray`
+raises `_needs_baseline` and both partial paths turn the next write into one
+clean full refresh. Without it a partial would diff against a frame that was
+never shown and leave the old one smeared underneath.
+
+## Idle Grey Re-render
+
+`terminal_gray_idle_seconds` (default 20, 0 = off). The 1-bit path renders
+glyphs at 2× and then thresholds the greys away, because that is what makes
+text crisp when every pixel must be black or white — it computes the
+anti-aliasing and throws it out. Once typing stops there is no reason to keep
+paying that, so `_gray_rerender` redraws the same frame with `gray=True` (which
+skips the threshold) and pushes it through the 4-grey path. Typing stays fast
+and crisp; reading gets properly rendered text, and in grey the ANSI colours
+become ink weights, so a diff or a build log regains its structure.
+
+It fires once per idle period by comparing against the `_last_input` value it
+last fired at (`_gray_at_input`) — which is what lets it be once-per-idle
+without every input site in the loop having to reset a flag. Keep the value
+well below `display_sleep_minutes` or the panel sleeps before it ever fires.
 
 ## Refresh Behavior & Debugging Flashes
 
