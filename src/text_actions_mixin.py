@@ -109,19 +109,34 @@ class TextActionsMixin:
 
     # ─── Copy mode (Ctrl+Space) ────────────────────────────────────────────────
 
-    def _toggle_copy_mode(self):
-        if self._copy_active:
-            self._copy_active = False
-            self._render()
-            return
-        self._copy_row = min(self._screen.cursor.y, self._screen.lines - 1)
-        self._copy_col = min(self._screen.cursor.x, self._screen.columns - 1)
-        self._copy_anchor = None
+    def _enter_copy_mode(self, row: int, col: int,
+                         anchor_row: int = None, anchor_col: int = None):
+        """Open copy mode with the cursor at (row, col).
+
+        If anchor_row/anchor_col are given the selection is pre-set — used
+        after a search confirm to land with the match already highlighted.
+        """
+        max_row = self._screen.lines - 1
+        max_col = self._screen.columns - 1
+        self._copy_row = min(max(0, row), max_row)
+        self._copy_col = min(max(0, col), max_col)
+        self._copy_anchor = (
+            (min(max(0, anchor_row), max_row),
+             min(max(0, anchor_col), max_col))
+            if anchor_row is not None else None
+        )
         self._copy_active = True
         self._palette_active = self._clipboard_active = False
         self._prockill_active = self._svcmgr_active = self._power_active = False
         self._sshpick_active = self._search_active = False
         self._help_active = False
+
+    def _toggle_copy_mode(self):
+        if self._copy_active:
+            self._copy_active = False
+            self._render()
+            return
+        self._enter_copy_mode(self._screen.cursor.y, self._screen.cursor.x)
         self._render()
 
     def _copy_render_range(self) -> tuple:
