@@ -4,10 +4,8 @@ Ctrl+F finds a match; Enter closes the overlay and opens copy mode with the
 matched text pre-selected so the user can yank immediately.
 """
 import pyte
-import pytest
 
 from terminal_state import _Tab
-
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 

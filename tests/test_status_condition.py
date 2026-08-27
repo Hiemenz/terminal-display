@@ -150,3 +150,39 @@ def test_grey_rerender_reports_failure_instead_of_raising(make_app):
     app._get_status_info = lambda: (_ for _ in ()).throw(RuntimeError('boom'))
     assert app._gray_rerender() is False
     assert app._driver.calls == []
+
+
+def _gray_guard(app) -> bool:
+    """The grey re-render gate, mirroring the loop condition in eink_terminal_app."""
+    return (app._gray_idle > 0
+            and not getattr(app, '_in_text_message', False)
+            and not getattr(app, '_markdown_active', False)
+            and not getattr(app, '_big_text_active', False)
+            and not getattr(app, '_help_sheet_active', False))
+
+
+def _overlay_app(make_app):
+    app = _idle_app(make_app)
+    app._gray_idle = 20.0
+    app._in_text_message = False
+    app._help_sheet_active = False
+    return app
+
+
+def test_grey_rerender_skipped_while_help_sheet_active(make_app):
+    """Outboard input that resets _last_input must not let the grey re-render
+    overwrite the help sheet with the terminal 20 s later."""
+    app = _overlay_app(make_app)
+    app._help_sheet_active = True
+    assert _gray_guard(app) is False
+
+
+def test_grey_rerender_skipped_while_big_text_active(make_app):
+    app = _overlay_app(make_app)
+    app._big_text_active = True
+    assert _gray_guard(app) is False
+
+
+def test_grey_rerender_allowed_when_no_overlay(make_app):
+    app = _overlay_app(make_app)
+    assert _gray_guard(app) is True

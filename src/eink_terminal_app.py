@@ -1595,6 +1595,7 @@ class EinkTerminal(
             if (self._gray_idle > 0 and not panel_asleep and not in_screensaver
                     and not self._in_text_message
                     and not getattr(self, '_markdown_active', False)
+                    and not self._big_text_active and not self._help_sheet_active
                     and self._gray_at_input != self._last_input):
                 if (now - self._last_input) >= self._gray_idle:
                     if self._gray_rerender():
