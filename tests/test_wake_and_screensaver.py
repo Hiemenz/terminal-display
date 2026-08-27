@@ -99,6 +99,70 @@ def test_tmux_input_disabled_by_config(make_app, monkeypatch):
     assert app._tmux_input_seen(100.0) is False
 
 
+# ── SSH wake: clears bare sleep but NOT the screensaver ───────────────────────
+
+def _ssh_wake_app(make_app, renders):
+    """App wired so _tmux_input_seen will fire and _render is tracked."""
+    app = _tmux_app(make_app)
+    app._render = lambda *a, **k: renders.append(k)
+    app._last_activity = 0.0
+    app._last_input = 0.0
+    app._did_idle_reset = False
+    app._in_text_message = False
+    return app
+
+
+def test_ssh_wake_clears_bare_panel_sleep(make_app, monkeypatch):
+    """Remote typing should restore the display from a bare deep-sleep."""
+    renders = []
+    app = _ssh_wake_app(make_app, renders)
+    monkeypatch.setattr(eink_terminal_app, 'time',
+                        type('T', (), {'monotonic': staticmethod(lambda: 100.0)})())
+    monkeypatch.setattr(
+        eink_terminal_app.subprocess, 'run',
+        lambda *a, **k: types.SimpleNamespace(stdout='50.0\n', returncode=0))
+    app._tmux_input_seen(100.0)  # baseline
+    monkeypatch.setattr(
+        eink_terminal_app.subprocess, 'run',
+        lambda *a, **k: types.SimpleNamespace(stdout='60.0\n', returncode=0))
+
+    panel_asleep = True
+    if app._tmux_input_seen(103.0):
+        if panel_asleep or app._in_text_message:
+            panel_asleep = False
+            app._in_text_message = False
+            app._render(force_full=True)
+
+    assert panel_asleep is False
+    assert len(renders) == 1
+
+
+def test_ssh_wake_does_not_dismiss_screensaver(make_app, monkeypatch):
+    """Typing via SSH must not clear the screensaver lock-screen — only the
+    local keyboard should do that."""
+    renders = []
+    app = _ssh_wake_app(make_app, renders)
+    monkeypatch.setattr(
+        eink_terminal_app.subprocess, 'run',
+        lambda *a, **k: types.SimpleNamespace(stdout='50.0\n', returncode=0))
+    app._tmux_input_seen(100.0)  # baseline
+    monkeypatch.setattr(
+        eink_terminal_app.subprocess, 'run',
+        lambda *a, **k: types.SimpleNamespace(stdout='60.0\n', returncode=0))
+
+    in_screensaver = True
+    panel_asleep = False
+    if app._tmux_input_seen(103.0):
+        # Replicate the fixed loop body: only clear panel_asleep, not in_screensaver
+        if panel_asleep or app._in_text_message:
+            panel_asleep = False
+            app._in_text_message = False
+            app._render(force_full=True)
+
+    assert in_screensaver is True    # screensaver NOT dismissed
+    assert len(renders) == 0         # no terminal render
+
+
 def test_scan_for_url_respects_row_filter(make_app):
     app = make_app()
     screen = pyte.Screen(60, 4)

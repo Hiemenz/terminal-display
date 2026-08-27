@@ -1855,12 +1855,17 @@ class EinkTerminal(
                     pass
 
             # ── SSH / tmux input (wake from sleep, keep awake while active) ────
+            # Remote typing keeps the idle timer alive and wakes a bare deep-sleep
+            # (display_sleep_shows_screensaver: false), but does NOT dismiss the
+            # screensaver. The screensaver is a deliberate lock-screen; only a key
+            # on the local keyboard should clear it. Dismissing it on every SSH
+            # keystroke defeats the purpose and is what the user sees as
+            # "terminal shown without any keyboard input".
             if self._tmux_input_seen(now):
                 self._last_activity = now
                 self._last_input = now
                 self._did_idle_reset = False
-                if in_screensaver or panel_asleep or self._in_text_message:
-                    in_screensaver = False
+                if panel_asleep or self._in_text_message:
                     panel_asleep = False
                     self._in_text_message = False
                     self._render(force_full=True)
