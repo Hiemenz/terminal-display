@@ -36,6 +36,7 @@ TERMINAL_H       = H - STATUS_H - TAB_BAR_H  # 446
 # Nano-style key hints shown in the bottom row of the status bar.
 _HINTS = [
     ('^T',    'New'),
+    ('^/',    'Help'),
     ('^F',    'Find'),
     ('^Spc',  'Copy'),
     ('F1',    'SSH'),
