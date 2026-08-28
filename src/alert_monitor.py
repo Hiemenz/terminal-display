@@ -18,7 +18,12 @@ class AlertMonitor:
     def __init__(self, config: dict):
         self._config = config
         self._alerts: list = []   # [(message: str, expiry: float)]
-        self._last_who: set = self._current_who()  # seed baseline so startup doesn't fire
+        # Seed from who(1) now so the first poll doesn't diff against an empty
+        # set and fire login alerts for everyone already online. Only pay the
+        # subprocess cost when the check is actually enabled.
+        self._last_who: set = (self._current_who()
+                               if config.get('terminal_alert_ssh_logins', False)
+                               else set())
         self._last_check: float = 0.0
         # Heavier checks (subprocess/network calls) run on their own slower
         # timer instead of every terminal_alert_check_interval tick, so a

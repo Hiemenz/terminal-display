@@ -150,6 +150,22 @@ def _build_modifier_set():
 
 _build_modifier_set()
 
+# Keys in _SPECIAL that should receive the Alt/Meta ESC prefix when Left Alt
+# is held — i.e. the navigation keys readline binds to Meta combos.
+# F-keys are deliberately excluded: they are app hotkeys, and a stray \x1b
+# left behind after hotkey stripping would reach the shell as a bare Escape.
+_ALT_SPECIAL: set = set()
+
+def _build_alt_special():
+    if not _EVDEV_OK:
+        return
+    _ALT_SPECIAL.update({
+        ecodes.KEY_UP, ecodes.KEY_DOWN, ecodes.KEY_LEFT, ecodes.KEY_RIGHT,
+        ecodes.KEY_BACKSPACE,
+    })
+
+_build_alt_special()
+
 
 _BUS_BLUETOOTH = 0x05
 _BUS_USB       = 0x03
@@ -325,15 +341,13 @@ class EvdevKeyboard:
         if key in (ecodes.KEY_ENTER, ecodes.KEY_KPENTER) and self._shift:
             return b'\n'
 
-        # Non-printable specials — Alt prefix applies here too so Alt+Left/Right
-        # (readline word-jump) and Alt+Backspace (kill-word) work as expected.
+        # Non-printable specials.  The Alt/Meta prefix (\x1b) is only applied
+        # to navigation keys (arrows, Backspace) — the readline Meta combos.
+        # F-keys are excluded: they are app hotkeys, and a stray \x1b left
+        # after hotkey stripping would reach the shell as a bare Escape.
         if key in _SPECIAL:
             seq = _SPECIAL[key]
-            return b'\x1b' + seq if self._alt else seq
-
-        # Alt+Backspace → kill-word (\x1b \x7f)
-        if self._alt and key == ecodes.KEY_BACKSPACE:
-            return b'\x1b\x7f'
+            return b'\x1b' + seq if (self._alt and key in _ALT_SPECIAL) else seq
 
         # Printable
         if key in _KEYMAP:

@@ -81,7 +81,8 @@ def test_ssh_departure_is_silent(monkeypatch):
 
 
 def test_ssh_alert_disabled_by_config(monkeypatch):
-    """No subprocess call and no alert when terminal_alert_ssh_logins is False."""
+    """No subprocess call at all when terminal_alert_ssh_logins is False — not
+    at init time and not during _check_ssh()."""
     called = {'n': 0}
     def _who():
         called['n'] += 1
@@ -89,7 +90,7 @@ def test_ssh_alert_disabled_by_config(monkeypatch):
     monkeypatch.setattr('alert_monitor.AlertMonitor._current_who', staticmethod(_who))
     m = _monitor({'terminal_alert_ssh_logins': False})
     assert m._check_ssh() is False
-    assert called['n'] == 1  # only the __init__ baseline call; check_ssh returns early
+    assert called['n'] == 0  # no subprocess spawned at all
 
 
 # ── deduplication ─────────────────────────────────────────────────────────────
