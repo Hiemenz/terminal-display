@@ -288,6 +288,7 @@ class EinkTerminal(
             'show_ip':    config.get('terminal_status_bar_show_ip',    True),
             'show_speed': config.get('terminal_status_bar_show_speed', True),
             'show_uptime': config.get('terminal_status_bar_show_uptime', True),
+            'show_hints': config.get('terminal_status_bar_show_hints', True),
             'host':       _host,
         }
 
