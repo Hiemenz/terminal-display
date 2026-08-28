@@ -1,15 +1,13 @@
 # terminal-display
 
-System stats dashboard for a Waveshare 7.5" V2 e-ink display (800×480) on Raspberry Pi.
+Terminal emulator and system stats dashboard for a Waveshare 7.5" V2 e-ink display
+(800×480) on Raspberry Pi. Switch between them with F11.
 
-Shows a terminal-aesthetic screen with:
-- 🕐 Big live clock + date
-- 🖥  CPU usage + bar
-- 🧠 RAM usage + bar  
-- 💾 Disk usage + bar
-- 📡 Network I/O
-- ⚖️  Load averages (1/5/15m)
-- 🔝 Top processes by CPU
+**Terminal emulator** — a real shell (optionally inside tmux) rendered to the e-ink
+panel, driven by an attached USB/BT keyboard or an SSH session. Run `claude` or any
+other long-lived CLI session inside it.
+
+**Stats dashboard** — CPU, RAM, disk, network, load averages, and top processes.
 
 ## Setup
 
@@ -17,12 +15,16 @@ Shows a terminal-aesthetic screen with:
 # Install dependencies
 poetry install
 
-# Render a preview (macOS / no hardware)
+# Terminal emulator — dev preview (saves frames to output/*.bmp)
+python eink_terminal.py --local
+
+# Stats dashboard — dev preview
 python main.py --once --local
 open output/terminal.bmp
 
-# Run forever on Pi
-python main.py
+# Run on Pi (systemd manages this automatically)
+python eink_terminal.py   # terminal emulator
+python main.py            # stats dashboard
 ```
 
 ## Configuration
@@ -51,10 +53,10 @@ under one systemd service:
 sudo systemctl restart eink-display
 ```
 
-Restarting picks up any code/config changes, and — since `KillMode=control-group`
-— cleanly kills everything the service spawned: all terminal tabs, any `nano`
-Notes session, any running `llm_chat.py` chat. It comes back with one fresh
-shell tab.
+Restarting picks up any code/config changes. The service uses `KillMode=process`,
+so only the Python process is signalled — tmux and everything running inside it
+(terminal tabs, `nano` Notes sessions, any `claude` session) survive the restart.
+The new process reattaches to the existing tmux session on startup.
 
 **Careful if you're working inside a shell driven by that same service** —
 e.g. an SSH/Claude Code session typed into the terminal-emulator's tmux
