@@ -184,6 +184,13 @@ class ShellMixin:
                            capture_output=True, timeout=2)
         except Exception as e:
             logger.debug('could not publish PATH to tmux: %s', e)
+        # The app draws its own status bar — suppress tmux's so it doesn't
+        # bleed into the terminal area.
+        try:
+            subprocess.run(['tmux', 'set-option', '-g', 'status', 'off'],
+                           capture_output=True, timeout=2)
+        except Exception:
+            pass
 
     def _on_settings_signal(self, signum, frame):
         """SIGUSR1 handler — set a flag for the main loop. Kept minimal so it's
