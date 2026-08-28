@@ -1436,7 +1436,16 @@ class EinkTerminal(
             self._preview_server  = server
             self._web_input_queue = server.input_queue
             self._display_queue   = server.display_queue
-        self._render(force_full=True)
+        _screensaver_at_start = (
+            (self._sleep_timeout > 0 or self._idle_timeout > 0)
+            and self._config.get('display_sleep_shows_screensaver', True)
+            and self._config.get('screensaver_enabled', True)
+        )
+        if _screensaver_at_start:
+            self._show_screensaver()
+        else:
+            self._render(force_full=True)
+        self._startup_in_screensaver = _screensaver_at_start
 
         try:
             self._loop()
@@ -1469,7 +1478,7 @@ class EinkTerminal(
         last_render = 0.0
         has_pending = False
         last_alert_tick = 0.0
-        in_screensaver = False
+        in_screensaver = getattr(self, '_startup_in_screensaver', False)
         panel_asleep = False   # panel deep-slept early (image retained, no screensaver yet)
 
         while self._running:

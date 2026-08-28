@@ -266,3 +266,42 @@ def test_nothing_happens_before_the_sleep_window(make_app):
     app = _sleep_app(make_app)
     _decide(app, idle=100)
     assert app.slept_bare is False and app.showed_saver is False
+
+
+# ── startup screensaver behaviour ─────────────────────────────────────────────
+# The terminal must not be drawn on startup — the screensaver (lock screen) is
+# the default state; the terminal is revealed only by a keystroke.
+
+def _startup_decision(app):
+    """Mirror the _startup_in_screensaver logic from run()."""
+    return (
+        (app._sleep_timeout > 0 or app._idle_timeout > 0)
+        and app._config.get('display_sleep_shows_screensaver', True)
+        and app._config.get('screensaver_enabled', True)
+    )
+
+
+def test_startup_shows_screensaver_when_sleep_is_configured(make_app):
+    """With display_sleep_minutes set, startup must show the screensaver, not the
+    terminal — the user should only see the terminal after pressing a key."""
+    app = _sleep_app(make_app)
+    assert _startup_decision(app) is True
+
+
+def test_startup_shows_terminal_when_sleep_is_off(make_app):
+    """When neither sleep timeout is configured, the terminal renders immediately
+    (nothing to sleep toward, so there's no screensaver gate)."""
+    app = _sleep_app(make_app)
+    app._sleep_timeout = 0
+    app._idle_timeout = 0
+    assert _startup_decision(app) is False
+
+
+def test_startup_shows_terminal_when_screensaver_disabled(make_app):
+    app = _sleep_app(make_app, screensaver_enabled=False)
+    assert _startup_decision(app) is False
+
+
+def test_startup_shows_terminal_when_sleep_shows_screensaver_off(make_app):
+    app = _sleep_app(make_app, display_sleep_shows_screensaver=False)
+    assert _startup_decision(app) is False
