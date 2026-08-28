@@ -95,3 +95,41 @@ def test_panes_are_tracked_separately():
     w.update('%2', WORKING, 'beta', 0.0)
     assert w.update('%1', WAITING, 'alpha', 120.0) is not None
     assert w.update('%2', WORKING, 'beta', 120.0) is None
+
+
+# ── condition() disambiguation ────────────────────────────────────────────────
+
+def test_condition_single_waiting():
+    w = AttentionWatcher(min_seconds=0)
+    w.update('t1', WORKING, 'build', 0.0)
+    w.update('t1', WAITING, 'build', 1.0)
+    assert w.condition() == 'claude waiting (build)'
+
+
+def test_condition_single_approval():
+    w = AttentionWatcher(min_seconds=0)
+    w.update('t1', WORKING, 'build', 0.0)
+    w.update('t1', APPROVAL, 'build', 1.0)
+    assert w.condition() == 'claude needs you (build)'
+
+
+def test_condition_multiple_names_each_session():
+    """With two pending sessions, both are named — no opaque count."""
+    w = AttentionWatcher(min_seconds=0)
+    w.update('%1', WORKING, 'alpha', 0.0)
+    w.update('%2', WORKING, 'beta', 0.0)
+    w.update('%1', WAITING, 'alpha', 1.0)
+    w.update('%2', APPROVAL, 'beta', 1.0)
+    cond = w.condition()
+    assert 'alpha' in cond
+    assert 'beta' in cond
+    assert 'claude:' in cond
+
+
+def test_condition_clears_when_answered():
+    w = AttentionWatcher(min_seconds=0)
+    w.update('t1', WORKING, 'build', 0.0)
+    w.update('t1', WAITING, 'build', 1.0)
+    assert w.condition() != ''
+    w.update('t1', WORKING, 'build', 2.0)
+    assert w.condition() == ''

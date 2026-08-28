@@ -18,7 +18,7 @@ class AlertMonitor:
     def __init__(self, config: dict):
         self._config = config
         self._alerts: list = []   # [(message: str, expiry: float)]
-        self._last_who: set = set()
+        self._last_who: set = self._current_who()  # seed baseline so startup doesn't fire
         self._last_check: float = 0.0
         # Heavier checks (subprocess/network calls) run on their own slower
         # timer instead of every terminal_alert_check_interval tick, so a
@@ -99,14 +99,19 @@ class AlertMonitor:
             pass
         return False
 
+    @staticmethod
+    def _current_who() -> set:
+        try:
+            r = subprocess.run(['who'], capture_output=True, text=True, timeout=1)
+            return set(r.stdout.strip().splitlines()) if r.returncode == 0 else set()
+        except Exception:
+            return set()
+
     def _check_ssh(self) -> bool:
         if not self._config.get('terminal_alert_ssh_logins', False):
             return False
         try:
-            r = subprocess.run(
-                ['who'], capture_output=True, text=True, timeout=1
-            )
-            sessions = set(r.stdout.strip().splitlines()) if r.returncode == 0 else set()
+            sessions = self._current_who()
             new = sessions - self._last_who
             self._last_who = sessions
             for s in new:

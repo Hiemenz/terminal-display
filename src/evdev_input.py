@@ -229,9 +229,10 @@ class EvdevKeyboard:
 
     def __init__(self, device: 'evdev.InputDevice'):
         self._dev = device
-        self._shift = False
-        self._ctrl  = False
-        self._alt   = False
+        self._shift  = False
+        self._ctrl   = False
+        self._alt    = False   # Left Alt only — Meta prefix
+        self._altgr  = False   # Right Alt — AltGr compose (non-US keyboards)
         self._caps   = False
         self._buf: list[bytes] = []
 
@@ -282,8 +283,14 @@ class EvdevKeyboard:
         if key in (ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL):
             self._ctrl = val != 0
             return b''
-        if key in (ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT):
+        if key == ecodes.KEY_LEFTALT:
             self._alt = val != 0
+            return b''
+        if key == ecodes.KEY_RIGHTALT:
+            # AltGr on non-US keyboards — do NOT set _alt (which prefixes \x1b).
+            # AltGr characters come through the kernel's keymap as ordinary
+            # printable keycodes; we just need to not corrupt them.
+            self._altgr = val != 0
             return b''
         if key == ecodes.KEY_CAPSLOCK and val == 1:
             self._caps = not self._caps
@@ -318,9 +325,15 @@ class EvdevKeyboard:
         if key in (ecodes.KEY_ENTER, ecodes.KEY_KPENTER) and self._shift:
             return b'\n'
 
-        # Non-printable specials
+        # Non-printable specials — Alt prefix applies here too so Alt+Left/Right
+        # (readline word-jump) and Alt+Backspace (kill-word) work as expected.
         if key in _SPECIAL:
-            return _SPECIAL[key]
+            seq = _SPECIAL[key]
+            return b'\x1b' + seq if self._alt else seq
+
+        # Alt+Backspace → kill-word (\x1b \x7f)
+        if self._alt and key == ecodes.KEY_BACKSPACE:
+            return b'\x1b\x7f'
 
         # Printable
         if key in _KEYMAP:
