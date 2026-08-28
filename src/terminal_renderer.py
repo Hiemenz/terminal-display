@@ -28,9 +28,23 @@ except ImportError:
 W, H = 800, 480
 SPLIT_TERMINAL_W = 600
 SPLIT_SIDEBAR_W  = W - SPLIT_TERMINAL_W  # 200
-STATUS_H         = 17    # single-line status bar
+STATUS_H         = 34    # two-row status bar (info row + hints row)
+_STATUS_ROW_H    = 17    # height of each individual row
 TAB_BAR_H        = 0     # tab bar removed; tab indicator shown in status bar
-TERMINAL_H       = H - STATUS_H - TAB_BAR_H  # 463
+TERMINAL_H       = H - STATUS_H - TAB_BAR_H  # 446
+
+# Nano-style key hints shown in the bottom row of the status bar.
+_HINTS = [
+    ('^T',    'New'),
+    ('^F',    'Find'),
+    ('^Spc',  'Copy'),
+    ('F1',    'SSH'),
+    ('F2',    'Close'),
+    ('F5',    'Power'),
+    ('F6',    'Palette'),
+    ('^\\',   'Split'),
+    ('F11',   'Stats'),
+]
 
 _font_cache:  dict = {}
 _faces_cache: dict = {}
@@ -116,6 +130,28 @@ class _Faces:
 
     def __init__(self, regular: _Font, bold: _Font, synthetic: bool):
         self.regular, self.bold, self.synthetic = regular, bold, synthetic
+
+
+def _find_sans_font(size: int, bold: bool = False) -> _Font:
+    """Proportional sans-serif face for UI chrome (status bar hints, etc.)."""
+    candidates = [
+        ('/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf' if bold
+         else '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'),
+        ('/System/Library/Fonts/Helvetica.ttc'),
+        ('/System/Library/Fonts/SFNSDisplay.ttf'),
+        ('/System/Library/Fonts/SFNSText.ttf'),
+    ]
+    key = ('_sans', size, bold)
+    if key in _font_cache:
+        return _font_cache[key]
+    for path in candidates:
+        if os.path.exists(path):
+            font = _load(path, size)
+            _font_cache[key] = font
+            return font
+    font = ImageFont.load_default()
+    _font_cache[key] = font
+    return font
 
 
 def _find_mono_font(font_path: str, size: int) -> _Font:
@@ -793,7 +829,7 @@ def _draw_status_bar(
     bar_config: dict = None,
     conditions: str = None,
 ):
-    """Single-line status bar: time · CWD:branch · IP/WiFi · net speeds (or alert).
+    """Two-row status bar: info row (time/cwd/IP/alerts) + hints row (nano-style key shortcuts).
 
     `conditions` is drawn right-aligned in a slot of its own and is deliberately
     outside the alert rotation. Alerts are *events* — they fire once and age
@@ -803,12 +839,18 @@ def _draw_status_bar(
     """
     y0    = (TAB_BAR_H + TERMINAL_H) * scale
     H_s   = H * scale
+    row_h = _STATUS_ROW_H * scale
     sfont = _find_mono_font('', 10 * scale)
     pad   = 2 * scale
     x_pad = 4 * scale
     bc    = bar_config or {}
 
     draw.rectangle([0, y0, terminal_width, H_s], fill=fg)
+
+    # Separator between the two rows.
+    draw.line([0, y0 + row_h - 1, terminal_width, y0 + row_h - 1], fill=bg, width=scale)
+
+    # ── Row 1: info ───────────────────────────────────────────────────────────
 
     # Right-hand condition slot, claimed before anything else is laid out.
     left_limit = terminal_width - x_pad
@@ -856,3 +898,31 @@ def _draw_status_bar(
 
     draw.text((x_pad, y0 + pad), _fit(draw, text, sfont, left_limit - x_pad),
               font=sfont, fill=bg)
+
+    # ── Row 2: nano-style key hints ───────────────────────────────────────────
+    if not bc.get('show_hints', True):
+        return
+
+    _hfaces     = _find_faces('', 10 * scale)
+    hfont_key   = _hfaces.bold
+    hfont_label = _hfaces.regular
+    y1       = y0 + row_h
+    x        = x_pad
+    kpad     = 3 * scale   # horizontal padding inside each key bubble
+    gap      = 7 * scale   # gap between hints
+    bubble_y0 = y1 + pad
+    bubble_y1 = y1 + row_h - pad - 1
+
+    for key, label in _HINTS:
+        kw = _text_w(draw, key, hfont_key)
+        lw = _text_w(draw, label, hfont_label)
+        hint_w = kpad + kw + kpad + 2 * scale + lw
+        if x + hint_w > terminal_width - x_pad:
+            break
+        # Key bubble: bg-filled rect with fg text (inverted against the fg bar).
+        draw.rectangle([x, bubble_y0, x + kpad + kw + kpad, bubble_y1], fill=bg)
+        draw.text((x + kpad, y1 + pad), key, font=hfont_key, fill=fg)
+        x += kpad + kw + kpad + 2 * scale
+        # Label in regular bar colour.
+        draw.text((x, y1 + pad), label, font=hfont_label, fill=bg)
+        x += lw + gap
