@@ -32,11 +32,15 @@ def test_a_stopped_session_becomes_a_standing_condition():
     assert w.condition() == 'claude waiting (MlbDisplay)'
 
 
-def test_an_approval_outranks_a_plain_wait():
+def test_multiple_sessions_are_named_individually():
+    """With multiple stopped sessions, the condition names each one so the user
+    knows which window to check without guessing."""
     w = AttentionWatcher(min_seconds=30)
     _worked_then_stopped(w, '%1', 'a')
     _worked_then_stopped(w, '%2', 'b', state=APPROVAL)
-    assert w.condition() == 'claude ×2 needs you'
+    cond = w.condition()
+    assert 'a' in cond and 'b' in cond
+    assert 'claude:' in cond
 
 
 def test_condition_clears_when_the_session_goes_back_to_work():

@@ -99,14 +99,23 @@ class AttentionWatcher:
 
         Deliberately not routed through the alert rotation: an alert is an
         event that fires once and ages out, but "claude is waiting" stays true
-        until someone answers it, and the notice was scrolling away while the
+        until someone answered, and the notice was scrolling away while the
         session was still stopped.
+
+        With multiple pending sessions the line names them individually —
+        "claude: A needs you, B waiting" — so you know which window to open
+        without reaching for a laptop. The caller clips the whole string with
+        _fit() so the two status-bar halves can't overprint.
         """
         if not self._pending:
             return ''
-        states = [state for state, _ in self._pending.values()]
-        verb = 'needs you' if APPROVAL in states else 'waiting'
         if len(self._pending) == 1:
-            (_, label), = self._pending.values()
+            (state, label), = self._pending.values()
+            verb = 'needs you' if state == APPROVAL else 'waiting'
             return 'claude %s (%s)' % (verb, label) if label else 'claude %s' % verb
-        return 'claude ×%d %s' % (len(self._pending), verb)
+        # Multiple sessions: name each one with its verb.
+        parts = []
+        for state, label in self._pending.values():
+            verb = 'needs you' if state == APPROVAL else 'waiting'
+            parts.append(('%s %s' % (label, verb)) if label else verb)
+        return 'claude: ' + ', '.join(parts)

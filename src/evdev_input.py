@@ -150,6 +150,22 @@ def _build_modifier_set():
 
 _build_modifier_set()
 
+# Keys in _SPECIAL that should receive the Alt/Meta ESC prefix when Left Alt
+# is held — i.e. the navigation keys readline binds to Meta combos.
+# F-keys are deliberately excluded: they are app hotkeys, and a stray \x1b
+# left behind after hotkey stripping would reach the shell as a bare Escape.
+_ALT_SPECIAL: set = set()
+
+def _build_alt_special():
+    if not _EVDEV_OK:
+        return
+    _ALT_SPECIAL.update({
+        ecodes.KEY_UP, ecodes.KEY_DOWN, ecodes.KEY_LEFT, ecodes.KEY_RIGHT,
+        ecodes.KEY_BACKSPACE,
+    })
+
+_build_alt_special()
+
 
 _BUS_BLUETOOTH = 0x05
 _BUS_USB       = 0x03
@@ -229,9 +245,10 @@ class EvdevKeyboard:
 
     def __init__(self, device: 'evdev.InputDevice'):
         self._dev = device
-        self._shift = False
-        self._ctrl  = False
-        self._alt   = False
+        self._shift  = False
+        self._ctrl   = False
+        self._alt    = False   # Left Alt only — Meta prefix
+        self._altgr  = False   # Right Alt — AltGr compose (non-US keyboards)
         self._caps   = False
         self._buf: list[bytes] = []
 
@@ -282,8 +299,14 @@ class EvdevKeyboard:
         if key in (ecodes.KEY_LEFTCTRL, ecodes.KEY_RIGHTCTRL):
             self._ctrl = val != 0
             return b''
-        if key in (ecodes.KEY_LEFTALT, ecodes.KEY_RIGHTALT):
+        if key == ecodes.KEY_LEFTALT:
             self._alt = val != 0
+            return b''
+        if key == ecodes.KEY_RIGHTALT:
+            # AltGr on non-US keyboards — do NOT set _alt (which prefixes \x1b).
+            # AltGr characters come through the kernel's keymap as ordinary
+            # printable keycodes; we just need to not corrupt them.
+            self._altgr = val != 0
             return b''
         if key == ecodes.KEY_CAPSLOCK and val == 1:
             self._caps = not self._caps
@@ -318,9 +341,13 @@ class EvdevKeyboard:
         if key in (ecodes.KEY_ENTER, ecodes.KEY_KPENTER) and self._shift:
             return b'\n'
 
-        # Non-printable specials
+        # Non-printable specials.  The Alt/Meta prefix (\x1b) is only applied
+        # to navigation keys (arrows, Backspace) — the readline Meta combos.
+        # F-keys are excluded: they are app hotkeys, and a stray \x1b left
+        # after hotkey stripping would reach the shell as a bare Escape.
         if key in _SPECIAL:
-            return _SPECIAL[key]
+            seq = _SPECIAL[key]
+            return b'\x1b' + seq if (self._alt and key in _ALT_SPECIAL) else seq
 
         # Printable
         if key in _KEYMAP:

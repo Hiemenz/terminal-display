@@ -35,14 +35,21 @@ DEFAULT_PROJECTS_DIR = os.path.expanduser('~/.claude/projects')
 
 
 def _parse_timestamp(value: str) -> float:
-    """ISO-8601 (with a trailing Z) → epoch seconds. 0.0 when unparseable."""
+    """ISO-8601 → epoch seconds. 0.0 when unparseable.
+
+    Trailing Z is normalised to +00:00 before parsing so fromisoformat()
+    accepts it on Python < 3.11. Naive timestamps (no tz offset) are assumed
+    UTC — Claude Code has always written UTC+Z, so this matches existing data
+    without misattributing it to local time.
+    """
     if not value:
         return 0.0
     try:
         text = value.replace('Z', '+00:00')
-        return datetime.fromisoformat(text).replace(tzinfo=timezone.utc).timestamp() \
-            if datetime.fromisoformat(text).tzinfo is None \
-            else datetime.fromisoformat(text).timestamp()
+        dt = datetime.fromisoformat(text)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
     except ValueError:
         return 0.0
 

@@ -2036,6 +2036,12 @@ class EinkTerminal(
             _fullscreen_overlay = (self._markdown_active or self._big_text_active
                                    or self._in_text_message
                                    or self._help_sheet_active)
+            if has_pending and _fullscreen_overlay:
+                # The overlay owns the panel — discard pending flag so the
+                # select() timeout doesn't collapse to _RENDER_DEBOUNCE while a
+                # background tab is producing output. Dirty cells are picked up
+                # when the overlay closes.
+                has_pending = False
             if (has_pending and not in_screensaver and not panel_asleep
                     and not _fullscreen_overlay
                     and (now - last_render) >= _RENDER_DEBOUNCE):
