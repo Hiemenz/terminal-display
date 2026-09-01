@@ -1502,6 +1502,7 @@ class EinkTerminal(
         last_alert_tick = 0.0
         in_screensaver = getattr(self, '_startup_in_screensaver', False)
         panel_asleep = False   # panel deep-slept early (image retained, no screensaver yet)
+        _speedtest_count_at_render = 0  # track whether new speedtest data arrived while screensaver is up
 
         while self._running:
             now = time.monotonic()
@@ -1655,6 +1656,8 @@ class EinkTerminal(
                         # this is the same power state with a deliberate image.
                         in_screensaver = True
                         panel_asleep = False
+                        _sm = getattr(self, '_speedtest_monitor', None)
+                        _speedtest_count_at_render = len(_sm.history()) if _sm else 0
                         self._show_screensaver()
                     else:
                         panel_asleep = True
@@ -1667,8 +1670,19 @@ class EinkTerminal(
                 if idle > self._idle_timeout and not in_screensaver and not self._in_text_message:
                     in_screensaver = True
                     panel_asleep = False   # screensaver supersedes the bare deep-sleep
+                    _sm = getattr(self, '_speedtest_monitor', None)
+                    _speedtest_count_at_render = len(_sm.history()) if _sm else 0
                     self._show_screensaver()
                     continue  # skip stale r — next iteration runs a fresh select
+
+            # ── Screensaver refresh when new speedtest data arrives ───────────
+            if in_screensaver:
+                _sm = getattr(self, '_speedtest_monitor', None)
+                if _sm is not None:
+                    _cur = len(_sm.history())
+                    if _cur > _speedtest_count_at_render:
+                        _speedtest_count_at_render = _cur
+                        self._show_screensaver()
 
             # ── Idle reset: after a longer window, start a brand-new shell ─────
             # so a returning user lands on a clean terminal. Once per idle
