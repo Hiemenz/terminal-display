@@ -386,6 +386,10 @@ terminal_reset_minutes: 60
 # estimate, not your quota — the real limits live server-side.
 screensaver_show_qr: false       # wake QR in the lock screen's bottom-right
 screensaver_show_claude_usage: true
+# Internet speed trend on the lock screen: down/up lines for the last 5 hours.
+# Runs a speedtest every screensaver_speedtest_interval minutes in the background.
+screensaver_speedtest: true
+screensaver_speedtest_interval: 15   # minutes between tests
 # Yardstick for the "used N%" line on the lock screen. The real weekly limit
 # is enforced server-side and isn't readable locally, so set your own token
 # budget here — or leave 0 to compare against your own 4-week average.

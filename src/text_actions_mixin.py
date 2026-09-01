@@ -93,6 +93,32 @@ class TextActionsMixin:
             lines.pop()
         return '\n'.join(lines)
 
+    def _scrollback_text(self) -> str:
+        """Plain text of the pyte scrollback history + visible screen.
+
+        Only available in non-tmux mode (HistoryScreen).  Falls back to just
+        the visible screen when history is unavailable.
+        """
+        lines = []
+        history = getattr(self._screen, 'history', None)
+        if history is not None:
+            # history.top is a deque of rows (dicts keyed by column index),
+            # oldest at the left (index 0). Missing column → space.
+            for row in history.top:
+                chars = []
+                for c in range(self._screen.columns):
+                    ch = row.get(c)
+                    chars.append(ch.data if ch is not None else ' ')
+                lines.append(''.join(chars).rstrip())
+        # Append the visible screen
+        for row_idx in range(self._screen.lines):
+            row = self._screen.buffer[row_idx]
+            line = ''.join(row[c].data for c in range(self._screen.columns))
+            lines.append(line.rstrip())
+        while lines and not lines[-1]:
+            lines.pop()
+        return '\n'.join(lines)
+
     def _beam_to_phone(self, text: str = None):
         """Hand text to the preview server and pin a QR linking to the page
         that shows it (copyable on a phone). Defaults to the whole visible

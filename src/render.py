@@ -593,10 +593,91 @@ def _draw_claude_usage(d, font_path: str, usage: dict,
              week_pct, _BLACK, _WHITE, _BLACK)
 
 
+def _draw_speedtest(d: ImageDraw.ImageDraw, font_path: str,
+                    history: list, x: int, y: int, width: int) -> None:
+    """Draw a compact up/download trend chart at (x, y) with the given width.
+
+    `history` is a list of {'ts': epoch, 'down': Mbps, 'up': Mbps} dicts,
+    oldest first.  Missing data (gaps > 20 min) leaves a hole in the line.
+    Nothing is drawn when the list is empty.
+    """
+    if not history:
+        return
+
+    import time as _time
+    WINDOW = 5 * 3600          # 5 hours
+    GAP_SECS = 20 * 60         # wider gap → broken line
+    CHART_H = 28               # pixels tall for the lines
+    BOX_PAD = 6
+    LABEL_H = 12
+    box_h = BOX_PAD + LABEL_H + 2 + CHART_H + BOX_PAD
+
+    now = _time.time()
+    cutoff = now - WINDOW
+
+    pts = [e for e in history if e.get('ts', 0) >= cutoff]
+    if not pts:
+        return
+
+    # Box
+    d.rectangle([x, y, x + width, y + box_h], fill=_WHITE, outline=_BLACK, width=1)
+
+    # Header: title + last values
+    last = pts[-1]
+    f_lbl = _find_font(font_path, LABEL_H)
+    d.text((x + BOX_PAD, y + BOX_PAD),
+           f'↓{last["down"]:.0f}  ↑{last["up"]:.0f} Mbps',
+           font=f_lbl, fill=_BLACK)
+    d.text((x + width - BOX_PAD, y + BOX_PAD), '5h',
+           font=f_lbl, fill=_BLACK, anchor='ra')
+
+    # Chart area
+    cx = x + BOX_PAD
+    cy = y + BOX_PAD + LABEL_H + 2
+    cw = width - 2 * BOX_PAD
+
+    all_vals = [e['down'] for e in pts] + [e['up'] for e in pts]
+    peak = max(all_vals) or 1.0
+
+    def _ts_to_x(ts: float) -> int:
+        return cx + int(cw * max(0.0, min(1.0, (ts - cutoff) / WINDOW)))
+
+    def _val_to_y(v: float) -> int:
+        return cy + CHART_H - int(CHART_H * min(1.0, v / peak))
+
+    # Baseline
+    d.line([(cx, cy + CHART_H), (cx + cw, cy + CHART_H)], fill=_BLACK, width=1)
+
+    # Draw two series: download (solid) then upload (dotted via short dashes)
+    for key, dashed in (('down', False), ('up', True)):
+        prev = None
+        for i, pt in enumerate(pts):
+            cur_x = _ts_to_x(pt['ts'])
+            cur_y = _val_to_y(pt[key])
+            if prev is not None:
+                gap = pt['ts'] - pts[i - 1]['ts'] > GAP_SECS
+                if not gap:
+                    px, py = prev
+                    if dashed:
+                        # 4 px on, 3 px off along the segment
+                        dx, dy = cur_x - px, cur_y - py
+                        length = max(1, int((dx ** 2 + dy ** 2) ** 0.5))
+                        steps = max(1, length // 7)
+                        for s in range(steps):
+                            t0, t1 = s / steps, (s + 0.5) / steps
+                            x0 = int(px + dx * t0); y0 = int(py + dy * t0)
+                            x1 = int(px + dx * t1); y1 = int(py + dy * t1)
+                            d.line([(x0, y0), (x1, y1)], fill=_BLACK, width=1)
+                    else:
+                        d.line([(px, py), (cur_x, cur_y)], fill=_BLACK, width=1)
+            prev = (cur_x, cur_y)
+
+
 def render_screensaver(image_path: str, qr_url: str, config: dict,
-                       claude_usage: dict = None) -> Image.Image:
+                       claude_usage: dict = None,
+                       speedtest_history: list = None) -> Image.Image:
     """Render the idle screensaver: background image + QR code + week-progress
-    overlay, and optionally a Claude Code activity panel."""
+    overlay, and optionally a Claude Code activity panel and speedtest chart."""
     font_path = config.get('font_path', '')
 
     img = Image.new('L', (W, H), color=_BLACK)
@@ -664,6 +745,18 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
         try:
             _draw_claude_usage(d, font_path, claude_usage, reserved_bottom,
                                week_pct=pct)
+        except Exception:
+            pass
+
+    if speedtest_history and config.get('screensaver_speedtest', True):
+        try:
+            chart_w = 220
+            chart_x = PAD
+            # Sits just above the bottom edge, clear of the left column.
+            # Compute approximate box height to place it exactly at the bottom.
+            chart_y = H - PAD - (6 + 12 + 2 + 28 + 6)
+            _draw_speedtest(d, font_path, speedtest_history,
+                            chart_x, chart_y, chart_w)
         except Exception:
             pass
 
