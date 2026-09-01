@@ -33,11 +33,12 @@ python eink_terminal.py         # terminal emulator, live on Pi hardware
 After merging changes, restart the service to pick them up:
 
 ```bash
-sudo /usr/bin/systemctl restart eink-display
+restart-display
 ```
 
-The sudoers rule (`/etc/sudoers.d/`) grants passwordless access to this exact
-command, so no password prompt. Check it came up cleanly:
+`restart-display` is a generated script in `~/.local/bin` (written by
+`_install_command_scripts` on startup). It wraps the passwordless sudoers rule
+for `systemctl restart eink-display`. Check it came up cleanly:
 
 ```bash
 systemctl is-active eink-display.service
