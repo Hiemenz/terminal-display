@@ -28,6 +28,22 @@ python eink_terminal.py --local # terminal emulator, dev preview
 python eink_terminal.py         # terminal emulator, live on Pi hardware
 ```
 
+## Deploying on the Pi
+
+After merging changes, restart the service to pick them up:
+
+```bash
+sudo /usr/bin/systemctl restart eink-display
+```
+
+The sudoers rule (`/etc/sudoers.d/`) grants passwordless access to this exact
+command, so no password prompt. Check it came up cleanly:
+
+```bash
+systemctl is-active eink-display.service
+journalctl -u eink-display.service -n 30 --no-pager
+```
+
 ## Key Files — Stats Dashboard
 
 | File | Purpose |
