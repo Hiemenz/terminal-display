@@ -198,6 +198,7 @@ def render(stats: dict, config: dict) -> Image.Image:
     f_metric   = _find_sans(font_path, 32, bold=True)
     f_metric_s = _find_sans(font_path, 22, bold=True)
     f_body     = _find_sans(font_path, 15)
+    f_body_bold = _find_sans(font_path, 15, bold=True)
     f_small    = _find_sans(font_path, 12)
     f_mono     = _find_font(font_path, 13)
 
@@ -367,9 +368,13 @@ def render(stats: dict, config: dict) -> Image.Image:
 
         d.text((cx, cy), net.get('interface', '?'), font=f_metric_s, fill=fg)
         cy += 30
-        d.text((cx, cy), f"↑ {net.get('bytes_sent_str', '?')} sent", font=f_body, fill=fg)
+        up_val = f"↑ {net.get('bytes_sent_str', '?')}"
+        d.text((cx, cy), up_val, font=f_body_bold, fill=fg)
+        d.text((cx + int(d.textlength(up_val, font=f_body_bold)), cy), " sent", font=f_body, fill=fg)
         cy += ROW_H
-        d.text((cx, cy), f"↓ {net.get('bytes_recv_str', '?')} received", font=f_body, fill=fg)
+        dn_val = f"↓ {net.get('bytes_recv_str', '?')}"
+        d.text((cx, cy), dn_val, font=f_body_bold, fill=fg)
+        d.text((cx + int(d.textlength(dn_val, font=f_body_bold)), cy), " received", font=f_body, fill=fg)
         cy += ROW_H
         if qr_size:
             cy = max(cy, y0 + CHIP_H + 6 + qr_size + 4)
@@ -628,7 +633,8 @@ def _draw_speedtest(d: ImageDraw.ImageDraw, font_path: str,
     if not pts:
         return
 
-    f = _find_font(font_path, FONT_SZ)
+    f      = _find_font(font_path, FONT_SZ)
+    f_bold = _find_sans(font_path, FONT_SZ, bold=True)
 
     # ── Box ───────────────────────────────────────────────────────────────────
     d.rounded_rectangle([x, y, x + box_w, y + box_h],
@@ -642,11 +648,11 @@ def _draw_speedtest(d: ImageDraw.ImageDraw, font_path: str,
     # ── Left sidebar — stacked labels ─────────────────────────────────────────
     sx  = x + BOX_PAD
     sy  = y + BOX_PAD
-    d.text((sx, sy), f'↓{last["down"]:.0f}', font=f, fill=_BLACK)
+    d.text((sx, sy), f'↓{last["down"]:.0f}', font=f_bold, fill=_BLACK)
     sy += LINE_H
     d.text((sx, sy), f'avg {avg_down:.0f}', font=f, fill=_BLACK)
     sy += LINE_H
-    d.text((sx, sy), f'↑{last["up"]:.0f}', font=f, fill=_BLACK)
+    d.text((sx, sy), f'↑{last["up"]:.0f}', font=f_bold, fill=_BLACK)
     sy += LINE_H
     d.text((sx, sy), f'avg {avg_up:.0f}', font=f, fill=_BLACK)
     sy += LINE_H
