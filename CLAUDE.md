@@ -28,6 +28,23 @@ python eink_terminal.py --local # terminal emulator, dev preview
 python eink_terminal.py         # terminal emulator, live on Pi hardware
 ```
 
+## Deploying on the Pi
+
+After merging changes, restart the service to pick them up:
+
+```bash
+restart-display
+```
+
+`restart-display` is a generated script in `~/.local/bin` (written by
+`_install_command_scripts` on startup). It wraps the passwordless sudoers rule
+for `systemctl restart eink-display`. Check it came up cleanly:
+
+```bash
+systemctl is-active eink-display.service
+journalctl -u eink-display.service -n 30 --no-pager
+```
+
 ## Key Files — Stats Dashboard
 
 | File | Purpose |
