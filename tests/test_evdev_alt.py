@@ -11,7 +11,6 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 
 from evdev import ecodes
-
 from evdev_input import EvdevKeyboard
 
 
