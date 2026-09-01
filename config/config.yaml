@@ -370,7 +370,7 @@ terminal_idle_timeout: 900
 # Re-flash the screensaver every this many minutes so a static image doesn't
 # slowly ghost/burn in over a long idle (and so the screensaver reclaims the
 # panel if something else drew to it meanwhile). 0 = show once, never refresh.
-screensaver_refresh_minutes: 120
+screensaver_refresh_minutes: 15
 
 # Minutes of no real input before the terminal auto-resets: the shell + tmux
 # session are killed and a brand-new shell is started, so whoever comes back
