@@ -591,85 +591,127 @@ def _draw_claude_usage(d, font_path: str, usage: dict,
         label_w = int(d.textlength(label, font=f_row)) + 6
         _bar(d, box_x + pad + label_w, y + 2, box_w - 2 * pad - label_w, 7,
              week_pct, _BLACK, _WHITE, _BLACK)
+    return box_y
 
 
 def _draw_speedtest(d: ImageDraw.ImageDraw, font_path: str,
                     history: list, x: int, y: int, width: int) -> None:
-    """Draw a compact up/download trend chart at (x, y) with the given width.
+    """Draw a labelled up/download trend chart at (x, y) with the given width.
+
+    Layout (top → bottom):
+      header row  — "↓ Xm  ↑ Xm" (last values) + "Internet" title
+      chart area  — lines with Y axis on the left, grid lines
+      X-axis row  — "5h ago"  "2.5h"  "now"
 
     `history` is a list of {'ts': epoch, 'down': Mbps, 'up': Mbps} dicts,
-    oldest first.  Missing data (gaps > 20 min) leaves a hole in the line.
+    oldest first.  Gaps wider than 20 min leave a break in the line.
     Nothing is drawn when the list is empty.
     """
     if not history:
         return
 
     import time as _time
-    WINDOW = 5 * 3600          # 5 hours
-    GAP_SECS = 20 * 60         # wider gap → broken line
-    CHART_H = 28               # pixels tall for the lines
-    BOX_PAD = 6
-    LABEL_H = 12
-    box_h = BOX_PAD + LABEL_H + 2 + CHART_H + BOX_PAD
+    WINDOW    = 5 * 3600         # 5 hours shown
+    GAP_SECS  = 20 * 60          # gap threshold
+    BOX_PAD   = 7                # matches Claude tile inner pad
+    FONT_SZ   = _TILE_FONT       # same size as Claude tile rows
+    HDR_H     = FONT_SZ + 3      # header text row
+    Y_LBL_W   = 26               # width reserved for Y-axis labels
+    CHART_H   = 40               # plot area height
+    X_LBL_H   = FONT_SZ + 2     # X-axis label row
+    box_h     = BOX_PAD + HDR_H + CHART_H + X_LBL_H + BOX_PAD
 
-    now = _time.time()
+    now    = _time.time()
     cutoff = now - WINDOW
-
-    pts = [e for e in history if e.get('ts', 0) >= cutoff]
+    pts    = [e for e in history if e.get('ts', 0) >= cutoff]
     if not pts:
         return
 
-    # Box
-    d.rectangle([x, y, x + width, y + box_h], fill=_WHITE, outline=_BLACK, width=1)
+    f = _find_font(font_path, FONT_SZ)
 
-    # Header: title + last values
+    # ── Box — rounded to match Claude usage tile ───────────────────────────────
+    d.rounded_rectangle([x, y, x + width, y + box_h],
+                        radius=8, fill=_WHITE, outline=_BLACK, width=1)
+
+    # ── Header ────────────────────────────────────────────────────────────────
     last = pts[-1]
-    f_lbl = _find_font(font_path, LABEL_H)
-    d.text((x + BOX_PAD, y + BOX_PAD),
+    hy   = y + BOX_PAD
+    d.text((x + BOX_PAD, hy),
            f'↓{last["down"]:.0f}  ↑{last["up"]:.0f} Mbps',
-           font=f_lbl, fill=_BLACK)
-    d.text((x + width - BOX_PAD, y + BOX_PAD), '5h',
-           font=f_lbl, fill=_BLACK, anchor='ra')
+           font=f, fill=_BLACK)
+    d.text((x + width - BOX_PAD, hy), 'Internet',
+           font=f, fill=_BLACK, anchor='ra')
 
-    # Chart area
-    cx = x + BOX_PAD
-    cy = y + BOX_PAD + LABEL_H + 2
-    cw = width - 2 * BOX_PAD
+    # ── Chart geometry ────────────────────────────────────────────────────────
+    # Left edge of plot (after Y labels), right edge, top, baseline
+    cx  = x + BOX_PAD + Y_LBL_W
+    cy  = y + BOX_PAD + HDR_H
+    cw  = width - BOX_PAD - Y_LBL_W - BOX_PAD
+    cb  = cy + CHART_H   # baseline y
 
     all_vals = [e['down'] for e in pts] + [e['up'] for e in pts]
-    peak = max(all_vals) or 1.0
+    peak     = max(all_vals) or 1.0
+    # Round peak up to a clean number for the label
+    import math as _math
+    mag   = 10 ** max(0, int(_math.log10(peak)) - 1)
+    peak_label = int(_math.ceil(peak / mag) * mag)
 
-    def _ts_to_x(ts: float) -> int:
+    def _tx(ts: float) -> int:
         return cx + int(cw * max(0.0, min(1.0, (ts - cutoff) / WINDOW)))
 
-    def _val_to_y(v: float) -> int:
-        return cy + CHART_H - int(CHART_H * min(1.0, v / peak))
+    def _vy(v: float) -> int:
+        return cb - int(CHART_H * min(1.0, v / peak_label))
+
+    # ── Y axis ────────────────────────────────────────────────────────────────
+    d.line([(cx, cy), (cx, cb)], fill=_BLACK, width=1)   # Y spine
+    # top tick + label
+    d.line([(cx - 2, cy), (cx, cy)], fill=_BLACK, width=1)
+    d.text((cx - 3, cy - 1), f'{peak_label}', font=f, fill=_BLACK, anchor='rm')
+    # mid tick + label
+    mid_val = peak_label // 2
+    mid_y   = _vy(mid_val)
+    d.line([(cx - 2, mid_y), (cx, mid_y)], fill=_BLACK, width=1)
+    d.text((cx - 3, mid_y - 1), f'{mid_val}', font=f, fill=_BLACK, anchor='rm')
+    # baseline tick + label
+    d.line([(cx - 2, cb), (cx, cb)], fill=_BLACK, width=1)
+    d.text((cx - 3, cb - 1), '0', font=f, fill=_BLACK, anchor='rm')
+
+    # Faint horizontal grid at mid and top
+    for gy in (cy, mid_y):
+        for gx in range(cx + 2, cx + cw, 4):
+            d.point((gx, gy), fill=180)
 
     # Baseline
-    d.line([(cx, cy + CHART_H), (cx + cw, cy + CHART_H)], fill=_BLACK, width=1)
+    d.line([(cx, cb), (cx + cw, cb)], fill=_BLACK, width=1)
 
-    # Draw two series: download (solid) then upload (dotted via short dashes)
+    # ── X axis labels ─────────────────────────────────────────────────────────
+    xl_y = cb + 2
+    d.text((cx, xl_y), '5h ago', font=f, fill=_BLACK)
+    d.text((cx + cw // 2, xl_y), '2.5h', font=f, fill=_BLACK, anchor='ma')
+    d.text((cx + cw, xl_y), 'now', font=f, fill=_BLACK, anchor='ra')
+    # tick marks at each label position
+    for tx in (cx, cx + cw // 2, cx + cw):
+        d.line([(tx, cb), (tx, cb + 3)], fill=_BLACK, width=1)
+
+    # ── Series lines ──────────────────────────────────────────────────────────
     for key, dashed in (('down', False), ('up', True)):
         prev = None
         for i, pt in enumerate(pts):
-            cur_x = _ts_to_x(pt['ts'])
-            cur_y = _val_to_y(pt[key])
-            if prev is not None:
-                gap = pt['ts'] - pts[i - 1]['ts'] > GAP_SECS
-                if not gap:
-                    px, py = prev
-                    if dashed:
-                        # 4 px on, 3 px off along the segment
-                        dx, dy = cur_x - px, cur_y - py
-                        length = max(1, int((dx ** 2 + dy ** 2) ** 0.5))
-                        steps = max(1, length // 7)
-                        for s in range(steps):
-                            t0, t1 = s / steps, (s + 0.5) / steps
-                            x0 = int(px + dx * t0); y0 = int(py + dy * t0)
-                            x1 = int(px + dx * t1); y1 = int(py + dy * t1)
-                            d.line([(x0, y0), (x1, y1)], fill=_BLACK, width=1)
-                    else:
-                        d.line([(px, py), (cur_x, cur_y)], fill=_BLACK, width=1)
+            cur_x = _tx(pt['ts'])
+            cur_y = _vy(pt[key])
+            if prev is not None and pt['ts'] - pts[i - 1]['ts'] <= GAP_SECS:
+                px, py = prev
+                if dashed:
+                    dx, dy = cur_x - px, cur_y - py
+                    length = max(1, int((dx ** 2 + dy ** 2) ** 0.5))
+                    steps  = max(1, length // 7)
+                    for s in range(steps):
+                        t0 = s / steps; t1 = (s + 0.5) / steps
+                        d.line([(int(px + dx * t0), int(py + dy * t0)),
+                                (int(px + dx * t1), int(py + dy * t1))],
+                               fill=_BLACK, width=1)
+                else:
+                    d.line([(px, py), (cur_x, cur_y)], fill=_BLACK, width=1)
             prev = (cur_x, cur_y)
 
 
@@ -741,20 +783,29 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
         except Exception:
             pass
 
+    # Box height mirrors _draw_speedtest's own constants (BOX_PAD=7, FONT_SZ=_TILE_FONT=11).
+    _ST_BOX_H = 7 + (11 + 3) + 40 + (11 + 2) + 7  # BOX_PAD+HDR_H+CHART_H+X_LBL_H+BOX_PAD
+    _ST_GAP = 4
+    _has_speedtest = bool(speedtest_history and config.get('screensaver_speedtest', True))
+    chart_w = 220
+
+    # Draw Claude usage tile at the very bottom-right; get its top y.
+    claude_top = None
     if claude_usage:
         try:
-            _draw_claude_usage(d, font_path, claude_usage, reserved_bottom,
-                               week_pct=pct)
+            claude_top = _draw_claude_usage(d, font_path, claude_usage,
+                                            reserved_bottom, week_pct=pct)
         except Exception:
             pass
 
-    if speedtest_history and config.get('screensaver_speedtest', True):
+    # Speedtest chart stacks directly above the Claude tile.
+    if _has_speedtest:
         try:
-            chart_w = 220
-            chart_x = PAD
-            # Sits just above the bottom edge, clear of the left column.
-            # Compute approximate box height to place it exactly at the bottom.
-            chart_y = H - PAD - (6 + 12 + 2 + 28 + 6)
+            chart_x = W - PAD - chart_w
+            if claude_top is not None:
+                chart_y = claude_top - _ST_GAP - _ST_BOX_H
+            else:
+                chart_y = H - PAD - _ST_BOX_H
             _draw_speedtest(d, font_path, speedtest_history,
                             chart_x, chart_y, chart_w)
         except Exception:
