@@ -28,6 +28,10 @@ Endpoints:
   GET  /card                  → push-a-card composer page
   POST /card                  → JSON card payload — rendered to the e-ink
                                 panel (PIN-gated)
+  POST /alert                 → JSON {"message": "...", "ttl": 30} — push a
+                                message into the status-bar alert rotation.
+                                Auth: session cookie OR {"token": "<pin>"}
+                                field in the body (script-friendly).
 
 Usage:
   from preview_server import start_if_enabled
@@ -71,7 +75,8 @@ _CONFIG_SNAPSHOT_DIR = 'config_snapshots'
 _active_sessions: set = set()
 _SESSION_COOKIE = 'eink_session'
 _GATED_HTML_GET = {'/config', '/clipboard', '/beam', '/notes', '/logs',
-                   '/session-logs', '/screen', '/screen.txt'}
+                   '/session-logs', '/screen', '/screen.txt',
+                   '/scrollback', '/scrollback.txt'}
 _GATED_JSON_GET = {'/clipboard/list', '/logs.json', '/session-logs.json'}
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -465,6 +470,14 @@ _CONFIG_HTML = '''\
           if (o === val) opt.selected = true;
           ctrl.appendChild(opt);
         });
+        if (key === "terminal_font_size") {
+          ctrl.addEventListener("change", function() {
+            fetch("/action", {method:"POST",
+              headers:{"Content-Type":"application/json"},
+              body: JSON.stringify({action:"font_set", font_size: parseInt(ctrl.value)})
+            });
+          });
+        }
       } else {
         ctrl = mk("input", {className: "txt-inp", type: "text"});
         ctrl.dataset.key = key;
@@ -2103,10 +2116,12 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                   activity_ref: List[float], photos_dir: str, config_path: str = '',
                   clipboard_path: str = '', display_queue: queue.Queue = None,
                   beam_ref: List[str] = None, config: dict = None,
-                  status_ref: List[dict] = None, screen_ref: List[str] = None):
+                  status_ref: List[dict] = None, screen_ref: List[str] = None,
+                  scrollback_ref: List[str] = None):
     config = config if config is not None else {}
     status_ref = status_ref if status_ref is not None else [{}]
     screen_ref = screen_ref if screen_ref is not None else ['']
+    scrollback_ref = scrollback_ref if scrollback_ref is not None else ['']
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -2167,6 +2182,13 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             elif path == '/screen.txt':
                 text = (screen_ref[0] if screen_ref else '')
                 self._respond(200, 'text/plain; charset=utf-8', text.encode())
+            elif path == '/scrollback':
+                text = (scrollback_ref[0] if scrollback_ref else '') or '(no scrollback yet)'
+                self._respond(200, 'text/html; charset=utf-8',
+                              _render_beam_page(text, title='Scrollback').encode())
+            elif path == '/scrollback.txt':
+                text = (scrollback_ref[0] if scrollback_ref else '')
+                self._respond(200, 'text/plain; charset=utf-8', text.encode())
             elif path == '/notes':
                 text = _read_notes(config_path) or '(notes file is empty)'
                 self._respond(200, 'text/html; charset=utf-8',
@@ -2197,6 +2219,9 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             if path == '/login':
                 self._handle_login()
                 return
+            if path == '/alert':
+                self._handle_alert()
+                return
             if not _is_authorized(self, config_path):
                 self._respond(401, 'application/json', b'{"ok":false,"error":"PIN required"}')
                 return
@@ -2216,6 +2241,8 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._handle_cycle()
             elif path == '/mode':
                 self._handle_mode()
+            elif path == '/image':
+                self._handle_image()
             elif path == '/config':
                 self._handle_config_post()
             elif path == '/config/restore':
@@ -2237,6 +2264,44 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._handle_photo_delete(path[7:])
             else:
                 self._respond(404, 'text/plain', b'Not found')
+
+        # ── Webhook alert ────────────────────────────────────────────────────
+
+        def _handle_alert(self):
+            """POST /alert — push a message into the status-bar alert rotation.
+
+            Auth: session cookie (same as every other gated endpoint) OR a
+            "token" field in the JSON body equal to the configured PIN — so
+            external scripts can curl a one-liner without a prior /login.
+            No PIN configured → open to anyone on the LAN (matches everything
+            else on the server when the PIN feature is off).
+            """
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                body = json.loads(raw) if raw else {}
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+
+            pin = _get_pin(config_path)
+            if pin:
+                body_token = str(body.get('token', ''))
+                cookie_ok = _session_token(self) in _active_sessions
+                token_ok  = hmac.compare_digest(body_token, pin) if body_token else False
+                if not (cookie_ok or token_ok):
+                    self._respond(401, 'application/json', b'{"ok":false,"error":"PIN required"}')
+                    return
+
+            msg = str(body.get('message', '')).strip()
+            if not msg:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"message required"}')
+                return
+            ttl = body.get('ttl')
+            if display_queue is not None:
+                display_queue.put({'type': 'alert', 'message': msg,
+                                   'ttl': float(ttl) if ttl is not None else None})
+            self._respond(200, 'application/json', b'{"ok":true}')
 
         # ── Auth handlers ───────────────────────────────────────────────────
 
@@ -2463,6 +2528,31 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             self._respond(200, 'application/json',
                           json.dumps({'ok': True, 'cycle': cycle}).encode())
 
+        def _handle_image(self):
+            """POST /image — push a local image file to the e-ink panel in 4-gray mode.
+
+            Body: {"path": "/absolute/path/to/image.jpg"}  (PIN-gated)
+            The path is resolved on the server; only files the server process
+            can read are accepted.  The image is scaled to 800×480 while
+            preserving aspect ratio (letterboxed).
+            """
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                path = json.loads(raw).get('path', '').strip()
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+            if not path:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"path required"}')
+                return
+            if not os.path.isfile(path):
+                self._respond(404, 'application/json', b'{"ok":false,"error":"file not found"}')
+                return
+            if display_queue is not None:
+                display_queue.put({'type': 'image', 'path': path})
+            self._respond(200, 'application/json', b'{"ok":true}')
+
         def _handle_message(self):
             """POST /message — display text on the e-ink screen."""
             length = int(self.headers.get('Content-Length', 0))
@@ -2490,7 +2580,8 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             length = int(self.headers.get('Content-Length', 0))
             raw = self.rfile.read(length)
             try:
-                action = json.loads(raw).get('action', '')
+                body = json.loads(raw)
+                action = body.get('action', '')
             except Exception:
                 self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
                 return
@@ -2500,6 +2591,11 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             if action in _DISPLAY:
                 if display_queue is not None:
                     display_queue.put({'type': action})
+                self._respond(200, 'application/json', b'{"ok":true}')
+            elif action == 'font_set':
+                size = body.get('font_size')
+                if display_queue is not None and size is not None:
+                    display_queue.put({'type': 'font_set', 'font_size': int(size)})
                 self._respond(200, 'application/json', b'{"ok":true}')
             elif action == 'restart':
                 self._respond(200, 'application/json', b'{"ok":true}')
@@ -2788,10 +2884,11 @@ class PreviewServer:
         self._server = None
         self.input_queue:   queue.Queue = queue.Queue()
         self.display_queue: queue.Queue = queue.Queue()
-        self._activity_ref: List[float] = [time.time()]
-        self._beam_ref:     List[str] = ['']   # latest "beam to phone" text
-        self._status_ref:   List[dict] = [{}]  # live status from the app loop
-        self._screen_ref:   List[str] = ['']   # live screen text, for /screen
+        self._activity_ref:    List[float] = [time.time()]
+        self._beam_ref:        List[str] = ['']   # latest "beam to phone" text
+        self._status_ref:      List[dict] = [{}]  # live status from the app loop
+        self._screen_ref:      List[str] = ['']   # live screen text, for /screen
+        self._scrollback_ref:  List[str] = ['']   # scrollback+screen, for /scrollback
 
     def set_beam_text(self, text: str):
         """Store the text shown at /beam (called by the app on beam-to-phone)."""
@@ -2800,6 +2897,10 @@ class PreviewServer:
     def set_screen_text(self, text: str):
         """Publish the terminal's current text for /screen (called by the app)."""
         self._screen_ref[0] = text or ''
+
+    def set_scrollback_text(self, text: str):
+        """Publish history + visible screen for /scrollback (called by the app)."""
+        self._scrollback_ref[0] = text or ''
 
     def set_status(self, status: dict):
         """Publish live runtime status for the /status panel (called each loop)."""
@@ -2820,6 +2921,7 @@ class PreviewServer:
             config=self._config,
             status_ref=self._status_ref,
             screen_ref=self._screen_ref,
+            scrollback_ref=self._scrollback_ref,
         )
         self._server = HTTPServer(('', self._port), handler)
         self._server.allow_reuse_address = True

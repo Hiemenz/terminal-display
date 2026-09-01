@@ -122,7 +122,7 @@ class PaletteHelpMixin:
             self._restart_terminal()
         elif label == 'View Notes as Markdown':
             self._open_markdown_notes()
-        elif label == 'SSH Picker':
+        elif label == 'Connect (SSH/tmux)':
             self._toggle_sshpick()
         elif label == 'Command Palette':
             self._toggle_palette()

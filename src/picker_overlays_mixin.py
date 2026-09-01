@@ -17,26 +17,53 @@ logger = logging.getLogger(__name__)
 class PickerOverlaysMixin:
     """SSH picker, process kill, service manager, and power menu overlays."""
 
-    def _load_ssh_bookmarks(self) -> tuple:
-        bookmarks = self._config.get('terminal_ssh_bookmarks', [])
-        strings, hosts = [], []
-        for b in bookmarks:
+    def _load_connections(self) -> tuple:
+        """Return (display_strings, connection_dicts) for tmux sessions + SSH hosts.
+
+        tmux sessions are listed first (other than this app's own session); SSH
+        bookmarks follow. Each connection dict carries a 'type' key: 'tmux' or
+        'ssh'.
+        """
+        strings, conns = [], []
+
+        # ── Local tmux sessions ──────────────────────────────────────────────
+        if self._use_tmux:
+            try:
+                r = subprocess.run(
+                    ['tmux', 'list-sessions', '-F',
+                     '#{session_name}\t#{session_windows}\t#{?session_attached,attached,detached}'],
+                    capture_output=True, text=True, timeout=2,
+                )
+                for line in r.stdout.splitlines():
+                    parts = line.split('\t')
+                    name = parts[0].strip()
+                    if not name or name == self._tmux_session:
+                        continue
+                    detail = f"{parts[1]}w, {parts[2]}" if len(parts) >= 3 else ''
+                    strings.append(f"  [t] {name:<22}  {detail}")
+                    conns.append({'type': 'tmux', 'session': name})
+            except Exception:
+                pass
+
+        # ── SSH bookmarks ────────────────────────────────────────────────────
+        for b in self._config.get('terminal_ssh_bookmarks', []):
             name = b.get('name', b.get('host', '?'))
             user = b.get('user', '')
             host = b.get('host', '')
-            strings.append(f"  {name:<20}  {user+'@'+host if user else host}")
-            hosts.append(b)
-        return strings, hosts
+            strings.append(f"  [s] {name:<22}  {user+'@'+host if user else host}")
+            conns.append(dict(b, type='ssh'))
+
+        return strings, conns
 
     def _toggle_sshpick(self):
         if self._sshpick_active:
             self._sshpick_active = False
             self._render(); return
-        items, hosts = self._load_ssh_bookmarks()
+        items, conns = self._load_connections()
         if not items:
             self._new_tab(); return
         self._sshpick_items = items
-        self._sshpick_hosts = hosts
+        self._sshpick_connections = conns
         self._sshpick_idx = 0
         self._sshpick_active = True
         self._palette_active = self._clipboard_active = False
@@ -53,17 +80,30 @@ class PickerOverlaysMixin:
             self._sshpick_idx = min(len(self._sshpick_items) - 1, self._sshpick_idx + 1)
             self._render(); return b''
         if b'\r' in data or b'\n' in data:
-            if self._sshpick_hosts:
-                b = self._sshpick_hosts[self._sshpick_idx]
-                parts = ['ssh']
-                port = b.get('port', 22)
-                if port and port != 22:
-                    parts += ['-p', str(port)]
-                user = b.get('user', '')
-                host = b.get('host', '')
-                parts.append(f"{user}@{host}" if user else host)
+            if self._sshpick_connections:
+                conn = self._sshpick_connections[self._sshpick_idx]
                 self._sshpick_active = False
-                self._new_tab(cmd=' '.join(parts))
+                if conn.get('type') == 'tmux':
+                    sess = conn['session']
+                    try:
+                        result = subprocess.run(
+                            ['tmux', 'switch-client', '-t', sess],
+                            capture_output=True, text=True, timeout=2)
+                        if result.returncode != 0:
+                            self._alert_monitor.note(
+                                f'tmux: {(result.stderr or result.stdout).strip()[:60]}')
+                    except Exception as e:
+                        self._alert_monitor.note(f'tmux switch failed: {e}')
+                    self._render(force_full=True)
+                else:
+                    parts = ['ssh']
+                    port = conn.get('port', 22)
+                    if port and port != 22:
+                        parts += ['-p', str(port)]
+                    user = conn.get('user', '')
+                    host = conn.get('host', '')
+                    parts.append(f"{user}@{host}" if user else host)
+                    self._new_tab(cmd=' '.join(parts))
             return b''
         if b'\x1b' in data:
             self._sshpick_active = False; self._render(); return b''

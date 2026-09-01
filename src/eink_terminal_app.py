@@ -359,6 +359,9 @@ class EinkTerminal(
         self._screensaver_is_cycle   = False  # set by _show_screensaver per rotation set
         self._screensaver_show_mono  = 0.0   # when screensaver was last shown (for grace period)
 
+        # Speedtest monitor (background thread, started in run())
+        self._speedtest_monitor = None
+
         # Text message (send-to-display) state
         self._in_text_message = False
         self._display_queue = None   # set in run() after server starts
@@ -372,7 +375,7 @@ class EinkTerminal(
         # SSH bookmarks picker
         self._sshpick_active = False
         self._sshpick_items: list = []
-        self._sshpick_hosts: list = []
+        self._sshpick_connections: list = []
         self._sshpick_idx: int = 0
 
         # Process kill overlay (F3)
@@ -733,8 +736,11 @@ class EinkTerminal(
             ip = _get_local_ip()
             qr_url = f'http://{ip}:{port}/config' if ip else ''
 
+            _sm = getattr(self, '_speedtest_monitor', None)
+            speedtest_hist = _sm.history() if _sm is not None else None
             img = render_screensaver(image_path, qr_url, self._config,
-                                     claude_usage=self._claude_usage())
+                                     claude_usage=self._claude_usage(),
+                                     speedtest_history=speedtest_hist)
             # Must be a flash (ordered _FULL task): full_refresh(flash=False) only
             # sets _pending_partial, which the sleep() below immediately cancels —
             # the screensaver would never reach the panel.
@@ -1175,9 +1181,10 @@ class EinkTerminal(
             overlay = (self._snippets_items, self._snippets_idx,
                        'Snippets  [Enter=run  Esc=cancel]')
         elif self._clipboard_active and self._clipboard:
+            _cn = len(self._clipboard)
             overlay = (
                 [c.get('label', c.get('text', '')) for c in self._clipboard],
-                self._clipboard_idx, 'Clipboard',
+                self._clipboard_idx, f'Clipboard ({_cn})',
             )
         elif self._prockill_active and self._prockill_items:
             overlay = (self._prockill_items, self._prockill_idx,
@@ -1437,6 +1444,18 @@ class EinkTerminal(
             self._preview_server  = server
             self._web_input_queue = server.input_queue
             self._display_queue   = server.display_queue
+
+        if self._config.get('screensaver_speedtest', True):
+            try:
+                from speedtest_monitor import SpeedtestMonitor
+                interval = int(self._config.get('screensaver_speedtest_interval', 15) or 15)
+                data_dir = os.path.join(_REPO_ROOT, 'data')
+                self._speedtest_monitor = SpeedtestMonitor(
+                    interval_minutes=interval, data_dir=data_dir)
+                self._speedtest_monitor.start()
+            except Exception as exc:
+                logger.debug('Speedtest monitor not started: %s', exc)
+
         _screensaver_at_start = (
             (self._sleep_timeout > 0 or self._idle_timeout > 0)
             and self._config.get('display_sleep_shows_screensaver', True)
@@ -1459,6 +1478,8 @@ class EinkTerminal(
             if self._evdev_kb:
                 self._evdev_kb.ungrab()
             self._driver.sleep()
+            if self._speedtest_monitor is not None:
+                self._speedtest_monitor.stop()
             if self._child_pid:
                 try:
                     os.waitpid(self._child_pid, os.WNOHANG)
@@ -1918,6 +1939,12 @@ class EinkTerminal(
                             in_screensaver = False; panel_asleep = False
                             self._last_input = now
                             self._change_font(-2)
+                        elif action == 'font_set':
+                            size = cmd.get('font_size')
+                            if size is not None:
+                                in_screensaver = False; panel_asleep = False
+                                self._last_input = now
+                                self._change_font(int(size) - self._font_size)
                         elif action == 'dark_toggle':
                             in_screensaver = False; panel_asleep = False
                             self._last_input = now
@@ -1925,6 +1952,34 @@ class EinkTerminal(
                         elif action == 'card':
                             in_screensaver = False; panel_asleep = False
                             self._show_card(cmd.get('card', {}))
+                        elif action == 'image':
+                            img_path = cmd.get('path', '')
+                            if img_path and os.path.isfile(img_path):
+                                try:
+                                    from PIL import Image as _PILImage
+                                    raw = _PILImage.open(img_path).convert('L')
+                                    # Letterbox-fit to 800×480
+                                    raw.thumbnail((800, 480), _PILImage.LANCZOS)
+                                    canvas = _PILImage.new('L', (800, 480), 255)
+                                    ox = (800 - raw.width) // 2
+                                    oy = (480 - raw.height) // 2
+                                    canvas.paste(raw, (ox, oy))
+                                    in_screensaver = False; panel_asleep = False
+                                    self._in_text_message = True
+                                    self._push_static(canvas, reason='image',
+                                                      dither=True)
+                                except Exception as _ie:
+                                    logger.debug('view-image failed: %s', _ie)
+                        elif action == 'alert':
+                            msg = cmd.get('message', '')
+                            ttl = cmd.get('ttl')
+                            if msg:
+                                self._alert_monitor.note(
+                                    msg,
+                                    duration=float(ttl) if ttl is not None else None)
+                                if not in_screensaver and not panel_asleep:
+                                    self._status_force = True
+                                    has_pending = True
                 except _queue.Empty:
                     pass
 
@@ -1950,12 +2005,13 @@ class EinkTerminal(
                 self._last_activity = now
                 self._last_input = now
                 self._did_idle_reset = False
-                if in_screensaver or panel_asleep:
-                    in_screensaver = False
+                if panel_asleep and not in_screensaver:
+                    # Wake the panel back to the terminal (not during screensaver
+                    # — user hasn't chosen to dismiss it yet).
                     panel_asleep = False
                     self._render(force_full=True)
                     self._last_full_refresh_mono = time.monotonic()
-                else:
+                elif not in_screensaver and not panel_asleep:
                     self._status_force = True
                     has_pending = True
 
@@ -2015,6 +2071,8 @@ class EinkTerminal(
                 # message by hand.
                 try:
                     self._preview_server.set_screen_text(self._screen_text())
+                    self._preview_server.set_scrollback_text(
+                        self._scrollback_text())
                 except Exception:
                     pass
                 self._preview_server.set_status({
