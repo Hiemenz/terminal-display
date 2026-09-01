@@ -39,7 +39,7 @@ _HINTS = [
     ('^/',    'Help'),
     ('^F',    'Find'),
     ('^Spc',  'Copy'),
-    ('F1',    'SSH'),
+    ('F1',    'Conn'),
     ('F2',    'Close'),
     ('F5',    'Power'),
     ('F6',    'Palette'),

@@ -386,7 +386,7 @@ _HELP_SECTIONS = [
     ]),
     ('System', [
         ('Command Palette',     'F6'),
-        ('SSH Picker',          'F1'),
+        ('Connect (SSH/tmux)',   'F1'),
         ('Kill Process',        'F3'),
         ('Service Manager',     'F4'),
         ('Power Menu',          'F5'),

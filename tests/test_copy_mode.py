@@ -195,11 +195,11 @@ def test_copy_confirm_with_anchor_yanks_char_range(make_app, tmp_path):
     assert beamed['text'] == 'world\nsecond'
 
 
-def test_copy_confirm_caps_clipboard_at_twenty(make_app, tmp_path):
+def test_copy_confirm_caps_clipboard_at_ten(make_app, tmp_path):
     app = _app_with_tabs(make_app, 'shell')
     app._stream.feed(b'x\r\n')
     app._clipboard_path = str(tmp_path / 'clipboard.json')
-    app._clipboard = [{'text': f't{i}', 'label': f't{i}'} for i in range(20)]
+    app._clipboard = [{'text': f't{i}', 'label': f't{i}'} for i in range(10)]
     app._copy_active = True
     app._copy_anchor = None
     app._copy_row, app._copy_col = 0, 0
@@ -207,7 +207,7 @@ def test_copy_confirm_caps_clipboard_at_twenty(make_app, tmp_path):
 
     app._copy_confirm()
 
-    assert len(app._clipboard) == 20
+    assert len(app._clipboard) == 10
     assert app._clipboard[0]['text'] == 'x'
 
 

@@ -28,6 +28,10 @@ Endpoints:
   GET  /card                  → push-a-card composer page
   POST /card                  → JSON card payload — rendered to the e-ink
                                 panel (PIN-gated)
+  POST /alert                 → JSON {"message": "...", "ttl": 30} — push a
+                                message into the status-bar alert rotation.
+                                Auth: session cookie OR {"token": "<pin>"}
+                                field in the body (script-friendly).
 
 Usage:
   from preview_server import start_if_enabled
@@ -2197,6 +2201,9 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
             if path == '/login':
                 self._handle_login()
                 return
+            if path == '/alert':
+                self._handle_alert()
+                return
             if not _is_authorized(self, config_path):
                 self._respond(401, 'application/json', b'{"ok":false,"error":"PIN required"}')
                 return
@@ -2237,6 +2244,44 @@ def _make_handler(bmp_path: str, input_queue: queue.Queue,
                 self._handle_photo_delete(path[7:])
             else:
                 self._respond(404, 'text/plain', b'Not found')
+
+        # ── Webhook alert ────────────────────────────────────────────────────
+
+        def _handle_alert(self):
+            """POST /alert — push a message into the status-bar alert rotation.
+
+            Auth: session cookie (same as every other gated endpoint) OR a
+            "token" field in the JSON body equal to the configured PIN — so
+            external scripts can curl a one-liner without a prior /login.
+            No PIN configured → open to anyone on the LAN (matches everything
+            else on the server when the PIN feature is off).
+            """
+            length = int(self.headers.get('Content-Length', 0))
+            raw = self.rfile.read(length)
+            try:
+                body = json.loads(raw) if raw else {}
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"Bad JSON"}')
+                return
+
+            pin = _get_pin(config_path)
+            if pin:
+                body_token = str(body.get('token', ''))
+                cookie_ok = _session_token(self) in _active_sessions
+                token_ok  = hmac.compare_digest(body_token, pin) if body_token else False
+                if not (cookie_ok or token_ok):
+                    self._respond(401, 'application/json', b'{"ok":false,"error":"PIN required"}')
+                    return
+
+            msg = str(body.get('message', '')).strip()
+            if not msg:
+                self._respond(400, 'application/json', b'{"ok":false,"error":"message required"}')
+                return
+            ttl = body.get('ttl')
+            if display_queue is not None:
+                display_queue.put({'type': 'alert', 'message': msg,
+                                   'ttl': float(ttl) if ttl is not None else None})
+            self._respond(200, 'application/json', b'{"ok":true}')
 
         # ── Auth handlers ───────────────────────────────────────────────────
 

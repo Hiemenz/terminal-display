@@ -54,10 +54,11 @@ class AlertMonitor:
             changed |= self._check_network()
         return changed
 
-    def note(self, msg: str) -> None:
+    def note(self, msg: str, duration: float = None) -> None:
         """Show a message in the status bar, from outside the periodic checks
-        (e.g. a long-running command finishing)."""
-        self._push(msg)
+        (e.g. a long-running command finishing or an incoming webhook alert).
+        `duration` overrides the default display time (capped 1–3600 s)."""
+        self._push(msg, duration)
 
     def active(self) -> list:
         """Return messages for currently-active (non-expired) alerts."""
@@ -66,13 +67,15 @@ class AlertMonitor:
 
     # ─── private ──────────────────────────────────────────────────────────────
 
-    def _push(self, msg: str):
+    def _push(self, msg: str, duration: float = None):
         # Avoid duplicating the same message while it is still active
         now = time.monotonic()
+        dur = (max(1.0, min(float(duration), 3600.0))
+               if duration is not None else _ALERT_DURATION)
         for m, exp in self._alerts:
             if m == msg and exp > now:
                 return
-        self._alerts.append((msg, now + _ALERT_DURATION))
+        self._alerts.append((msg, now + dur))
 
     def _expire(self, now: float) -> bool:
         before = len(self._alerts)

@@ -372,7 +372,7 @@ class EinkTerminal(
         # SSH bookmarks picker
         self._sshpick_active = False
         self._sshpick_items: list = []
-        self._sshpick_hosts: list = []
+        self._sshpick_connections: list = []
         self._sshpick_idx: int = 0
 
         # Process kill overlay (F3)
@@ -1175,9 +1175,10 @@ class EinkTerminal(
             overlay = (self._snippets_items, self._snippets_idx,
                        'Snippets  [Enter=run  Esc=cancel]')
         elif self._clipboard_active and self._clipboard:
+            _cn = len(self._clipboard)
             overlay = (
                 [c.get('label', c.get('text', '')) for c in self._clipboard],
-                self._clipboard_idx, 'Clipboard',
+                self._clipboard_idx, f'Clipboard ({_cn})',
             )
         elif self._prockill_active and self._prockill_items:
             overlay = (self._prockill_items, self._prockill_idx,
@@ -1925,6 +1926,16 @@ class EinkTerminal(
                         elif action == 'card':
                             in_screensaver = False; panel_asleep = False
                             self._show_card(cmd.get('card', {}))
+                        elif action == 'alert':
+                            msg = cmd.get('message', '')
+                            ttl = cmd.get('ttl')
+                            if msg:
+                                self._alert_monitor.note(
+                                    msg,
+                                    duration=float(ttl) if ttl is not None else None)
+                                if not in_screensaver and not panel_asleep:
+                                    self._status_force = True
+                                    has_pending = True
                 except _queue.Empty:
                     pass
 
@@ -1950,12 +1961,13 @@ class EinkTerminal(
                 self._last_activity = now
                 self._last_input = now
                 self._did_idle_reset = False
-                if in_screensaver or panel_asleep:
-                    in_screensaver = False
+                if panel_asleep and not in_screensaver:
+                    # Wake the panel back to the terminal (not during screensaver
+                    # — user hasn't chosen to dismiss it yet).
                     panel_asleep = False
                     self._render(force_full=True)
                     self._last_full_refresh_mono = time.monotonic()
-                else:
+                elif not in_screensaver and not panel_asleep:
                     self._status_force = True
                     has_pending = True
 

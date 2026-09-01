@@ -224,7 +224,7 @@ class TextActionsMixin:
         first_line = text.split('\n', 1)[0]
         label = first_line if len(first_line) <= 40 else first_line[:39] + '…'
         self._clipboard.insert(0, {'text': text, 'label': label})
-        self._clipboard = self._clipboard[:20]
+        self._clipboard = self._clipboard[:10]
         try:
             os.makedirs(os.path.dirname(self._clipboard_path), exist_ok=True)
             with open(self._clipboard_path, 'w') as f:
@@ -234,7 +234,7 @@ class TextActionsMixin:
     def _load_clipboard(self) -> list:
         try:
             items = json.load(open(self._clipboard_path))
-            return [i for i in items if isinstance(i, dict) and 'text' in i][:20]
+            return [i for i in items if isinstance(i, dict) and 'text' in i][:10]
         except Exception:
             return []
 
