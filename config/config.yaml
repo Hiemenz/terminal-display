@@ -433,6 +433,13 @@ screensaver_tiles_git_scan_dir: "/home/pi/git"
 # MLB tile: team to follow (147 = Yankees; find your team's ID on statsapi.mlb.com)
 screensaver_tiles_mlb_team_id: 147
 screensaver_tiles_mlb_team_abbr: "NYY"
+# Video tile: path to any MP4/MKV/AVI. Advances `advance_seconds` of video
+# time each screensaver refresh. Leave blank to hide the tile.
+screensaver_tiles_video_path: ""
+screensaver_tiles_video_advance_seconds: 60
+# Business idea tile: path to a git repo containing markdown files with
+# ### N. Title headers. Cycles one idea per screensaver refresh.
+screensaver_tiles_idea_repo: "/home/pi/git/business-ideas"
 
 # ── System overlay services (F4 service manager) ─────────────────────────────
 terminal_services:

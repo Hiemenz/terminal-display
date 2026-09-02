@@ -212,6 +212,9 @@ _CONFIG_SCHEMA = [
         ['screensaver_tiles_git_scan_dir',     'str',  'Git Repos Dir',      'Tiles mode: scan repos under this path for today\'s commits'],
         ['screensaver_tiles_mlb_team_id',      'int',  'MLB Team ID',        'Tiles mode: 147 = Yankees (find yours at statsapi.mlb.com)'],
         ['screensaver_tiles_mlb_team_abbr',    'str',  'MLB Team Abbr',      'Tiles mode: e.g. NYY'],
+        ['screensaver_tiles_video_path',       'str',  'Video File Path',    'Tiles mode: MP4/MKV to cycle through (leave blank to hide)'],
+        ['screensaver_tiles_video_advance_seconds', 'int', 'Video Advance (s)', 'Tiles mode: seconds of video to skip per refresh (60 = 1 min of video)'],
+        ['screensaver_tiles_idea_repo',        'str',  'Business Ideas Repo','Tiles mode: path to repo with ### idea headers in .md files'],
     ]],
     ['Startup & Web', [
         ['startup_mode',            'select', 'Startup Mode',          ['terminal', 'stats']],

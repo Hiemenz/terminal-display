@@ -714,7 +714,13 @@ class EinkTerminal(
             if self._config.get('screensaver_mode', 'static') == 'tiles':
                 from render import render_tile_screensaver
                 _tf = getattr(self, '_tile_fetcher', None)
+                if _tf is not None:
+                    _tf.advance()   # step video frame + business idea forward
                 tile_data = _tf.data() if _tf is not None else {}
+                # Merge one-shot tile state into tile_data dict
+                if _tf is not None:
+                    tile_data['video_frame_path'] = _tf.video_frame_path()
+                    tile_data['idea'] = _tf.current_idea()
                 img = render_tile_screensaver(
                     self._config,
                     tile_data=tile_data,
@@ -1481,7 +1487,9 @@ class EinkTerminal(
         if self._config.get('screensaver_mode', 'static') == 'tiles':
             try:
                 from tile_fetcher import TileFetcher
-                self._tile_fetcher = TileFetcher(self._config)
+                cfg_with_dir = dict(self._config)
+                cfg_with_dir['_data_dir'] = os.path.join(_REPO_ROOT, 'data')
+                self._tile_fetcher = TileFetcher(cfg_with_dir)
                 self._tile_fetcher.start()
             except Exception as exc:
                 logger.debug('Tile fetcher not started: %s', exc)

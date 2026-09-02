@@ -33,6 +33,210 @@ _CPU_TEMP_TTL = 60     # 1 min
 _POLL         = 60     # how often the background thread wakes up
 
 
+# ── Video frame manager ───────────────────────────────────────────────────────
+
+class VideoFrameManager:
+    """Extracts and advances frames from a video file using ffmpeg.
+
+    Call advance() once per screensaver render to step forward by
+    `advance_seconds` of video time.  get_frame_path() returns the most
+    recently extracted JPEG, or None if not ready.
+    """
+
+    def __init__(self, video_path: str, data_dir: str, advance_seconds: int = 60):
+        self._video_path = video_path
+        self._frame_path = os.path.join(data_dir, 'video_current.jpg')
+        self._state_path = os.path.join(data_dir, 'video_state.json')
+        self._advance    = advance_seconds
+        self._state      = self._load_state()
+
+    def get_frame_path(self) -> str | None:
+        return self._frame_path if os.path.exists(self._frame_path) else None
+
+    def advance(self) -> None:
+        """Step forward one increment and extract the new frame."""
+        if not os.path.exists(self._video_path):
+            return
+        dur = self._state.get('duration', 0.0)
+        if dur <= 0:
+            dur = self._probe_duration()
+            if dur <= 0:
+                return
+            self._state['duration'] = dur
+        ts = self._state.get('ts', 0.0)
+        ts += self._advance
+        if ts >= dur:
+            ts = 0.0   # loop
+        self._extract(ts)
+        self._state['ts'] = ts
+        self._save_state()
+
+    # ── internals ─────────────────────────────────────────────────────────────
+
+    def _extract(self, ts: float) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._frame_path) or '.', exist_ok=True)
+            subprocess.run(
+                ['ffmpeg', '-ss', f'{ts:.3f}', '-i', self._video_path,
+                 '-frames:v', '1', '-q:v', '3', self._frame_path, '-y'],
+                capture_output=True, timeout=20,
+            )
+        except Exception as exc:
+            logger.debug('video frame extract error: %s', exc)
+
+    def _probe_duration(self) -> float:
+        try:
+            r = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+                 '-show_format', self._video_path],
+                capture_output=True, text=True, timeout=10,
+            )
+            return float(json.loads(r.stdout)['format']['duration'])
+        except Exception:
+            return 0.0
+
+    def _load_state(self) -> dict:
+        try:
+            with open(self._state_path) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_state(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._state_path) or '.', exist_ok=True)
+            with open(self._state_path, 'w') as f:
+                json.dump(self._state, f)
+        except Exception:
+            pass
+
+
+# ── Business idea manager ─────────────────────────────────────────────────────
+
+class IdeaManager:
+    """Cycles through business ideas parsed from markdown files in a repo.
+
+    Scans for ``### N. Title`` headers, extracts the first paragraph and the
+    Monetization line.  Advances one idea per advance() call.
+    """
+
+    def __init__(self, repo_dir: str, data_dir: str):
+        self._repo_dir   = repo_dir
+        self._state_path = os.path.join(data_dir, 'idea_state.json')
+        self._cache_path = os.path.join(data_dir, 'idea_cache.json')
+        self._state      = self._load_state()
+        self._ideas: list = self._load_cache()
+
+    def current(self) -> dict | None:
+        """Return current idea dict, or None if no ideas loaded."""
+        if not self._ideas:
+            self._ideas = self._scan()
+            self._save_cache()
+        if not self._ideas:
+            return None
+        idx = self._state.get('idx', 0) % len(self._ideas)
+        return self._ideas[idx]
+
+    def advance(self) -> None:
+        """Move to the next idea, refreshing the cache if needed."""
+        if not self._ideas:
+            self._ideas = self._scan()
+            self._save_cache()
+        if self._ideas:
+            self._state['idx'] = (self._state.get('idx', 0) + 1) % len(self._ideas)
+            self._save_state()
+
+    # ── internals ─────────────────────────────────────────────────────────────
+
+    def _scan(self) -> list:
+        ideas = []
+        try:
+            for root, _, files in os.walk(self._repo_dir):
+                for fname in sorted(files):
+                    if not fname.endswith('.md'):
+                        continue
+                    path = os.path.join(root, fname)
+                    ideas.extend(self._parse_file(path))
+        except Exception as exc:
+            logger.debug('idea scan error: %s', exc)
+        return ideas
+
+    def _parse_file(self, path: str) -> list:
+        results = []
+        try:
+            with open(path, encoding='utf-8', errors='replace') as f:
+                text = f.read()
+            # Split on ### headers
+            import re
+            parts = re.split(r'^###\s+', text, flags=re.MULTILINE)
+            for part in parts[1:]:
+                lines = part.strip().splitlines()
+                if not lines:
+                    continue
+                title = re.sub(r'^\d+\.\s*', '', lines[0]).strip()
+                # First non-empty body paragraph
+                body = ''
+                in_para = False
+                for line in lines[1:]:
+                    stripped = line.strip()
+                    if stripped.startswith('Monetization:'):
+                        mono = stripped[len('Monetization:'):].strip()
+                        break
+                    if stripped and not in_para:
+                        in_para = True
+                        body = stripped
+                    elif stripped and in_para:
+                        body += ' ' + stripped
+                    elif in_para and not stripped:
+                        break
+                else:
+                    mono = ''
+                # Find Monetization line if we broke early
+                mono_match = re.search(r'Monetization:\s*(.+)', part)
+                if mono_match:
+                    mono = mono_match.group(1).split('.')[0].strip()
+                if title:
+                    results.append({
+                        'title': title[:60],
+                        'body':  body[:200],
+                        'mono':  mono[:80],
+                        'file':  os.path.basename(path),
+                    })
+        except Exception:
+            pass
+        return results
+
+    def _load_state(self) -> dict:
+        try:
+            with open(self._state_path) as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_state(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._state_path) or '.', exist_ok=True)
+            with open(self._state_path, 'w') as f:
+                json.dump(self._state, f)
+        except Exception:
+            pass
+
+    def _load_cache(self) -> list:
+        try:
+            with open(self._cache_path) as f:
+                return json.load(f)
+        except Exception:
+            return []
+
+    def _save_cache(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._cache_path) or '.', exist_ok=True)
+            with open(self._cache_path, 'w') as f:
+                json.dump(self._ideas, f)
+        except Exception:
+            pass
+
+
 class TileFetcher:
     def __init__(self, config: dict):
         self._config = config
@@ -40,6 +244,19 @@ class TileFetcher:
         self._lock  = threading.Lock()
         self._stop  = threading.Event()
         self._thread: threading.Thread | None = None
+
+        data_dir = config.get('_data_dir', 'data')
+
+        video_path = config.get('screensaver_tiles_video_path', '').strip()
+        self._video = (
+            VideoFrameManager(
+                video_path, data_dir,
+                advance_seconds=int(config.get('screensaver_tiles_video_advance_seconds', 60)),
+            ) if video_path else None
+        )
+
+        idea_repo = config.get('screensaver_tiles_idea_repo', '').strip()
+        self._ideas = IdeaManager(idea_repo, data_dir) if idea_repo else None
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -57,6 +274,25 @@ class TileFetcher:
     def data(self) -> dict:
         with self._lock:
             return {k: v[0] for k, v in self._cache.items()}
+
+    def advance(self) -> None:
+        """Advance one-shot tiles (video frame, business idea) on each screensaver render."""
+        if self._video is not None:
+            try:
+                self._video.advance()
+            except Exception as exc:
+                logger.debug('video advance error: %s', exc)
+        if self._ideas is not None:
+            try:
+                self._ideas.advance()
+            except Exception as exc:
+                logger.debug('idea advance error: %s', exc)
+
+    def video_frame_path(self) -> str | None:
+        return self._video.get_frame_path() if self._video else None
+
+    def current_idea(self) -> dict | None:
+        return self._ideas.current() if self._ideas else None
 
     # ── background loop ───────────────────────────────────────────────────────
 

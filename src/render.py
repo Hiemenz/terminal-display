@@ -1165,6 +1165,104 @@ def _draw_claude_usage_compact(d: ImageDraw.ImageDraw, font_path: str,
         pass
 
 
+def _draw_video_tile(img: Image.Image, d: ImageDraw.ImageDraw,
+                     x: int, y: int, w: int, h: int,
+                     font_path: str, frame_path: str | None, fg: int, bg: int) -> None:
+    f_chip = _find_font(font_path, 11)
+    cy = _tile_frame(d, x, y, w, h, 'MOVIE', f_chip, fg, bg)
+
+    if not frame_path or not os.path.exists(frame_path):
+        f_body = _find_font(font_path, 12)
+        d.text((x + _TILE_INSET, cy + 8), 'No video configured', font=f_body, fill=fg)
+        return
+
+    try:
+        frame = Image.open(frame_path).convert('L')
+        avail_w = w - 2
+        avail_h = h - (cy - y) - 2
+        frame.thumbnail((avail_w, avail_h), Image.LANCZOS)
+        px = x + (w - frame.width) // 2
+        py = cy + (avail_h - frame.height) // 2
+        img.paste(frame, (px, py))
+    except Exception:
+        f_body = _find_font(font_path, 11)
+        d.text((x + _TILE_INSET, cy + 8), 'Frame error', font=f_body, fill=fg)
+
+
+def _draw_idea_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
+                    font_path: str, idea: dict | None, fg: int, bg: int) -> None:
+    f_chip = _find_font(font_path, 11)
+    cy = _tile_frame(d, x, y, w, h, 'IDEA', f_chip, fg, bg)
+    cx = x + _TILE_INSET
+    cw = w - _TILE_INSET * 2
+    bottom = y + h - 6
+
+    f_title = _find_font(font_path, 13)
+    f_body  = _find_font(font_path, 11)
+    f_sm    = _find_font(font_path, 10)
+
+    if not idea:
+        d.text((cx, cy + 8), 'No idea repo configured', font=f_body, fill=fg)
+        return
+
+    # Title — wrap if needed
+    title = idea.get('title', '')
+    words = title.split()
+    line, lines = '', []
+    for w_word in words:
+        test = (line + ' ' + w_word).strip()
+        if _find_text_width(d, test, f_title) <= cw:
+            line = test
+        else:
+            if line:
+                lines.append(line)
+            line = w_word
+    if line:
+        lines.append(line)
+    for tl in lines[:2]:
+        if cy + 15 > bottom:
+            break
+        d.text((cx, cy), tl, font=f_title, fill=fg)
+        cy += 15
+    cy += 3
+
+    # Divider
+    if cy + 2 < bottom:
+        d.line([(cx, cy), (x + w - _TILE_INSET, cy)], fill=fg, width=1)
+        cy += 5
+
+    # Body — word-wrap
+    body = idea.get('body', '')
+    if body and cy < bottom:
+        words = body.split()
+        line = ''
+        for w_word in words:
+            test = (line + ' ' + w_word).strip()
+            if _find_text_width(d, test, f_body) <= cw:
+                line = test
+            else:
+                if cy + 13 > bottom - 14:
+                    # No room for more body lines — leave room for mono
+                    break
+                if line:
+                    d.text((cx, cy), line, font=f_body, fill=fg)
+                    cy += 13
+                line = w_word
+        if line and cy + 13 <= bottom - 14:
+            d.text((cx, cy), line, font=f_body, fill=fg)
+            cy += 13
+
+    # Monetization line at the bottom of the tile
+    mono = idea.get('mono', '')
+    if mono:
+        # Truncate to fit
+        full_mono = mono
+        while mono and _find_text_width(d, mono, f_sm) > cw:
+            mono = mono[:-1]
+        suffix = '…' if mono != full_mono else ''
+        d.text((cx, y + h - 14), mono + suffix, font=f_sm, fill=fg)
+
+
 def render_tile_screensaver(config: dict,
                             tile_data: dict = None,
                             speedtest_history: list = None,
@@ -1172,10 +1270,12 @@ def render_tile_screensaver(config: dict,
     """Render an 800×480 tile-grid screensaver — no photo background.
 
     tile_data keys (all optional / gracefully absent):
-        'weather'  : dict from TileFetcher
-        'git'      : list of repo dicts
-        'mlb'      : dict from TileFetcher
-        'cpu_temp' : float | None
+        'weather'          : dict from TileFetcher
+        'git'              : list of repo dicts
+        'mlb'              : dict from TileFetcher
+        'cpu_temp'         : float | None
+        'video_frame_path' : str | None  → enables 4×2 layout
+        'idea'             : dict | None → enables 4×2 layout
     """
     font_path = config.get('font_path', '')
     dark      = config.get('dark_mode', True)
@@ -1186,49 +1286,52 @@ def render_tile_screensaver(config: dict,
     d   = ImageDraw.Draw(img)
 
     tile_data = tile_data or {}
-    data = {
-        'weather':  tile_data.get('weather'),
-        'git':      tile_data.get('git'),
-        'mlb':      tile_data.get('mlb'),
-        'cpu_temp': tile_data.get('cpu_temp'),
-    }
+
+    # If video or idea tiles are present, use a 4-column layout.
+    has_extra = ('video_frame_path' in tile_data or 'idea' in tile_data
+                 or config.get('screensaver_tiles_video_path')
+                 or config.get('screensaver_tiles_idea_repo'))
+    cols = 4 if has_extra else _TILE_COLS
 
     usable_w = W - 2 * PAD
     usable_h = H - 2 * PAD
-
-    tw = (usable_w - (_TILE_COLS - 1) * _TILE_GAP) // _TILE_COLS
+    tw = (usable_w - (cols - 1) * _TILE_GAP) // cols
     th = (usable_h - (_TILE_ROWS - 1) * _TILE_GAP) // _TILE_ROWS
 
     def tile_xy(col: int, row: int):
-        x = PAD + col * (tw + _TILE_GAP)
-        y = PAD + row * (th + _TILE_GAP)
-        return x, y
+        return PAD + col * (tw + _TILE_GAP), PAD + row * (th + _TILE_GAP)
 
-    f_chip = _find_font(font_path, 11)
-
-    # Row 0: Weather | CPU Temp | Yankees/MLB
+    # ── Row 0 ─────────────────────────────────────────────────────────────────
     try:
         tx, ty = tile_xy(0, 0)
-        _draw_weather_tile(d, tx, ty, tw, th, font_path, data['weather'], fg, bg)
+        _draw_weather_tile(d, tx, ty, tw, th, font_path, tile_data.get('weather'), fg, bg)
     except Exception:
         pass
 
     try:
         tx, ty = tile_xy(1, 0)
-        _draw_cpu_temp_tile(d, tx, ty, tw, th, font_path, data['cpu_temp'], fg, bg)
+        _draw_cpu_temp_tile(d, tx, ty, tw, th, font_path, tile_data.get('cpu_temp'), fg, bg)
     except Exception:
         pass
 
     try:
         tx, ty = tile_xy(2, 0)
-        _draw_mlb_tile(d, tx, ty, tw, th, font_path, data['mlb'], fg, bg)
+        _draw_mlb_tile(d, tx, ty, tw, th, font_path, tile_data.get('mlb'), fg, bg)
     except Exception:
         pass
 
-    # Row 1: Git | Speedtest | Claude
+    if has_extra:
+        try:
+            tx, ty = tile_xy(3, 0)
+            _draw_video_tile(img, d, tx, ty, tw, th, font_path,
+                             tile_data.get('video_frame_path'), fg, bg)
+        except Exception:
+            pass
+
+    # ── Row 1 ─────────────────────────────────────────────────────────────────
     try:
         tx, ty = tile_xy(0, 1)
-        _draw_git_tile(d, tx, ty, tw, th, font_path, data['git'], fg, bg)
+        _draw_git_tile(d, tx, ty, tw, th, font_path, tile_data.get('git'), fg, bg)
     except Exception:
         pass
 
@@ -1243,6 +1346,14 @@ def render_tile_screensaver(config: dict,
         _draw_claude_tile(d, tx, ty, tw, th, font_path, claude_usage, fg, bg)
     except Exception:
         pass
+
+    if has_extra:
+        try:
+            tx, ty = tile_xy(3, 1)
+            _draw_idea_tile(d, tx, ty, tw, th, font_path,
+                            tile_data.get('idea'), fg, bg)
+        except Exception:
+            pass
 
     # Updated-at timestamp — small text bottom-center
     try:
