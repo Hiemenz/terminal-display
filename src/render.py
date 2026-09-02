@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+from datetime import datetime
 from typing import Union
 
 from PIL import Image, ImageDraw, ImageFont
@@ -825,6 +826,432 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
                             chart_x, chart_y, chart_w, _ST_BOX_H)
         except Exception:
             pass
+
+    return img
+
+
+# ── Tile screensaver ──────────────────────────────────────────────────────────
+
+_TILE_COLS  = 3
+_TILE_ROWS  = 2
+_TILE_GAP   = 10
+_TILE_RADIUS = 8
+_TILE_CHIP_H = 20   # title chip height
+_TILE_INSET  = 10   # content inset inside tile
+
+
+def _tile_frame(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
+                title: str, f_chip: _Font, fg: int, bg: int) -> int:
+    """Draw a rounded-rect tile with a filled title chip. Returns y of content area."""
+    d.rounded_rectangle([x, y, x + w, y + h], radius=_TILE_RADIUS,
+                        fill=bg, outline=fg, width=1)
+    chip_x2 = min(x + _find_text_width(d, title, f_chip) + _TILE_INSET * 2, x + w)
+    d.rounded_rectangle([x, y, chip_x2, y + _TILE_CHIP_H],
+                        radius=_TILE_RADIUS, fill=fg)
+    # Re-square bottom corners of chip so it merges with the tile body
+    d.rectangle([x, y + _TILE_CHIP_H // 2, chip_x2, y + _TILE_CHIP_H], fill=fg)
+    d.text((x + _TILE_INSET, y + (_TILE_CHIP_H - _find_text_height(f_chip)) // 2),
+           title, font=f_chip, fill=bg)
+    return y + _TILE_CHIP_H + 6
+
+
+def _find_text_width(d: ImageDraw.ImageDraw, text: str, font: _Font) -> int:
+    if hasattr(d, 'textlength'):
+        return int(d.textlength(text, font=font))
+    return font.getbbox(text)[2]
+
+
+def _find_text_height(font: _Font) -> int:
+    try:
+        return font.getbbox('Ay')[3]
+    except Exception:
+        return 14
+
+
+def _draw_weather_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
+                       font_path: str, weather: dict | None, fg: int, bg: int) -> None:
+    f_chip  = _find_font(font_path, 11)
+    cy = _tile_frame(d, x, y, w, h, 'WEATHER', f_chip, fg, bg)
+    if not weather:
+        f = _find_font(font_path, 13)
+        d.text((x + _TILE_INSET, cy + 10), 'Unavailable', font=f, fill=fg)
+        return
+    cx = x + _TILE_INSET
+    cw = w - _TILE_INSET * 2
+    use_c = False  # always show Fahrenheit
+    temp  = weather['temp_f']
+    hi    = weather['high_f']
+    lo    = weather['low_f']
+    unit  = '°F'
+
+    f_big  = _find_font(font_path, 44)
+    f_body = _find_font(font_path, 12)
+    f_sm   = _find_font(font_path, 11)
+
+    # Big temperature centred
+    temp_str = f'{temp}{unit}'
+    tw = _find_text_width(d, temp_str, f_big)
+    d.text((x + (w - tw) // 2, cy + 4), temp_str, font=f_big, fill=fg)
+    cy += 54
+
+    # Condition
+    desc = weather.get('desc', '')
+    d.text((cx, cy), desc, font=f_body, fill=fg)
+    cy += 16
+
+    # H / L / humidity
+    detail = f"H:{hi}{unit}  L:{lo}{unit}  \U0001f4a7{weather.get('humidity', 0)}%"
+    d.text((cx, cy), detail, font=f_sm, fill=fg)
+    cy += 14
+
+    # Feels like
+    fl_str = f"Feels like {weather.get('feels_like_f', temp)}{unit}"
+    d.text((cx, cy), fl_str, font=f_sm, fill=fg)
+
+
+def _draw_cpu_temp_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
+                        font_path: str, cpu_temp: float | None, fg: int, bg: int) -> None:
+    f_chip = _find_font(font_path, 11)
+    cy = _tile_frame(d, x, y, w, h, 'CPU TEMP', f_chip, fg, bg)
+    cx = x + _TILE_INSET
+    cw = w - _TILE_INSET * 2
+
+    f_big  = _find_font(font_path, 44)
+    f_body = _find_font(font_path, 12)
+    f_sm   = _find_font(font_path, 11)
+
+    if cpu_temp is None:
+        d.text((cx, cy + 10), 'Unavailable', font=f_body, fill=fg)
+        return
+
+    temp_str = f'{cpu_temp:.0f}°C'
+    tw = _find_text_width(d, temp_str, f_big)
+    d.text((x + (w - tw) // 2, cy + 4), temp_str, font=f_big, fill=fg)
+    cy += 54
+
+    # Progress bar — scale 0..100°C
+    pct = min(100.0, max(0.0, cpu_temp))
+    _bar(d, cx, cy, cw, BAR_H, pct, fg, _WHITE, fg)
+    cy += BAR_H + 6
+
+    # Status
+    if cpu_temp >= 80:
+        status = 'HOT — throttling likely'
+    elif cpu_temp >= 70:
+        status = 'Warm'
+    else:
+        status = 'Normal'
+    d.text((cx, cy), status, font=f_body, fill=fg)
+
+
+def _draw_mlb_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
+                   font_path: str, mlb: dict | None, fg: int, bg: int) -> None:
+    team_abbr = (mlb or {}).get('team_abbr', 'NYY')
+    f_chip = _find_font(font_path, 11)
+    cy = _tile_frame(d, x, y, w, h, team_abbr, f_chip, fg, bg)
+    cx = x + _TILE_INSET
+    cw = w - _TILE_INSET * 2
+
+    f_big   = _find_font(font_path, 38)
+    f_mid   = _find_font(font_path, 14)
+    f_body  = _find_font(font_path, 12)
+    f_sm    = _find_font(font_path, 11)
+
+    if not mlb:
+        d.text((cx, cy + 10), 'Unavailable', font=f_body, fill=fg)
+        return
+
+    status = mlb.get('status', '')
+    home   = mlb.get('home', '?')
+    away   = mlb.get('away', '?')
+
+    if status == 'no_game':
+        d.text((cx, cy + 8),  'No game today', font=f_body, fill=fg)
+        return
+
+    # Matchup header
+    matchup = f'{away} @ {home}'
+    d.text((cx, cy), matchup, font=f_mid, fill=fg)
+    cy += 20
+
+    if status in ('In Progress', 'Warmup', 'Pre-Game'):
+        # Live score
+        hs = mlb.get('home_score') or 0
+        as_ = mlb.get('away_score') or 0
+        score_str = f'{as_}–{hs}'
+        sw = _find_text_width(d, score_str, f_big)
+        d.text((x + (w - sw) // 2, cy), score_str, font=f_big, fill=fg)
+        cy += 48
+        inning = mlb.get('inning', '')
+        half   = 'Top' if mlb.get('top', True) else 'Bot'
+        half_str = f'{half} {inning}' if inning else status
+        d.text((cx, cy), half_str, font=f_sm, fill=fg)
+    elif status == 'Final':
+        hs  = mlb.get('home_score') or 0
+        as_ = mlb.get('away_score') or 0
+        score_str = f'{as_}–{hs}'
+        sw = _find_text_width(d, score_str, f_big)
+        d.text((x + (w - sw) // 2, cy), score_str, font=f_big, fill=fg)
+        cy += 48
+        d.text((cx, cy), 'Final', font=f_sm, fill=fg)
+    else:
+        # Scheduled
+        start = mlb.get('start_str', '')
+        gdate = mlb.get('game_date', '')
+        if gdate:
+            try:
+                dt = datetime.strptime(gdate, '%Y-%m-%d')
+                day_label = dt.strftime('%a %b %-d')
+            except Exception:
+                day_label = gdate
+        else:
+            day_label = ''
+        d.text((cx, cy + 6),  day_label,       font=f_body, fill=fg)
+        cy += 20
+        d.text((cx, cy + 2),  start,            font=f_mid,  fill=fg)
+        cy += 22
+        venue = mlb.get('venue', '')
+        if venue:
+            d.text((cx, cy), venue, font=f_sm, fill=fg)
+
+
+def _draw_git_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
+                   font_path: str, git_data: list | None, fg: int, bg: int) -> None:
+    f_chip = _find_font(font_path, 11)
+    cy = _tile_frame(d, x, y, w, h, 'GIT', f_chip, fg, bg)
+    cx = x + _TILE_INSET
+    cw = w - _TILE_INSET * 2
+
+    f_big  = _find_font(font_path, 36)
+    f_body = _find_font(font_path, 12)
+    f_sm   = _find_font(font_path, 11)
+
+    if git_data is None:
+        d.text((cx, cy + 8), 'Not configured', font=f_body, fill=fg)
+        return
+
+    total = sum(r.get('commits_today', 0) for r in git_data)
+    label = f'{total} commit{"s" if total != 1 else ""} today'
+    tw = _find_text_width(d, str(total), f_big)
+    d.text((x + (w - tw) // 2, cy + 2), str(total), font=f_big, fill=fg)
+    cy += 44
+
+    d.text((cx, cy), label, font=f_sm, fill=fg)
+    cy += 16
+
+    # Divider
+    d.line([(cx, cy), (x + w - _TILE_INSET, cy)], fill=fg, width=1)
+    cy += 5
+
+    # Per-repo rows (as many as fit)
+    bottom_limit = y + h - 6
+    for repo in git_data:
+        if cy + 26 > bottom_limit:
+            break
+        name    = repo.get('name', '?')
+        commits = repo.get('commits_today', 0)
+        rel     = repo.get('last_relative', '')
+        subj    = repo.get('last_subject', '')
+
+        # Repo name + today's commit count
+        row1 = f'{name}  {commits}✦' if commits else name
+        d.text((cx, cy), row1, font=f_body, fill=fg)
+        cy += 14
+
+        # Last commit relative time + truncated subject
+        detail = f'{rel} · {subj}' if rel and subj else (rel or subj)
+        if detail:
+            full = detail
+            while detail and _find_text_width(d, detail, f_sm) > cw:
+                detail = detail[:-1]
+            suffix = '…' if detail != full else ''
+            d.text((cx, cy), detail + suffix, font=f_sm, fill=fg)
+            cy += 13
+
+
+def _draw_speedtest_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
+                         font_path: str, speedtest_history: list | None,
+                         fg: int, bg: int) -> None:
+    f_chip = _find_font(font_path, 11)
+    cy = _tile_frame(d, x, y, w, h, 'SPEEDTEST', f_chip, fg, bg)
+    if speedtest_history:
+        chart_h = h - (cy - y) - 6
+        _draw_speedtest(d, font_path, speedtest_history, x, cy, w, chart_h)
+    else:
+        f_body = _find_font(font_path, 12)
+        d.text((x + _TILE_INSET, cy + 8), 'No data yet', font=f_body, fill=fg)
+
+
+def _draw_claude_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
+                      font_path: str, claude_usage: dict | None, fg: int, bg: int) -> None:
+    f_chip = _find_font(font_path, 11)
+    cy = _tile_frame(d, x, y, w, h, 'CLAUDE', f_chip, fg, bg)
+    if claude_usage:
+        # Reuse the existing renderer clipped to this tile — pass reserved_bottom=0
+        # and let _draw_claude_usage place itself; we clip by drawing it at the
+        # tile's own coordinate space by temporarily shifting origin via a crop.
+        # Simpler: inline a trimmed version.
+        _draw_claude_usage_compact(d, font_path, claude_usage,
+                                   x, cy, w, h - (cy - y), fg, bg)
+    else:
+        f_body = _find_font(font_path, 12)
+        d.text((x + _TILE_INSET, cy + 8), 'No data', font=f_body, fill=fg)
+
+
+def _draw_claude_usage_compact(d: ImageDraw.ImageDraw, font_path: str,
+                                usage: dict, x: int, y: int, w: int, h: int,
+                                fg: int, bg: int) -> None:
+    """Compact Claude usage block for the tile grid."""
+    from claude_usage import session_states, weekly_totals, daily_totals
+
+    f_body = _find_font(font_path, 12)
+    f_sm   = _find_font(font_path, 11)
+    f_big  = _find_font(font_path, 20)
+
+    cx = x + _TILE_INSET
+    cy = y
+    bottom = y + h - 6
+
+    # Active sessions
+    try:
+        sessions = session_states(idle_minutes=30)
+        for sess in sessions[:2]:
+            if cy + 14 > bottom:
+                break
+            txt = sess.get('label', '')
+            if not txt:
+                continue
+            d.text((cx, cy), txt, font=f_sm, fill=fg)
+            cy += 13
+        if sessions and cy < bottom:
+            d.line([(cx, cy), (x + w - _TILE_INSET, cy)], fill=fg, width=1)
+            cy += 5
+    except Exception:
+        pass
+
+    # This-week tokens
+    try:
+        weeks, baseline = weekly_totals()
+        if weeks:
+            this_w = weeks[-1]
+            sent   = this_w.get('sent', 0) + this_w.get('cache_write', 0)
+            recv   = this_w.get('recv', 0)
+            cache  = this_w.get('cache_read', 0)
+            total  = sent + recv
+
+            def _fmt(n):
+                if n >= 1_000_000:
+                    return f'{n/1_000_000:.1f}M'
+                if n >= 1_000:
+                    return f'{n/1_000:.0f}k'
+                return str(n)
+
+            if cy + 16 < bottom:
+                d.text((cx, cy), f'↑{_fmt(sent)}  ↓{_fmt(recv)}', font=f_body, fill=fg)
+                cy += 15
+            if cache and cy + 14 < bottom:
+                d.text((cx, cy), f'cache {_fmt(cache)}', font=f_sm, fill=fg)
+                cy += 13
+    except Exception:
+        pass
+
+    # Daily bars
+    try:
+        days = daily_totals()
+        if days and cy + _DAILY_BAR_H + 6 <= bottom:
+            bar_w = w - _TILE_INSET * 2
+            _daily_bars(d, cx, cy, bar_w, days)
+    except Exception:
+        pass
+
+
+def render_tile_screensaver(config: dict,
+                            tile_data: dict = None,
+                            speedtest_history: list = None,
+                            claude_usage: dict = None) -> Image.Image:
+    """Render an 800×480 tile-grid screensaver — no photo background.
+
+    tile_data keys (all optional / gracefully absent):
+        'weather'  : dict from TileFetcher
+        'git'      : list of repo dicts
+        'mlb'      : dict from TileFetcher
+        'cpu_temp' : float | None
+    """
+    font_path = config.get('font_path', '')
+    dark      = config.get('dark_mode', True)
+    fg        = _WHITE if dark else _BLACK
+    bg        = _BLACK if dark else _WHITE
+
+    img = Image.new('L', (W, H), color=bg)
+    d   = ImageDraw.Draw(img)
+
+    tile_data = tile_data or {}
+    data = {
+        'weather':  tile_data.get('weather'),
+        'git':      tile_data.get('git'),
+        'mlb':      tile_data.get('mlb'),
+        'cpu_temp': tile_data.get('cpu_temp'),
+    }
+
+    usable_w = W - 2 * PAD
+    usable_h = H - 2 * PAD
+
+    tw = (usable_w - (_TILE_COLS - 1) * _TILE_GAP) // _TILE_COLS
+    th = (usable_h - (_TILE_ROWS - 1) * _TILE_GAP) // _TILE_ROWS
+
+    def tile_xy(col: int, row: int):
+        x = PAD + col * (tw + _TILE_GAP)
+        y = PAD + row * (th + _TILE_GAP)
+        return x, y
+
+    f_chip = _find_font(font_path, 11)
+
+    # Row 0: Weather | CPU Temp | Yankees/MLB
+    try:
+        tx, ty = tile_xy(0, 0)
+        _draw_weather_tile(d, tx, ty, tw, th, font_path, data['weather'], fg, bg)
+    except Exception:
+        pass
+
+    try:
+        tx, ty = tile_xy(1, 0)
+        _draw_cpu_temp_tile(d, tx, ty, tw, th, font_path, data['cpu_temp'], fg, bg)
+    except Exception:
+        pass
+
+    try:
+        tx, ty = tile_xy(2, 0)
+        _draw_mlb_tile(d, tx, ty, tw, th, font_path, data['mlb'], fg, bg)
+    except Exception:
+        pass
+
+    # Row 1: Git | Speedtest | Claude
+    try:
+        tx, ty = tile_xy(0, 1)
+        _draw_git_tile(d, tx, ty, tw, th, font_path, data['git'], fg, bg)
+    except Exception:
+        pass
+
+    try:
+        tx, ty = tile_xy(1, 1)
+        _draw_speedtest_tile(d, tx, ty, tw, th, font_path, speedtest_history, fg, bg)
+    except Exception:
+        pass
+
+    try:
+        tx, ty = tile_xy(2, 1)
+        _draw_claude_tile(d, tx, ty, tw, th, font_path, claude_usage, fg, bg)
+    except Exception:
+        pass
+
+    # Updated-at timestamp — small text bottom-center
+    try:
+        f_ts = _find_font(font_path, 10)
+        ts   = datetime.now().strftime('%-I:%M %p')
+        tsw  = _find_text_width(d, ts, f_ts)
+        d.text(((W - tsw) // 2, H - 11), ts, font=f_ts, fill=fg)
+    except Exception:
+        pass
 
     return img
 
