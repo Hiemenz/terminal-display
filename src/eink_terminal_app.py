@@ -362,6 +362,9 @@ class EinkTerminal(
         # Speedtest monitor (background thread, started in run())
         self._speedtest_monitor = None
 
+        # Tile screensaver data fetcher (background thread, started in run())
+        self._tile_fetcher = None
+
         # Text message (send-to-display) state
         self._in_text_message = False
         self._display_queue = None   # set in run() after server starts
@@ -699,59 +702,84 @@ class EinkTerminal(
     def _show_screensaver(self):
         """Render the screensaver to the display.
 
+        In 'tiles' mode, draws an info-tile grid (weather, CPU temp, MLB, git,
+        speedtest, Claude usage) — no photo background, 4-grey rendering.
         In 'cycle' mode, advances through gallery photos every N minutes.
         In 'static' mode (default), always shows the gallery-selected image.
-        Always shows a QR code overlay pointing to the preview server.
         """
         try:
-            from preview_server import get_screensaver_images
-            from render import render_screensaver
-
-            static_path = self._config.get('screensaver_image_path', 'assets/test.jpg')
-            if not os.path.isabs(static_path):
-                static_path = os.path.join(_REPO_ROOT, static_path)
-            photos_dir = os.path.join(_REPO_ROOT, 'assets', 'gallery')
-
-            # Resolve the rotation set: 2+ selected photos cycle, 1 shows static,
-            # none falls back to screensaver_mode / the static image.
-            names, is_cycle = get_screensaver_images(photos_dir, self._config)
-            self._screensaver_is_cycle = is_cycle and len(names) >= 2
-            if names:
-                if self._screensaver_is_cycle:
-                    cycle_secs = self._config.get('screensaver_cycle_interval', 5) * 60
-                    now = time.monotonic()
-                    if self._screensaver_last_cycle == 0.0:
-                        # First activation: show current photo without advancing.
-                        self._screensaver_last_cycle = now
-                    elif (now - self._screensaver_last_cycle) >= cycle_secs:
-                        self._screensaver_cycle_idx += 1
-                        self._screensaver_last_cycle = now
-                    image_path = os.path.join(photos_dir, names[self._screensaver_cycle_idx % len(names)])
-                else:
-                    image_path = os.path.join(photos_dir, names[0])
-            else:
-                image_path = static_path
-
-            port = self._config.get('preview_server_port', 8080)
-            ip = _get_local_ip()
-            qr_url = f'http://{ip}:{port}/config' if ip else ''
-
             _sm = getattr(self, '_speedtest_monitor', None)
             speedtest_hist = _sm.history() if _sm is not None else None
-            img = render_screensaver(image_path, qr_url, self._config,
-                                     claude_usage=self._claude_usage(),
-                                     speedtest_history=speedtest_hist)
-            # Must be a flash (ordered _FULL task): full_refresh(flash=False) only
-            # sets _pending_partial, which the sleep() below immediately cancels —
-            # the screensaver would never reach the panel.
-            # Photos render better in 1-bit Floyd-Steinberg at full resolution
-            # than in 4-grey; text gains from 4-grey but photographs do not.
-            self._driver.flash_refresh(img, reason='screensaver')
-            self._last_image = img
-            self._last_full_refresh_mono = time.monotonic()
-            self._needs_periodic_flash = False
-            logger.info('Screensaver activated — img=%s cycle=%s',
-                        os.path.basename(image_path), self._screensaver_is_cycle)
+
+            if self._config.get('screensaver_mode', 'static') == 'tiles':
+                from render import render_tile_screensaver
+                _tf = getattr(self, '_tile_fetcher', None)
+                if _tf is not None:
+                    _tf.advance()   # step video frame + business idea forward
+                tile_data = _tf.data() if _tf is not None else {}
+                # Merge one-shot tile state into tile_data dict
+                if _tf is not None:
+                    tile_data['video_frame_path'] = _tf.video_frame_path()
+                    tile_data['idea'] = _tf.current_idea()
+                img = render_tile_screensaver(
+                    self._config,
+                    tile_data=tile_data,
+                    speedtest_history=speedtest_hist,
+                    claude_usage=self._claude_usage(),
+                )
+                # Text-heavy — 4-grey gives properly anti-aliased glyphs.
+                self._driver.gray_refresh(img, dither=False, reason='screensaver')
+                self._last_image = img
+                self._last_full_refresh_mono = time.monotonic()
+                self._needs_periodic_flash = False
+                logger.info('Tile screensaver activated')
+            else:
+                from preview_server import get_screensaver_images
+                from render import render_screensaver
+
+                static_path = self._config.get('screensaver_image_path', 'assets/test.jpg')
+                if not os.path.isabs(static_path):
+                    static_path = os.path.join(_REPO_ROOT, static_path)
+                photos_dir = os.path.join(_REPO_ROOT, 'assets', 'gallery')
+
+                # Resolve the rotation set: 2+ selected photos cycle, 1 shows static,
+                # none falls back to screensaver_mode / the static image.
+                names, is_cycle = get_screensaver_images(photos_dir, self._config)
+                self._screensaver_is_cycle = is_cycle and len(names) >= 2
+                if names:
+                    if self._screensaver_is_cycle:
+                        cycle_secs = self._config.get('screensaver_cycle_interval', 5) * 60
+                        now = time.monotonic()
+                        if self._screensaver_last_cycle == 0.0:
+                            # First activation: show current photo without advancing.
+                            self._screensaver_last_cycle = now
+                        elif (now - self._screensaver_last_cycle) >= cycle_secs:
+                            self._screensaver_cycle_idx += 1
+                            self._screensaver_last_cycle = now
+                        image_path = os.path.join(photos_dir, names[self._screensaver_cycle_idx % len(names)])
+                    else:
+                        image_path = os.path.join(photos_dir, names[0])
+                else:
+                    image_path = static_path
+
+                port = self._config.get('preview_server_port', 8080)
+                ip = _get_local_ip()
+                qr_url = f'http://{ip}:{port}/config' if ip else ''
+
+                img = render_screensaver(image_path, qr_url, self._config,
+                                         claude_usage=self._claude_usage(),
+                                         speedtest_history=speedtest_hist)
+                # Must be a flash (ordered _FULL task): full_refresh(flash=False) only
+                # sets _pending_partial, which the sleep() below immediately cancels —
+                # the screensaver would never reach the panel.
+                # Photos render better in 1-bit Floyd-Steinberg at full resolution
+                # than in 4-grey; text gains from 4-grey but photographs do not.
+                self._driver.flash_refresh(img, reason='screensaver')
+                self._last_image = img
+                self._last_full_refresh_mono = time.monotonic()
+                self._needs_periodic_flash = False
+                logger.info('Screensaver activated — img=%s cycle=%s',
+                            os.path.basename(image_path), self._screensaver_is_cycle)
         except Exception as e:
             logger.warning('Screensaver render error: %s', e)
         finally:
@@ -1456,6 +1484,16 @@ class EinkTerminal(
             except Exception as exc:
                 logger.debug('Speedtest monitor not started: %s', exc)
 
+        if self._config.get('screensaver_mode', 'static') == 'tiles':
+            try:
+                from tile_fetcher import TileFetcher
+                cfg_with_dir = dict(self._config)
+                cfg_with_dir['_data_dir'] = os.path.join(_REPO_ROOT, 'data')
+                self._tile_fetcher = TileFetcher(cfg_with_dir)
+                self._tile_fetcher.start()
+            except Exception as exc:
+                logger.debug('Tile fetcher not started: %s', exc)
+
         _screensaver_at_start = (
             (self._sleep_timeout > 0 or self._idle_timeout > 0)
             and self._config.get('display_sleep_shows_screensaver', True)
@@ -1480,6 +1518,8 @@ class EinkTerminal(
             self._driver.sleep()
             if self._speedtest_monitor is not None:
                 self._speedtest_monitor.stop()
+            if self._tile_fetcher is not None:
+                self._tile_fetcher.stop()
             if self._child_pid:
                 try:
                     os.waitpid(self._child_pid, os.WNOHANG)

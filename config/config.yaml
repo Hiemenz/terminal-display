@@ -421,9 +421,25 @@ screensaver_idle_timeout: 3600
 # Relative paths are resolved from the project root.
 screensaver_image_path: "assets/test.jpg"
 
-# 'static' = one image, 'cycle' = rotate through gallery
+# 'static' = one image, 'cycle' = rotate through gallery, 'tiles' = info tile grid
 screensaver_mode: static
 screensaver_cycle_interval: 5
+
+# ── Tile screensaver (screensaver_mode: tiles) ────────────────────────────────
+# Weather tile: city name or zip code (uses wttr.in, no API key needed)
+screensaver_tiles_weather_location: "New York"
+# Git tile: scan all repos directly under this directory for today's commits
+screensaver_tiles_git_scan_dir: "/home/pi/git"
+# MLB tile: team to follow (147 = Yankees; find your team's ID on statsapi.mlb.com)
+screensaver_tiles_mlb_team_id: 147
+screensaver_tiles_mlb_team_abbr: "NYY"
+# Video tile: path to any MP4/MKV/AVI. Advances `advance_seconds` of video
+# time each screensaver refresh. Leave blank to hide the tile.
+screensaver_tiles_video_path: ""
+screensaver_tiles_video_advance_seconds: 60
+# Business idea tile: path to a git repo containing markdown files with
+# ### N. Title headers. Cycles one idea per screensaver refresh.
+screensaver_tiles_idea_repo: "/home/pi/git/business-ideas"
 
 # ── System overlay services (F4 service manager) ─────────────────────────────
 terminal_services:
