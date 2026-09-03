@@ -616,7 +616,8 @@ def _draw_speedtest(d: ImageDraw.ImageDraw, font_path: str,
     if not history:
         return
 
-    import time as _time, math as _math
+    import math as _math
+    import time as _time
     WINDOW     = 5 * 3600
     GAP_SECS   = 20 * 60
     BOX_PAD    = 6
@@ -877,8 +878,6 @@ def _draw_weather_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
         d.text((x + _TILE_INSET, cy + 10), 'Unavailable', font=f, fill=fg)
         return
     cx = x + _TILE_INSET
-    cw = w - _TILE_INSET * 2
-    use_c = False  # always show Fahrenheit
     temp  = weather['temp_f']
     hi    = weather['high_f']
     lo    = weather['low_f']
@@ -918,7 +917,6 @@ def _draw_cpu_temp_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
 
     f_big  = _find_font(font_path, 44)
     f_body = _find_font(font_path, 12)
-    f_sm   = _find_font(font_path, 11)
 
     if cpu_temp is None:
         d.text((cx, cy + 10), 'Unavailable', font=f_body, fill=fg)
@@ -950,7 +948,6 @@ def _draw_mlb_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
     f_chip = _find_font(font_path, 11)
     cy = _tile_frame(d, x, y, w, h, team_abbr, f_chip, fg, bg)
     cx = x + _TILE_INSET
-    cw = w - _TILE_INSET * 2
 
     f_big   = _find_font(font_path, 38)
     f_mid   = _find_font(font_path, 14)
@@ -1102,11 +1099,10 @@ def _draw_claude_usage_compact(d: ImageDraw.ImageDraw, font_path: str,
                                 usage: dict, x: int, y: int, w: int, h: int,
                                 fg: int, bg: int) -> None:
     """Compact Claude usage block for the tile grid."""
-    from claude_usage import session_states, weekly_totals, daily_totals
+    from claude_usage import daily_totals, session_states, weekly_totals
 
     f_body = _find_font(font_path, 12)
     f_sm   = _find_font(font_path, 11)
-    f_big  = _find_font(font_path, 20)
 
     cx = x + _TILE_INSET
     cy = y
@@ -1137,7 +1133,6 @@ def _draw_claude_usage_compact(d: ImageDraw.ImageDraw, font_path: str,
             sent   = this_w.get('sent', 0) + this_w.get('cache_write', 0)
             recv   = this_w.get('recv', 0)
             cache  = this_w.get('cache_read', 0)
-            total  = sent + recv
 
             def _fmt(n):
                 if n >= 1_000_000:
