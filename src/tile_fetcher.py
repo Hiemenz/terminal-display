@@ -388,7 +388,7 @@ class TileFetcher:
                  f'--after={today} 00:00:00'],
                 capture_output=True, text=True, timeout=5,
             )
-            commits_today = len([l for l in r1.stdout.strip().splitlines() if l])
+            commits_today = len([line for line in r1.stdout.strip().splitlines() if line])
 
             r2 = subprocess.run(
                 ['git', '-C', repo_path, 'log', '-1', '--format=%ar\t%s\t%D'],
