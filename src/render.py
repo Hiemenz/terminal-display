@@ -5,6 +5,7 @@ Entry point: render(stats, config) -> PIL.Image
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 from datetime import datetime
@@ -1258,19 +1259,46 @@ def _draw_idea_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
         d.text((cx, y + h - 14), mono + suffix, font=f_sm, fill=fg)
 
 
+_DEFAULT_TILES = ['weather', 'cpu_temp', 'mlb', 'git', 'speedtest', 'claude']
+
+
+def _dispatch_tile(name: str, img: Image.Image, d: ImageDraw.ImageDraw,
+                   x: int, y: int, w: int, h: int, font_path: str,
+                   all_data: dict, fg: int, bg: int) -> None:
+    """Call the appropriate draw function for a named tile."""
+    if name == 'weather':
+        _draw_weather_tile(d, x, y, w, h, font_path, all_data.get('weather'), fg, bg)
+    elif name == 'cpu_temp':
+        _draw_cpu_temp_tile(d, x, y, w, h, font_path, all_data.get('cpu_temp'), fg, bg)
+    elif name == 'mlb':
+        _draw_mlb_tile(d, x, y, w, h, font_path, all_data.get('mlb'), fg, bg)
+    elif name == 'git':
+        _draw_git_tile(d, x, y, w, h, font_path, all_data.get('git'), fg, bg)
+    elif name == 'speedtest':
+        _draw_speedtest_tile(d, x, y, w, h, font_path, all_data.get('speedtest_history'), fg, bg)
+    elif name == 'claude':
+        _draw_claude_tile(d, x, y, w, h, font_path, all_data.get('claude_usage'), fg, bg)
+    elif name == 'video':
+        _draw_video_tile(img, d, x, y, w, h, font_path, all_data.get('video_frame_path'), fg, bg)
+    elif name == 'idea':
+        _draw_idea_tile(d, x, y, w, h, font_path, all_data.get('idea'), fg, bg)
+    else:
+        f_chip = _find_font(font_path, 11)
+        f_body = _find_font(font_path, 12)
+        cy = _tile_frame(d, x, y, w, h, name.upper()[:12], f_chip, fg, bg)
+        d.text((x + _TILE_INSET, cy + 8), 'Unknown tile', font=f_body, fill=fg)
+
+
 def render_tile_screensaver(config: dict,
                             tile_data: dict = None,
                             speedtest_history: list = None,
                             claude_usage: dict = None) -> Image.Image:
-    """Render an 800×480 tile-grid screensaver — no photo background.
+    """Render an 800×480 tile-grid screensaver.
 
-    tile_data keys (all optional / gracefully absent):
-        'weather'          : dict from TileFetcher
-        'git'              : list of repo dicts
-        'mlb'              : dict from TileFetcher
-        'cpu_temp'         : float | None
-        'video_frame_path' : str | None  → enables 4×2 layout
-        'idea'             : dict | None → enables 4×2 layout
+    The tile list and order come from ``screensaver_tiles`` in config (a list
+    of tile name strings).  Valid names: weather, cpu_temp, mlb, git,
+    speedtest, claude, video, idea.  The grid is sized automatically:
+    1–3 tiles → single row; 4+ tiles → 2 rows with enough columns to fit.
     """
     font_path = config.get('font_path', '')
     dark      = config.get('dark_mode', True)
@@ -1280,73 +1308,39 @@ def render_tile_screensaver(config: dict,
     img = Image.new('L', (W, H), color=bg)
     d   = ImageDraw.Draw(img)
 
-    tile_data = tile_data or {}
+    all_data = dict(tile_data or {})
+    all_data.setdefault('speedtest_history', speedtest_history)
+    all_data.setdefault('claude_usage', claude_usage)
 
-    # If video or idea tiles are present, use a 4-column layout.
-    has_extra = ('video_frame_path' in tile_data or 'idea' in tile_data
-                 or config.get('screensaver_tiles_video_path')
-                 or config.get('screensaver_tiles_idea_repo'))
-    cols = 4 if has_extra else _TILE_COLS
+    # Tile list: explicit config wins; legacy path auto-adds video/idea.
+    tile_names = config.get('screensaver_tiles') or None
+    if not tile_names:
+        tile_names = list(_DEFAULT_TILES)
+        if config.get('screensaver_tiles_video_path') or all_data.get('video_frame_path'):
+            tile_names.insert(3, 'video')
+        if config.get('screensaver_tiles_idea_repo') or all_data.get('idea'):
+            tile_names.append('idea')
+
+    # Grid: 1 row for ≤3 tiles, 2 rows otherwise; cols = ceil(n / rows).
+    n = max(len(tile_names), 1)
+    if n <= 3:
+        cols, rows = n, 1
+    else:
+        rows = 2
+        cols = math.ceil(n / rows)
 
     usable_w = W - 2 * PAD
     usable_h = H - 2 * PAD
     tw = (usable_w - (cols - 1) * _TILE_GAP) // cols
-    th = (usable_h - (_TILE_ROWS - 1) * _TILE_GAP) // _TILE_ROWS
+    th = (usable_h - (rows - 1) * _TILE_GAP) // rows
 
-    def tile_xy(col: int, row: int):
-        return PAD + col * (tw + _TILE_GAP), PAD + row * (th + _TILE_GAP)
-
-    # ── Row 0 ─────────────────────────────────────────────────────────────────
-    try:
-        tx, ty = tile_xy(0, 0)
-        _draw_weather_tile(d, tx, ty, tw, th, font_path, tile_data.get('weather'), fg, bg)
-    except Exception:
-        pass
-
-    try:
-        tx, ty = tile_xy(1, 0)
-        _draw_cpu_temp_tile(d, tx, ty, tw, th, font_path, tile_data.get('cpu_temp'), fg, bg)
-    except Exception:
-        pass
-
-    try:
-        tx, ty = tile_xy(2, 0)
-        _draw_mlb_tile(d, tx, ty, tw, th, font_path, tile_data.get('mlb'), fg, bg)
-    except Exception:
-        pass
-
-    if has_extra:
+    for i, name in enumerate(tile_names):
+        col = i % cols
+        row = i // cols
+        tx  = PAD + col * (tw + _TILE_GAP)
+        ty  = PAD + row * (th + _TILE_GAP)
         try:
-            tx, ty = tile_xy(3, 0)
-            _draw_video_tile(img, d, tx, ty, tw, th, font_path,
-                             tile_data.get('video_frame_path'), fg, bg)
-        except Exception:
-            pass
-
-    # ── Row 1 ─────────────────────────────────────────────────────────────────
-    try:
-        tx, ty = tile_xy(0, 1)
-        _draw_git_tile(d, tx, ty, tw, th, font_path, tile_data.get('git'), fg, bg)
-    except Exception:
-        pass
-
-    try:
-        tx, ty = tile_xy(1, 1)
-        _draw_speedtest_tile(d, tx, ty, tw, th, font_path, speedtest_history, fg, bg)
-    except Exception:
-        pass
-
-    try:
-        tx, ty = tile_xy(2, 1)
-        _draw_claude_tile(d, tx, ty, tw, th, font_path, claude_usage, fg, bg)
-    except Exception:
-        pass
-
-    if has_extra:
-        try:
-            tx, ty = tile_xy(3, 1)
-            _draw_idea_tile(d, tx, ty, tw, th, font_path,
-                            tile_data.get('idea'), fg, bg)
+            _dispatch_tile(name, img, d, tx, ty, tw, th, font_path, all_data, fg, bg)
         except Exception:
             pass
 
