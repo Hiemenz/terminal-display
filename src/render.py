@@ -942,54 +942,6 @@ def _draw_cpu_temp_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
     d.text((cx, cy), status, font=f_body, fill=fg)
 
 
-def _mlb_row_status(g: dict) -> str:
-    """Short right-hand status for one postseason slate row."""
-    state = g.get('status', '')
-    if state in ('In Progress', 'Warmup'):
-        inning = g.get('inning', '')
-        if not inning:
-            return state
-        return f"{'Top' if g.get('top', True) else 'Bot'} {inning}"
-    if state in ('Final', 'Game Over'):
-        return 'Final'
-    return g.get('start_str', '') or state
-
-
-def _draw_mlb_postseason_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int,
-                              h: int, cy: int, font_path: str, mlb: dict,
-                              fg: int) -> None:
-    """List every game on the postseason slate, one row each."""
-    f_row = _find_font(font_path, 12)
-    f_sm  = _find_font(font_path, 11)
-    cx    = x + _TILE_INSET
-    right = x + w - _TILE_INSET
-
-    gdate = mlb.get('game_date', '')
-    try:
-        label = datetime.strptime(gdate, '%Y-%m-%d').strftime('%a %b %-d')
-    except Exception:
-        label = gdate
-    if label and gdate != datetime.now().strftime('%Y-%m-%d'):
-        d.text((cx, cy), f'Next: {label}', font=f_sm, fill=fg)
-        cy += 16
-
-    games = mlb.get('games') or []
-    row_h = 18
-    max_rows = max((y + h - cy - 4) // row_h, 1)
-    for g in games[:max_rows]:
-        away, home = g.get('away', '?'), g.get('home', '?')
-        if g.get('status', '') in ('In Progress', 'Warmup', 'Final', 'Game Over'):
-            left = (f"{away} {g.get('away_score') or 0} @ "
-                    f"{home} {g.get('home_score') or 0}")
-        else:
-            left = f'{away} @ {home}'
-        status = _mlb_row_status(g)
-        d.text((cx, cy), left, font=f_row, fill=fg)
-        sw = _find_text_width(d, status, f_sm)
-        d.text((right - sw, cy + 1), status, font=f_sm, fill=fg)
-        cy += row_h
-
-
 def _draw_mlb_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
                    font_path: str, mlb: dict | None, fg: int, bg: int) -> None:
     team_abbr = (mlb or {}).get('team_abbr', 'NYY')
@@ -1012,10 +964,6 @@ def _draw_mlb_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
 
     if status == 'no_game':
         d.text((cx, cy + 8),  'No game today', font=f_body, fill=fg)
-        return
-
-    if status == 'postseason':
-        _draw_mlb_postseason_tile(d, x, y, w, h, cy, font_path, mlb, fg)
         return
 
     # Matchup header

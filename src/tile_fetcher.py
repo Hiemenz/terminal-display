@@ -421,12 +421,13 @@ class TileFetcher:
     # ── MLB game (free statsapi.mlb.com, no key) ──────────────────────────────
 
     def _fetch_mlb_postseason(self, start_str: str, end_str: str) -> dict | None:
-        """League-wide postseason slate, or None when there are no postseason games.
+        """The postseason game to feature, or None when there are none.
 
         The regular-season query below is filtered to one team and one game
-        type, so it goes blank in October.  During the postseason the tile
-        lists every game on the slate instead (today's, or the next day that
-        has any).
+        type, so it goes blank in October.  Postseason games are staggered, so
+        the tile follows whichever one is on: the live game, else the next one
+        up, else the most recent final (today's slate, or the next day that
+        has any).  The title chip carries the series name instead of a team.
         """
         url = (
             'https://statsapi.mlb.com/api/v1/schedule?sportId=1'
@@ -440,27 +441,33 @@ class TileFetcher:
         if not days:
             return None
         day = next((d for d in days if d.get('date') == start_str), days[0])
+        games = sorted(day['games'], key=lambda g: g.get('gameDate', ''))
 
-        games = []
-        for g in sorted(day['games'], key=lambda g: g.get('gameDate', '')):
-            home = g.get('teams', {}).get('home', {})
-            away = g.get('teams', {}).get('away', {})
-            ls   = g.get('linescore', {})
-            games.append({
-                'status':     g.get('status', {}).get('detailedState', ''),
-                'home':       home.get('team', {}).get('abbreviation', '?'),
-                'away':       away.get('team', {}).get('abbreviation', '?'),
-                'home_score': home.get('score'),
-                'away_score': away.get('score'),
-                'inning':     ls.get('currentInningOrdinal', ''),
-                'top':        ls.get('isTopInning', True),
-                'start_str':  _format_game_time(g.get('gameDate', '')),
-            })
+        def _state(g):
+            return g.get('status', {}).get('detailedState', '')
+
+        live = [g for g in games if _state(g) in ('In Progress', 'Warmup')]
+        upcoming = [g for g in games
+                    if _state(g) not in ('Final', 'Game Over')
+                    and g not in live]
+        g = (live or upcoming or games[-1:])[0]
+
+        home = g.get('teams', {}).get('home', {})
+        away = g.get('teams', {}).get('away', {})
+        ls   = g.get('linescore', {})
+        series = (g.get('seriesDescription') or '').strip()
         return {
-            'status':    'postseason',
-            'team_abbr': 'POSTSEASON',
-            'game_date': day.get('date', start_str),
-            'games':     games,
+            'team_abbr':  series.upper() or 'POSTSEASON',
+            'status':     _state(g),
+            'home':       home.get('team', {}).get('abbreviation', '?'),
+            'away':       away.get('team', {}).get('abbreviation', '?'),
+            'home_score': home.get('score'),
+            'away_score': away.get('score'),
+            'inning':     ls.get('currentInningOrdinal', ''),
+            'top':        ls.get('isTopInning', True),
+            'start_str':  _format_game_time(g.get('gameDate', '')),
+            'game_date':  g.get('officialDate', day.get('date', start_str)),
+            'venue':      g.get('venue', {}).get('name', ''),
         }
 
     def _fetch_mlb(self) -> dict:
