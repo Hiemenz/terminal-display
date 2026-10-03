@@ -420,16 +420,67 @@ class TileFetcher:
 
     # ── MLB game (free statsapi.mlb.com, no key) ──────────────────────────────
 
+    def _fetch_mlb_postseason(self, start_str: str, end_str: str) -> dict | None:
+        """League-wide postseason slate, or None when there are no postseason games.
+
+        The regular-season query below is filtered to one team and one game
+        type, so it goes blank in October.  During the postseason the tile
+        lists every game on the slate instead (today's, or the next day that
+        has any).
+        """
+        url = (
+            'https://statsapi.mlb.com/api/v1/schedule?sportId=1'
+            f'&startDate={start_str}&endDate={end_str}'
+            '&gameType=F,D,L,W&hydrate=linescore,team'
+        )
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            raw = json.loads(resp.read())
+
+        days = [d for d in raw.get('dates', []) if d.get('games')]
+        if not days:
+            return None
+        day = next((d for d in days if d.get('date') == start_str), days[0])
+
+        games = []
+        for g in sorted(day['games'], key=lambda g: g.get('gameDate', '')):
+            home = g.get('teams', {}).get('home', {})
+            away = g.get('teams', {}).get('away', {})
+            ls   = g.get('linescore', {})
+            games.append({
+                'status':     g.get('status', {}).get('detailedState', ''),
+                'home':       home.get('team', {}).get('abbreviation', '?'),
+                'away':       away.get('team', {}).get('abbreviation', '?'),
+                'home_score': home.get('score'),
+                'away_score': away.get('score'),
+                'inning':     ls.get('currentInningOrdinal', ''),
+                'top':        ls.get('isTopInning', True),
+                'start_str':  _format_game_time(g.get('gameDate', '')),
+            })
+        return {
+            'status':    'postseason',
+            'team_abbr': 'POSTSEASON',
+            'game_date': day.get('date', start_str),
+            'games':     games,
+        }
+
     def _fetch_mlb(self) -> dict:
         team_id   = int(self._config.get('screensaver_tiles_mlb_team_id',   147))
         team_abbr = self._config.get('screensaver_tiles_mlb_team_abbr', 'NYY').strip()
         today_str = date.today().strftime('%Y-%m-%d')
         end_str   = (date.today() + timedelta(days=7)).strftime('%Y-%m-%d')
 
+        try:
+            postseason = self._fetch_mlb_postseason(today_str, end_str)
+        except Exception as exc:
+            logger.debug('mlb postseason fetch error: %s', exc)
+            postseason = None
+        if postseason:
+            return postseason
+
         url = (
             'https://statsapi.mlb.com/api/v1/schedule?sportId=1'
             f'&teamId={team_id}&startDate={today_str}&endDate={end_str}'
-            '&gameType=R&hydrate=linescore'
+            '&gameType=R&hydrate=linescore,team'
         )
         with urllib.request.urlopen(url, timeout=10) as resp:
             raw = json.loads(resp.read())
