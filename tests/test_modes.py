@@ -123,7 +123,7 @@ def test_open_llm_chat_creates_tagged_tab(make_app):
 
     assert written['mode'] == _MODE_LLM
     assert 'llm_chat.py' in written['cmd']
-    assert 'poetry run' in written['cmd']
+    assert 'uv run' in written['cmd']
 
 
 # ── _cycle_mode: terminal -> notes -> llm -> terminal ─────────────────────────

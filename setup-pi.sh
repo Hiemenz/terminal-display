@@ -8,9 +8,9 @@
 # What it does:
 #   1. Enables SPI (required for the Waveshare e-ink panel)
 #   2. Installs system packages (git, python3, spidev, gpiozero)
-#   3. Installs Poetry
+#   3. Installs uv
 #   4. Clones or updates the repo at ~/terminal-display
-#   5. Installs Python dependencies via Poetry
+#   5. Installs Python dependencies via uv
 #   6. Creates a systemd service that starts the stats dashboard on boot
 #   7. Adds a cron job that pulls from GitHub every hour and restarts the
 #      service if anything changed
@@ -62,17 +62,17 @@ sudo apt-get install -y --no-install-recommends \
     libjpeg-dev \
     fonts-dejavu-core
 
-# ── 3. Install Poetry ───────────────────────────────────────────────────────
-if ! command -v poetry &>/dev/null; then
-    info "Installing Poetry..."
-    curl -sSL https://install.python-poetry.org | python3 -
+# ── 3. Install uv ───────────────────────────────────────────────────────────
+if ! command -v uv &>/dev/null; then
+    info "Installing uv..."
+    curl -LsSf https://astral.sh/uv/install.sh | sh
     export PATH="$HOME/.local/bin:$PATH"
     # Persist PATH for future shells
-    if ! grep -q 'poetry' "$HOME/.bashrc" 2>/dev/null; then
+    if ! grep -q '.local/bin' "$HOME/.bashrc" 2>/dev/null; then
         echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
     fi
 else
-    info "Poetry already installed: $(poetry --version)"
+    info "uv already installed: $(uv --version)"
 fi
 
 # ── 4. Clone or update repo ─────────────────────────────────────────────────
@@ -87,11 +87,9 @@ fi
 # ── 5. Python dependencies ──────────────────────────────────────────────────
 info "Installing Python dependencies..."
 cd "$INSTALL_DIR"
-# Tell Poetry to use the system python and put venv inside the project
-poetry config virtualenvs.in-project true
-# Add spidev/gpiozero from system site-packages if needed
-poetry config virtualenvs.options.system-site-packages true
-poetry install --no-interaction --no-root
+# In-project venv that can see system site-packages (spidev/gpiozero if needed)
+[ -d .venv ] || uv venv --system-site-packages
+uv sync
 
 # ── 6. Systemd service ──────────────────────────────────────────────────────
 info "Creating systemd service: $SERVICE_NAME..."
@@ -107,7 +105,7 @@ Wants=network-online.target
 Type=simple
 User=$USER
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$(which poetry) run python main.py
+ExecStart=$(which uv) run python main.py
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal
@@ -140,7 +138,7 @@ AFTER=$(git rev-parse HEAD 2>/dev/null || echo "")
 
 if [ "$BEFORE" != "$AFTER" ]; then
     echo "$(date): New version $AFTER — reinstalling deps and restarting service" | logger -t terminal-display-update
-    poetry install --no-interaction --no-root 2>&1 | logger -t terminal-display-update
+    uv sync 2>&1 | logger -t terminal-display-update
     sudo systemctl restart terminal-display
 else
     echo "$(date): No changes ($(echo "$AFTER" | cut -c1-8))" | logger -t terminal-display-update

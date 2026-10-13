@@ -13,7 +13,7 @@ other long-lived CLI session inside it.
 
 ```bash
 # Install dependencies
-poetry install
+uv sync
 
 # Terminal emulator — dev preview (saves frames to output/*.bmp)
 python eink_terminal.py --local
