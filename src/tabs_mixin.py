@@ -121,7 +121,7 @@ class TabsMixin:
 
     def _open_llm_chat(self):
         script = os.path.join(_REPO_ROOT, 'src', 'llm_chat.py')
-        cmd = f'cd {shlex.quote(_REPO_ROOT)} && poetry run python3 {shlex.quote(script)}'
+        cmd = f'cd {shlex.quote(_REPO_ROOT)} && uv run python3 {shlex.quote(script)}'
         self._open_mode_tab(_MODE_LLM, cmd)
 
     def _open_terminal(self):

@@ -19,7 +19,7 @@ see `src/eink_terminal_app.py`'s `self._local`.
 ## Quick Start
 
 ```bash
-poetry install
+uv sync
 python main.py --once --local   # render once, view output/terminal.bmp
 python main.py --local          # loop forever (macOS dev mode)
 python main.py                  # loop forever + push to e-ink (Pi)
@@ -543,5 +543,5 @@ On macOS the driver import is skipped — `output/terminal.bmp` is the preview.
 
 - On macOS `main.py` auto-detects Darwin and skips hardware push.
 - Edit `src/render.py` → re-run `--once --local` → open `output/terminal.bmp`.
-- `src/system_stats.py` can be tested standalone: `poetry run python src/system_stats.py`
+- `src/system_stats.py` can be tested standalone: `uv run python src/system_stats.py`
 - To add a new panel: add a section in `render.py` and a toggle key in `config.yaml`.

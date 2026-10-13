@@ -4,7 +4,7 @@ Run the terminal-display app and confirm the output image looks correct.
 
 ## What this skill does
 
-1. Installs dependencies if needed (`poetry install`)
+1. Installs dependencies if needed (`uv sync`)
 2. Runs `main.py --once --local` to render one frame
 3. Opens / reports `output/terminal.bmp` so you can see the result
 4. Reports any errors and suggests fixes
@@ -14,11 +14,11 @@ Run the terminal-display app and confirm the output image looks correct.
 1. Check we're in the right directory (`/Users/kevinhiemenz/git/terminal-display`).
    If not, cd there or report an error.
 
-2. Run `poetry install` to ensure psutil and pillow are installed.
+2. Run `uv sync` to ensure psutil and pillow are installed.
 
 3. Run the pipeline:
    ```
-   poetry run python main.py --once --local
+   uv run python main.py --once --local
    ```
 
 4. If it succeeded, open the output image with:
@@ -32,7 +32,7 @@ Run the terminal-display app and confirm the output image looks correct.
 
 ## Common issues
 
-- **psutil not found** → run `poetry install`
+- **psutil not found** → run `uv sync`
 - **Font not found** → falls back to PIL default automatically; no action needed
 - **waveshare_epd import error on macOS** → expected; display_eink.py skips hardware
 - **Permission errors on disk/network** → psutil may need sudo on some Linux configs;
