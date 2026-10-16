@@ -503,7 +503,7 @@ def _daily_bars(d, x: int, y: int, width: int, totals: list) -> None:
 
 def _draw_claude_usage(d, font_path: str, usage: dict,
                        reserved_bottom: int = 0,
-                       week_pct: float = None) -> None:
+                       week_pct: float | None = None) -> int:
     """Panel of recent Claude Code activity, bottom-right of the lock screen.
 
     `reserved_bottom` is how much of that corner the wake QR already occupies:
@@ -824,7 +824,7 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
                 chart_y = claude_top - _ST_GAP - _ST_BOX_H
             else:
                 chart_y = H - PAD - _ST_BOX_H
-            _draw_speedtest(d, font_path, speedtest_history,
+            _draw_speedtest(d, font_path, speedtest_history or [],
                             chart_x, chart_y, chart_w, _ST_BOX_H)
         except Exception:
             pass
@@ -860,12 +860,12 @@ def _tile_frame(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
 def _find_text_width(d: ImageDraw.ImageDraw, text: str, font: _Font) -> int:
     if hasattr(d, 'textlength'):
         return int(d.textlength(text, font=font))
-    return font.getbbox(text)[2]
+    return int(font.getbbox(text)[2])
 
 
 def _find_text_height(font: _Font) -> int:
     try:
-        return font.getbbox('Ay')[3]
+        return int(font.getbbox('Ay')[3])
     except Exception:
         return 14
 
@@ -1111,13 +1111,12 @@ def _draw_claude_usage_compact(d: ImageDraw.ImageDraw, font_path: str,
 
     # Active sessions
     try:
-        sessions = session_states(idle_minutes=30)
+        sessions = session_states()
         for sess in sessions[:2]:
             if cy + 14 > bottom:
                 break
-            txt = sess.get('label', '')
-            if not txt:
-                continue
+            project, state, _age = sess
+            txt = f'{project}: {state}'
             d.text((cx, cy), txt, font=f_sm, fill=fg)
             cy += 13
         if sessions and cy < bottom:
@@ -1176,7 +1175,7 @@ def _draw_video_tile(img: Image.Image, d: ImageDraw.ImageDraw,
         frame = Image.open(frame_path).convert('L')
         avail_w = w - 2
         avail_h = h - (cy - y) - 2
-        frame.thumbnail((avail_w, avail_h), Image.LANCZOS)
+        frame.thumbnail((avail_w, avail_h), Image.Resampling.LANCZOS)
         px = x + (w - frame.width) // 2
         py = cy + (avail_h - frame.height) // 2
         img.paste(frame, (px, py))
