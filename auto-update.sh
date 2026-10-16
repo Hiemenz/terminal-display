@@ -10,7 +10,7 @@ AFTER=$(git rev-parse HEAD 2>/dev/null || echo "")
 
 if [ "$BEFORE" != "$AFTER" ]; then
     echo "$(date): New version $AFTER — reinstalling deps and restarting service" | logger -t terminal-display-update
-    poetry install --no-interaction --no-root 2>&1 | logger -t terminal-display-update
+    uv sync 2>&1 | logger -t terminal-display-update
     sudo systemctl restart eink-display
 else
     echo "$(date): No changes ($(echo "$AFTER" | cut -c1-8))" | logger -t terminal-display-update

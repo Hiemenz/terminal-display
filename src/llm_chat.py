@@ -6,7 +6,7 @@ Launched in its own terminal tab from the F6 command palette ("Chat with
 local LLM") or by cycling modes with Ctrl+N; see _open_llm_chat in
 tabs_mixin.py. Can also be run directly for testing:
 
-    poetry run python3 src/llm_chat.py
+    uv run python3 src/llm_chat.py
 
 Model/context/thread settings come from terminal_llm_* in config.yaml.
 
@@ -204,7 +204,7 @@ def main() -> None:
     try:
         from llama_cpp import Llama
     except ImportError:
-        print('llama-cpp-python is not installed. Run: poetry add llama-cpp-python', file=sys.stderr)
+        print('llama-cpp-python is not installed. Run: uv add llama-cpp-python', file=sys.stderr)
         sys.exit(1)
 
     n_ctx = int(config.get('terminal_llm_context_size', 4096))

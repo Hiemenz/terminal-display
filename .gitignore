@@ -14,7 +14,7 @@ output/*.png
 # Gallery uploads (stored on device, not in repo)
 assets/gallery/
 
-# Poetry virtualenv if created inside project
+# uv virtualenv created inside project
 .venv/
 
 # auto-update.sh run log
