@@ -38,3 +38,16 @@ def test_tile_renders_two_lines():
     with_data = render_tile_screensaver(cfg, tile_data={'parking_history': hist})
     empty = render_tile_screensaver(cfg, tile_data={})
     assert isinstance(with_data, Image.Image) and with_data.tobytes() != empty.tobytes()
+
+
+def test_photo_screensaver_shows_parking_chart():
+    from render import render_screensaver
+    now = time.time()
+    hist = [{'ts': now - (20 - i) * 300,
+             'garages': {'Second Avenue': {'total': 257, 'occupied': 50 + i},
+                         'Fourth Avenue': {'total': 333, 'occupied': 90 - i}}}
+            for i in range(20)]
+    cfg = {'dark_mode': False}
+    a = render_screensaver('assets/test.jpg', '', cfg, parking_history=hist)
+    b = render_screensaver('assets/test.jpg', '', cfg)
+    assert a.tobytes() != b.tobytes()

@@ -736,7 +736,8 @@ def _draw_speedtest(d: ImageDraw.ImageDraw, font_path: str,
 
 def render_screensaver(image_path: str, qr_url: str, config: dict,
                        claude_usage: dict = None,
-                       speedtest_history: list = None) -> Image.Image:
+                       speedtest_history: list = None,
+                       parking_history: list = None) -> Image.Image:
     """Render the idle screensaver: background image + QR code + week-progress
     overlay, and optionally a Claude Code activity panel and speedtest chart."""
     font_path = config.get('font_path', '')
@@ -804,7 +805,10 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
 
     _ST_BOX_H = 81
     _ST_GAP = 4
-    _has_speedtest = bool(speedtest_history and config.get('screensaver_speedtest', True))
+    _has_parking = bool(parking_history and config.get('screensaver_parking', True))
+    # Parking replaces the speedtest chart in this slot.
+    _has_speedtest = (not _has_parking and bool(
+        speedtest_history and config.get('screensaver_speedtest', True)))
     chart_w = 260
 
     # Draw Claude usage tile at the very bottom-right; get its top y.
@@ -816,16 +820,20 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
         except Exception:
             pass
 
-    # Speedtest chart stacks directly above the Claude tile.
-    if _has_speedtest:
+    # Parking (or speedtest) chart stacks directly above the Claude tile.
+    if _has_parking or _has_speedtest:
         try:
             chart_x = W - PAD - chart_w
             if claude_top is not None:
                 chart_y = claude_top - _ST_GAP - _ST_BOX_H
             else:
                 chart_y = H - PAD - _ST_BOX_H
-            _draw_speedtest(d, font_path, speedtest_history or [],
-                            chart_x, chart_y, chart_w, _ST_BOX_H)
+            if _has_parking:
+                _draw_parking(d, font_path, parking_history,
+                              chart_x, chart_y, chart_w, _ST_BOX_H)
+            else:
+                _draw_speedtest(d, font_path, speedtest_history or [],
+                                chart_x, chart_y, chart_w, _ST_BOX_H)
         except Exception:
             pass
 
@@ -1124,8 +1132,9 @@ def _draw_parking(d: ImageDraw.ImageDraw, font_path: str,
         if g:
             d.text((sx, sy), f'{pct(g):.0f}%', font=f_bold, fill=_BLACK)
             sy += LINE_H
-            d.text((sx, sy), f'{max(0, g["total"] - g["occupied"])} open', font=f, fill=_BLACK)
-            sy += LINE_H
+            if height >= 110:
+                d.text((sx, sy), f'{max(0, g["total"] - g["occupied"])} open', font=f, fill=_BLACK)
+                sy += LINE_H
         # Legend swatch under the stats
         for gx in range(sx, sx + 24, 6 if styles[n] else 1):
             d.line([(gx, sy + 2), (gx + (3 if styles[n] else 1), sy + 2)], fill=_BLACK, width=1)

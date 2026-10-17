@@ -711,6 +711,7 @@ class EinkTerminal(
         try:
             _sm = getattr(self, '_speedtest_monitor', None)
             speedtest_hist = _sm.history() if _sm is not None else None
+            _pm = getattr(self, '_parking_monitor', None)
 
             if self._config.get('screensaver_mode', 'static') == 'tiles':
                 from render import render_tile_screensaver
@@ -772,7 +773,8 @@ class EinkTerminal(
 
                 img = render_screensaver(image_path, qr_url, self._config,
                                          claude_usage=self._claude_usage(),
-                                         speedtest_history=speedtest_hist)
+                                         speedtest_history=speedtest_hist,
+                                         parking_history=(_pm.history() if _pm is not None else None))
                 # Must be a flash (ordered _FULL task): full_refresh(flash=False) only
                 # sets _pending_partial, which the sleep() below immediately cancels —
                 # the screensaver would never reach the panel.
@@ -1488,7 +1490,8 @@ class EinkTerminal(
             except Exception as exc:
                 logger.debug('Speedtest monitor not started: %s', exc)
 
-        if 'parking' in (self._config.get('screensaver_tiles') or []):
+        if (self._config.get('screensaver_parking', True)
+                or 'parking' in (self._config.get('screensaver_tiles') or [])):
             try:
                 from parking_monitor import ParkingMonitor
                 self._parking_monitor = ParkingMonitor(
