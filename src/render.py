@@ -804,7 +804,7 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
             pass
 
     _ST_BOX_H = 81
-    _PK_BOX_H = 40   # one short box per garage, stacked
+    _PK_BOX_H = 112  # tall enough that a few % of movement is visible
     _ST_GAP = 4
     _has_parking = bool(parking_history and config.get('screensaver_parking', True))
     # Parking replaces the speedtest chart in this slot.
@@ -825,17 +825,14 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
     if _has_parking or _has_speedtest:
         try:
             chart_x = W - PAD - chart_w
-            box_h = _PK_BOX_H * 2 + _ST_GAP if _has_parking else _ST_BOX_H
+            box_h = _PK_BOX_H if _has_parking else _ST_BOX_H
             if claude_top is not None:
                 chart_y = claude_top - _ST_GAP - box_h
             else:
                 chart_y = H - PAD - box_h
             if _has_parking:
-                latest = parking_history[-1]['garages']
-                for i, name in enumerate(latest):
-                    _draw_parking(d, font_path, parking_history, chart_x,
-                                  chart_y + i * (_PK_BOX_H + _ST_GAP),
-                                  chart_w, _PK_BOX_H, only=name)
+                _draw_parking(d, font_path, parking_history,
+                              chart_x, chart_y, chart_w, _PK_BOX_H)
             else:
                 _draw_speedtest(d, font_path, speedtest_history or [],
                                 chart_x, chart_y, chart_w, _ST_BOX_H)
@@ -1160,15 +1157,23 @@ def _draw_parking(d: ImageDraw.ImageDraw, font_path: str,
     def _tx(ts: float) -> int:
         return cx + int(cw * max(0.0, min(1.0, (ts - cutoff) / WINDOW)))
 
+    # Zoom the y-axis to the data (rounded out to 10s, at least 20 points
+    # tall) so a few percent of movement is visible rather than a flat line.
+    vals = [pct(e['garages'][n]) for e in pts for n in names if n in e['garages']]
+    lo = max(0, int((min(vals) - 3) // 10 * 10))
+    hi = min(100, int(-(-(max(vals) + 3) // 10) * 10))
+    if hi - lo < 20:
+        lo, hi = max(0, hi - 20), max(hi, 20)
+
     def _vy(v: float) -> int:
-        return cb - int(chart_h * max(0.0, min(1.0, v / 100.0)))
+        return cb - int(chart_h * max(0.0, min(1.0, (v - lo) / (hi - lo))))
 
     d.line([(cx, cy), (cx, cb)], fill=_BLACK, width=1)
-    for v in ((100, 0) if height < 60 else (100, 50, 0)):
+    for v in ((hi, lo) if height < 60 else (hi, (hi + lo) // 2, lo)):
         vy = _vy(v)
         d.line([(cx - 2, vy), (cx, vy)], fill=_BLACK, width=1)
         d.text((cx - 3, vy - 1), f'{v}', font=f, fill=_BLACK, anchor='rm')
-        if v:
+        if v != lo:
             for gx in range(cx + 2, cx + cw, 4):
                 d.point((gx, vy), fill=180)
     d.line([(cx, cb), (cx + cw, cb)], fill=_BLACK, width=1)
