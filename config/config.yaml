@@ -390,6 +390,8 @@ screensaver_show_claude_usage: true
 # Runs a speedtest every screensaver_speedtest_interval minutes in the background.
 screensaver_speedtest: true
 screensaver_speedtest_interval: 15   # minutes between tests
+screensaver_parking: true            # Franklin garage chart on the photo screensaver (replaces the speedtest chart)
+screensaver_parking_interval: 5      # minutes between garage polls (drawing is unaffected)
 # Yardstick for the "used N%" line on the lock screen. The real weekly limit
 # is enforced server-side and isn't readable locally, so set your own token
 # budget here — or leave 0 to compare against your own 4-week average.
@@ -434,6 +436,7 @@ screensaver_cycle_interval: 5
 #   mlb       – next/live/final score for your team (requires screensaver_tiles_mlb_team_id)
 #   git       – today's commits across repos (requires screensaver_tiles_git_scan_dir)
 #   speedtest – down/up speed with a trend chart
+#   parking   – Downtown Franklin garages, % full over the last 5 h (polled every screensaver_parking_interval min)
 #   claude    – Claude Code activity (messages, tokens, daily bars)
 #   video     – a rotating frame from a video file (requires screensaver_tiles_video_path)
 #   idea      – cycles through business ideas from markdown files (requires screensaver_tiles_idea_repo)
@@ -443,7 +446,7 @@ screensaver_tiles:
   - cpu_temp
   - mlb
   - git
-  - speedtest
+  - parking
   - claude
 
 # Weather tile: city name or zip code (uses wttr.in, no API key needed)

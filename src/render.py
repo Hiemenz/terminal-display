@@ -736,7 +736,8 @@ def _draw_speedtest(d: ImageDraw.ImageDraw, font_path: str,
 
 def render_screensaver(image_path: str, qr_url: str, config: dict,
                        claude_usage: dict = None,
-                       speedtest_history: list = None) -> Image.Image:
+                       speedtest_history: list = None,
+                       parking_history: list = None) -> Image.Image:
     """Render the idle screensaver: background image + QR code + week-progress
     overlay, and optionally a Claude Code activity panel and speedtest chart."""
     font_path = config.get('font_path', '')
@@ -803,8 +804,12 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
             pass
 
     _ST_BOX_H = 81
+    _PK_BOX_H = 112  # tall enough that a few % of movement is visible
     _ST_GAP = 4
-    _has_speedtest = bool(speedtest_history and config.get('screensaver_speedtest', True))
+    _has_parking = bool(parking_history and config.get('screensaver_parking', True))
+    # Parking replaces the speedtest chart in this slot.
+    _has_speedtest = (not _has_parking and bool(
+        speedtest_history and config.get('screensaver_speedtest', True)))
     chart_w = 260
 
     # Draw Claude usage tile at the very bottom-right; get its top y.
@@ -816,16 +821,21 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
         except Exception:
             pass
 
-    # Speedtest chart stacks directly above the Claude tile.
-    if _has_speedtest:
+    # Parking (or speedtest) chart stacks directly above the Claude tile.
+    if _has_parking or _has_speedtest:
         try:
             chart_x = W - PAD - chart_w
+            box_h = _PK_BOX_H if _has_parking else _ST_BOX_H
             if claude_top is not None:
-                chart_y = claude_top - _ST_GAP - _ST_BOX_H
+                chart_y = claude_top - _ST_GAP - box_h
             else:
-                chart_y = H - PAD - _ST_BOX_H
-            _draw_speedtest(d, font_path, speedtest_history or [],
-                            chart_x, chart_y, chart_w, _ST_BOX_H)
+                chart_y = H - PAD - box_h
+            if _has_parking:
+                _draw_parking(d, font_path, parking_history,
+                              chart_x, chart_y, chart_w, _PK_BOX_H)
+            else:
+                _draw_speedtest(d, font_path, speedtest_history or [],
+                                chart_x, chart_y, chart_w, _ST_BOX_H)
         except Exception:
             pass
 
@@ -1080,6 +1090,127 @@ def _draw_speedtest_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
         d.text((x + _TILE_INSET, cy + 8), 'No data yet', font=f_body, fill=fg)
 
 
+def _garage_short(name: str) -> str:
+    """'Second Avenue' -> '2nd', 'Fourth Avenue' -> '4th'; others: first word."""
+    first = name.split()[0] if name.split() else name
+    return {'First': '1st', 'Second': '2nd', 'Third': '3rd', 'Fourth': '4th',
+            'Fifth': '5th'}.get(first, first[:4])
+
+
+def _draw_parking(d: ImageDraw.ImageDraw, font_path: str,
+                  history: list, x: int, y: int, width: int, height: int,
+                  only: str | None = None) -> None:
+    """Percent-full line chart over the last 5 h, one line per garage
+    (or just the garage named by `only`, for a short stacked box).
+
+    `history` is a list of {'ts': epoch, 'garages': {name: {'total', 'occupied'}}}
+    dicts, oldest first. Gaps wider than 20 min leave a break in the line.
+    """
+    import time as _time
+    WINDOW, GAP_SECS, BOX_PAD = 5 * 3600, 20 * 60, 6
+    LINE_H, SIDEBAR_W, Y_LBL_W = _TILE_FONT + 2, (40 if only else 62), 24
+
+    cutoff = _time.time() - WINDOW
+    pts = [e for e in history if e.get('ts', 0) >= cutoff and e.get('garages')]
+    if not pts:
+        return
+
+    def pct(g: dict) -> float:
+        return 100.0 * g['occupied'] / g['total'] if g.get('total') else 0.0
+
+    names = [only] if only else list(dict.fromkeys(n for e in pts for n in e['garages']))
+    f      = _find_font(font_path, _TILE_FONT)
+    f_bold = _find_sans(font_path, _TILE_FONT, bold=True)
+
+    d.rounded_rectangle([x, y, x + width, y + height],
+                        radius=8, fill=_WHITE, outline=_BLACK, width=1)
+
+    # Sidebar: latest % full and spaces open per garage; line style as legend.
+    sx, sy = x + BOX_PAD, y + BOX_PAD
+    last = pts[-1]['garages']
+    styles = {n: i % 2 == 1 for i, n in enumerate(names)}   # second line dashed
+    for n in names:
+        g = last.get(n)
+        d.text((sx, sy), _garage_short(n), font=f, fill=_BLACK)
+        sy += LINE_H
+        if g:
+            d.text((sx, sy), f'{pct(g):.0f}%', font=f_bold, fill=_BLACK)
+            sy += LINE_H
+            if height >= 110:
+                d.text((sx, sy), f'{max(0, g["total"] - g["occupied"])} open', font=f, fill=_BLACK)
+                sy += LINE_H
+        if only:
+            continue
+        # Legend swatch under the stats
+        for gx in range(sx, sx + 24, 6 if styles[n] else 1):
+            d.line([(gx, sy + 2), (gx + (3 if styles[n] else 1), sy + 2)], fill=_BLACK, width=1)
+        sy += 6
+
+    div_x = x + BOX_PAD + SIDEBAR_W
+    d.line([(div_x, y + BOX_PAD), (div_x, y + height - BOX_PAD)], fill=180, width=1)
+
+    cx, cy = div_x + Y_LBL_W, y + BOX_PAD
+    cw = x + width - BOX_PAD - cx
+    cb = y + height - BOX_PAD - 4
+    chart_h = cb - cy
+
+    def _tx(ts: float) -> int:
+        return cx + int(cw * max(0.0, min(1.0, (ts - cutoff) / WINDOW)))
+
+    # Zoom the y-axis to the data (rounded out to 10s, at least 20 points
+    # tall) so a few percent of movement is visible rather than a flat line.
+    vals = [pct(e['garages'][n]) for e in pts for n in names if n in e['garages']]
+    lo = max(0, int((min(vals) - 3) // 10 * 10))
+    hi = min(100, int(-(-(max(vals) + 3) // 10) * 10))
+    if hi - lo < 20:
+        lo, hi = max(0, hi - 20), max(hi, 20)
+
+    def _vy(v: float) -> int:
+        return cb - int(chart_h * max(0.0, min(1.0, (v - lo) / (hi - lo))))
+
+    d.line([(cx, cy), (cx, cb)], fill=_BLACK, width=1)
+    for v in ((hi, lo) if height < 60 else (hi, (hi + lo) // 2, lo)):
+        vy = _vy(v)
+        d.line([(cx - 2, vy), (cx, vy)], fill=_BLACK, width=1)
+        d.text((cx - 3, vy - 1), f'{v}', font=f, fill=_BLACK, anchor='rm')
+        if v != lo:
+            for gx in range(cx + 2, cx + cw, 4):
+                d.point((gx, vy), fill=180)
+    d.line([(cx, cb), (cx + cw, cb)], fill=_BLACK, width=1)
+    for tx in (cx, cx + cw // 2, cx + cw):
+        d.line([(tx, cb), (tx, cb + 3)], fill=_BLACK, width=1)
+
+    for n in names:
+        series = [(e['ts'], pct(e['garages'][n])) for e in pts if n in e['garages']]
+        prev = None
+        for i, (ts, v) in enumerate(series):
+            cur = (_tx(ts), _vy(v))
+            if prev is not None and ts - series[i - 1][0] <= GAP_SECS:
+                if styles[n]:
+                    dx, dy = cur[0] - prev[0], cur[1] - prev[1]
+                    steps = max(1, int((dx ** 2 + dy ** 2) ** 0.5) // 7)
+                    for s in range(steps):
+                        t0, t1 = s / steps, (s + 0.5) / steps
+                        d.line([(int(prev[0] + dx * t0), int(prev[1] + dy * t0)),
+                                (int(prev[0] + dx * t1), int(prev[1] + dy * t1))],
+                               fill=_BLACK, width=1)
+                else:
+                    d.line([prev, cur], fill=_BLACK, width=1)
+            prev = cur
+
+
+def _draw_parking_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
+                       font_path: str, parking_history: list | None,
+                       fg: int, bg: int) -> None:
+    f_chip = _find_font(font_path, 11)
+    cy = _tile_frame(d, x, y, w, h, 'PARKING', f_chip, fg, bg)
+    if parking_history:
+        _draw_parking(d, font_path, parking_history, x, cy, w, h - (cy - y) - 6)
+    else:
+        f_body = _find_font(font_path, 12)
+        d.text((x + _TILE_INSET, cy + 8), 'No data yet', font=f_body, fill=fg)
+
+
 def _draw_claude_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
                       font_path: str, claude_usage: dict | None, fg: int, bg: int) -> None:
     f_chip = _find_font(font_path, 11)
@@ -1258,7 +1389,7 @@ def _draw_idea_tile(d: ImageDraw.ImageDraw, x: int, y: int, w: int, h: int,
         d.text((cx, y + h - 14), mono + suffix, font=f_sm, fill=fg)
 
 
-_DEFAULT_TILES = ['weather', 'cpu_temp', 'mlb', 'git', 'speedtest', 'claude']
+_DEFAULT_TILES = ['weather', 'cpu_temp', 'mlb', 'git', 'parking', 'claude']
 
 
 def _dispatch_tile(name: str, img: Image.Image, d: ImageDraw.ImageDraw,
@@ -1275,6 +1406,8 @@ def _dispatch_tile(name: str, img: Image.Image, d: ImageDraw.ImageDraw,
         _draw_git_tile(d, x, y, w, h, font_path, all_data.get('git'), fg, bg)
     elif name == 'speedtest':
         _draw_speedtest_tile(d, x, y, w, h, font_path, all_data.get('speedtest_history'), fg, bg)
+    elif name == 'parking':
+        _draw_parking_tile(d, x, y, w, h, font_path, all_data.get('parking_history'), fg, bg)
     elif name == 'claude':
         _draw_claude_tile(d, x, y, w, h, font_path, all_data.get('claude_usage'), fg, bg)
     elif name == 'video':
@@ -1296,7 +1429,7 @@ def render_tile_screensaver(config: dict,
 
     The tile list and order come from ``screensaver_tiles`` in config (a list
     of tile name strings).  Valid names: weather, cpu_temp, mlb, git,
-    speedtest, claude, video, idea.  The grid is sized automatically:
+    speedtest, parking, claude, video, idea.  The grid is sized automatically:
     1–3 tiles → single row; 4+ tiles → 2 rows with enough columns to fit.
     """
     font_path = config.get('font_path', '')
