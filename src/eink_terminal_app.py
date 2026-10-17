@@ -361,6 +361,7 @@ class EinkTerminal(
 
         # Speedtest monitor (background thread, started in run())
         self._speedtest_monitor = None
+        self._parking_monitor = None
 
         # Tile screensaver data fetcher (background thread, started in run())
         self._tile_fetcher = None
@@ -721,6 +722,9 @@ class EinkTerminal(
                 if _tf is not None:
                     tile_data['video_frame_path'] = _tf.video_frame_path()
                     tile_data['idea'] = _tf.current_idea()
+                _pm = getattr(self, '_parking_monitor', None)
+                if _pm is not None:
+                    tile_data['parking_history'] = _pm.history()
                 img = render_tile_screensaver(
                     self._config,
                     tile_data=tile_data,
@@ -1484,6 +1488,16 @@ class EinkTerminal(
             except Exception as exc:
                 logger.debug('Speedtest monitor not started: %s', exc)
 
+        if 'parking' in (self._config.get('screensaver_tiles') or []):
+            try:
+                from parking_monitor import ParkingMonitor
+                self._parking_monitor = ParkingMonitor(
+                    interval_minutes=int(self._config.get('screensaver_parking_interval', 5) or 5),
+                    data_dir=os.path.join(_REPO_ROOT, 'data'))
+                self._parking_monitor.start()
+            except Exception as exc:
+                logger.debug('Parking monitor not started: %s', exc)
+
         if self._config.get('screensaver_mode', 'static') == 'tiles':
             try:
                 from tile_fetcher import TileFetcher
@@ -1518,6 +1532,8 @@ class EinkTerminal(
             self._driver.sleep()
             if self._speedtest_monitor is not None:
                 self._speedtest_monitor.stop()
+            if self._parking_monitor is not None:
+                self._parking_monitor.stop()
             if self._tile_fetcher is not None:
                 self._tile_fetcher.stop()
             if self._child_pid:
