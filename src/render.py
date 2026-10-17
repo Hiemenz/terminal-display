@@ -804,6 +804,7 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
             pass
 
     _ST_BOX_H = 81
+    _PK_BOX_H = 40   # one short box per garage, stacked
     _ST_GAP = 4
     _has_parking = bool(parking_history and config.get('screensaver_parking', True))
     # Parking replaces the speedtest chart in this slot.
@@ -824,13 +825,17 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
     if _has_parking or _has_speedtest:
         try:
             chart_x = W - PAD - chart_w
+            box_h = _PK_BOX_H * 2 + _ST_GAP if _has_parking else _ST_BOX_H
             if claude_top is not None:
-                chart_y = claude_top - _ST_GAP - _ST_BOX_H
+                chart_y = claude_top - _ST_GAP - box_h
             else:
-                chart_y = H - PAD - _ST_BOX_H
+                chart_y = H - PAD - box_h
             if _has_parking:
-                _draw_parking(d, font_path, parking_history,
-                              chart_x, chart_y, chart_w, _ST_BOX_H)
+                latest = parking_history[-1]['garages']
+                for i, name in enumerate(latest):
+                    _draw_parking(d, font_path, parking_history, chart_x,
+                                  chart_y + i * (_PK_BOX_H + _ST_GAP),
+                                  chart_w, _PK_BOX_H, only=name)
             else:
                 _draw_speedtest(d, font_path, speedtest_history or [],
                                 chart_x, chart_y, chart_w, _ST_BOX_H)
@@ -1096,15 +1101,17 @@ def _garage_short(name: str) -> str:
 
 
 def _draw_parking(d: ImageDraw.ImageDraw, font_path: str,
-                  history: list, x: int, y: int, width: int, height: int) -> None:
-    """Percent-full line chart over the last 5 h, one line per garage.
+                  history: list, x: int, y: int, width: int, height: int,
+                  only: str | None = None) -> None:
+    """Percent-full line chart over the last 5 h, one line per garage
+    (or just the garage named by `only`, for a short stacked box).
 
     `history` is a list of {'ts': epoch, 'garages': {name: {'total', 'occupied'}}}
     dicts, oldest first. Gaps wider than 20 min leave a break in the line.
     """
     import time as _time
     WINDOW, GAP_SECS, BOX_PAD = 5 * 3600, 20 * 60, 6
-    LINE_H, SIDEBAR_W, Y_LBL_W = _TILE_FONT + 2, 62, 24
+    LINE_H, SIDEBAR_W, Y_LBL_W = _TILE_FONT + 2, (40 if only else 62), 24
 
     cutoff = _time.time() - WINDOW
     pts = [e for e in history if e.get('ts', 0) >= cutoff and e.get('garages')]
@@ -1114,7 +1121,7 @@ def _draw_parking(d: ImageDraw.ImageDraw, font_path: str,
     def pct(g: dict) -> float:
         return 100.0 * g['occupied'] / g['total'] if g.get('total') else 0.0
 
-    names = list(dict.fromkeys(n for e in pts for n in e['garages']))
+    names = [only] if only else list(dict.fromkeys(n for e in pts for n in e['garages']))
     f      = _find_font(font_path, _TILE_FONT)
     f_bold = _find_sans(font_path, _TILE_FONT, bold=True)
 
@@ -1135,6 +1142,8 @@ def _draw_parking(d: ImageDraw.ImageDraw, font_path: str,
             if height >= 110:
                 d.text((sx, sy), f'{max(0, g["total"] - g["occupied"])} open', font=f, fill=_BLACK)
                 sy += LINE_H
+        if only:
+            continue
         # Legend swatch under the stats
         for gx in range(sx, sx + 24, 6 if styles[n] else 1):
             d.line([(gx, sy + 2), (gx + (3 if styles[n] else 1), sy + 2)], fill=_BLACK, width=1)
@@ -1155,7 +1164,7 @@ def _draw_parking(d: ImageDraw.ImageDraw, font_path: str,
         return cb - int(chart_h * max(0.0, min(1.0, v / 100.0)))
 
     d.line([(cx, cy), (cx, cb)], fill=_BLACK, width=1)
-    for v in (100, 50, 0):
+    for v in ((100, 0) if height < 60 else (100, 50, 0)):
         vy = _vy(v)
         d.line([(cx - 2, vy), (cx, vy)], fill=_BLACK, width=1)
         d.text((cx - 3, vy - 1), f'{v}', font=f, fill=_BLACK, anchor='rm')
