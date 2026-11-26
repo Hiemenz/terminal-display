@@ -831,7 +831,7 @@ def render_screensaver(image_path: str, qr_url: str, config: dict,
             else:
                 chart_y = H - PAD - box_h
             if _has_parking:
-                _draw_parking(d, font_path, parking_history,
+                _draw_parking(d, font_path, parking_history or [],
                               chart_x, chart_y, chart_w, _PK_BOX_H)
             else:
                 _draw_speedtest(d, font_path, speedtest_history or [],
@@ -1169,11 +1169,11 @@ def _draw_parking(d: ImageDraw.ImageDraw, font_path: str,
         return cb - int(chart_h * max(0.0, min(1.0, (v - lo) / (hi - lo))))
 
     d.line([(cx, cy), (cx, cb)], fill=_BLACK, width=1)
-    for v in ((hi, lo) if height < 60 else (hi, (hi + lo) // 2, lo)):
-        vy = _vy(v)
+    for tick in ((hi, lo) if height < 60 else (hi, (hi + lo) // 2, lo)):
+        vy = _vy(tick)
         d.line([(cx - 2, vy), (cx, vy)], fill=_BLACK, width=1)
-        d.text((cx - 3, vy - 1), f'{v}', font=f, fill=_BLACK, anchor='rm')
-        if v != lo:
+        d.text((cx - 3, vy - 1), f'{tick}', font=f, fill=_BLACK, anchor='rm')
+        if tick != lo:
             for gx in range(cx + 2, cx + cw, 4):
                 d.point((gx, vy), fill=180)
     d.line([(cx, cb), (cx + cw, cb)], fill=_BLACK, width=1)
