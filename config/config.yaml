@@ -421,7 +421,7 @@ screensaver_idle_timeout: 3600
 # Path to the screensaver background image (JPG, PNG, etc.).
 # Place your image here and it will be converted to grayscale for the e-ink panel.
 # Relative paths are resolved from the project root.
-screensaver_image_path: "assets/test.jpg"
+screensaver_image_path: "assets/christmas.jpg"
 
 # 'static' = one image, 'cycle' = rotate through gallery, 'tiles' = info tile grid
 screensaver_mode: static
