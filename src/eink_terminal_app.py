@@ -81,6 +81,7 @@ from picker_overlays_mixin import PickerOverlaysMixin
 from preview_server import start_if_enabled as _start_preview
 from sd_watchdog import Watchdog
 from search_mixin import SearchMixin
+from seasonal import seasonal_screensaver
 from settings_mixin import SettingsMixin
 from shell_mixin import ShellMixin
 from split_pane_mixin import SplitPaneMixin
@@ -766,6 +767,12 @@ class EinkTerminal(
                         image_path = os.path.join(photos_dir, names[0])
                 else:
                     image_path = static_path
+
+                # In season, the seasonal picture wins over gallery and static.
+                seasonal = seasonal_screensaver(self._config)
+                if seasonal:
+                    image_path = seasonal
+                    self._screensaver_is_cycle = False
 
                 port = self._config.get('preview_server_port', 8080)
                 ip = _get_local_ip()

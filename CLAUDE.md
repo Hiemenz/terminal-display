@@ -277,6 +277,7 @@ web-UI QR code sits inside the Network card.
 ## Config Options
 
 - `dark_mode: true` — white text on black background
+- `screensaver_seasonal_image_path` / `screensaver_seasonal_start` / `screensaver_seasonal_end` — yearly screensaver picture between two MM-DD days, inclusive (may wrap New Year); overrides the static image and gallery, not `tiles` mode. See `src/seasonal.py`
 - `update_interval: 30` — seconds between refreshes
 - `night_mode: true` / `night_start` / `night_end` — skip night hours
 - `show_cpu/memory/disk/network/load/top_processes/updates/ci_status: true` — toggle panels
