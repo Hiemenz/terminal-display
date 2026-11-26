@@ -3,6 +3,8 @@
 Decided each time the screensaver is drawn, so nothing has to edit the config
 or restart the app when the season starts or ends.
 """
+from __future__ import annotations
+
 import os
 from datetime import date
 
