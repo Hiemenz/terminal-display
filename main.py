@@ -44,6 +44,7 @@ from refresh_schedule import effective_intervals
 from refresh_tracker import needs_full_refresh
 from render import render, render_output, render_screensaver
 from sd_watchdog import Watchdog
+from seasonal import seasonal_screensaver
 from system_stats import collect, collect_time
 
 _REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -317,6 +318,7 @@ Examples:
     server_activity_seen = server.last_activity if server else 0.0
     in_screensaver = False
     screensaver_ip = None            # track IP for QR code refresh
+    screensaver_season = ''          # redraw when a season starts or ends
 
     switch_event = threading.Event()
     stop_event = threading.Event()
@@ -389,12 +391,17 @@ Examples:
 
         if should_screensave:
             current_ip = _primary_ip()
-            if not in_screensaver or current_ip != screensaver_ip:
+            season = seasonal_screensaver(config)
+            if (not in_screensaver or current_ip != screensaver_ip
+                    or season != screensaver_season):
                 in_screensaver = True
+                screensaver_season = season
                 screensaver_ip = current_ip
                 qr_url = f'http://{current_ip}:{preview_port}/' if current_ip else ''
                 try:
-                    active_image = get_screensaver_path(photos_dir) or _static_screensaver
+                    active_image = (season
+                                    or get_screensaver_path(photos_dir)
+                                    or _static_screensaver)
                     print(f"Screensaver — idle {idle_secs:.0f}s  img={os.path.basename(active_image)}  QR→ {qr_url}")
                     img = render_screensaver(active_image, qr_url, config)
                     if not local:

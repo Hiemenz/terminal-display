@@ -421,7 +421,14 @@ screensaver_idle_timeout: 3600
 # Path to the screensaver background image (JPG, PNG, etc.).
 # Place your image here and it will be converted to grayscale for the e-ink panel.
 # Relative paths are resolved from the project root.
-screensaver_image_path: "assets/christmas.jpg"
+screensaver_image_path: "assets/test.jpg"
+
+# Seasonal picture: shown instead of the image above (and any gallery pick)
+# every year from start through end, both included, written as MM-DD. The range
+# may wrap past New Year. Empty path = off. Not used by 'tiles' mode.
+screensaver_seasonal_image_path: "assets/christmas.jpg"
+screensaver_seasonal_start: "11-20"
+screensaver_seasonal_end: "01-06"
 
 # 'static' = one image, 'cycle' = rotate through gallery, 'tiles' = info tile grid
 screensaver_mode: static
